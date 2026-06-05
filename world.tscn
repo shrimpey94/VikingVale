@@ -1,0 +1,20 @@
+[gd_scene format=3 uid="uid://c6baq5dnic5bd"]
+
+[ext_resource type="Script" uid="uid://t1yc5joyfp5n" path="res://scripts/World.gd" id="1_world"]
+[ext_resource type="Script" uid="uid://dve5iqrkh8ugm" path="res://scripts/Ground.gd" id="2_ground"]
+[ext_resource type="Script" uid="uid://c7d6nwtv8iwre" path="res://scripts/HUD.gd" id="3_hud"]
+[ext_resource type="PackedScene" uid="uid://dnlb1u6vhb06o" path="res://player.tscn" id="4_player"]
+
+[node name="World" type="Node2D" unique_id=1593510405]
+script = ExtResource("1_world")
+
+[node name="Ground" type="Node2D" parent="." unique_id=149144306]
+script = ExtResource("2_ground")
+
+[node name="Interactables" type="Node2D" parent="." unique_id=456036586]
+
+[node name="Player" parent="." unique_id=1363916911 instance=ExtResource("4_player")]
+position = Vector2(400, 400)
+
+[node name="HUD" type="CanvasLayer" parent="." unique_id=1101298]
+script = ExtResource("3_hud")

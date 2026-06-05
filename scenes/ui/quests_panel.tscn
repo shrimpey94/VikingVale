@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/ui/QuestsPanel.gd" id="1_quests"]
+
+[node name="QuestsPanel" type="VBoxContainer"]
+script = ExtResource("1_quests")

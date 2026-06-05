@@ -1,0 +1,59 @@
+# ── Godot ─────────────────────────────────────────────────────────────────────
+# Engine cache + imported asset binaries — regenerated on first open.
+.godot/
+.import/
+*.translation
+/android/
+# Exported builds (the game .exe ships via GitHub Releases, NOT via git).
+export/
+exports/
+*.pck
+*.exe
+
+# ── Python (server + updater) ─────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+.python-version
+
+# ── PyInstaller (updater build artifacts) ─────────────────────────────────────
+build/
+dist/
+*.spec
+
+# ── Runtime data (NEVER commit live game state) ───────────────────────────────
+# game_server.db is the live SQLite DB — contains player accounts + passwords.
+game_server.db
+game_server.db-wal
+game_server.db-shm
+game_server.db-journal
+# Legacy / pre-consolidation flat files left as .bak by migration v2/v3.
+*.bak
+*.tmp
+# Legacy JSON stores (kept until migration is verified, but never tracked).
+tile_overrides.json
+shop_stock.json
+
+# ── Local IDE / editor ────────────────────────────────────────────────────────
+.vscode/
+.vs/
+.idea/
+.claude/
+*.swp
+*.swo
+
+# ── OS junk ───────────────────────────────────────────────────────────────────
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store
+
+# ── Logs + secrets ────────────────────────────────────────────────────────────
+*.log
+.env
+.env.*
+credentials.json
