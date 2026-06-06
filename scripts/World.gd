@@ -479,12 +479,16 @@ func _on_mob_hit(entity_id: String, _x: float, _y: float, _amount: int, _by: Str
 		m.call("set_server_hp", hp, max_hp)
 		m.call("flash_hit")
 
-func _on_mob_died(entity_id: String, killer: String, xp_each: int, participants: Array) -> void:
+func _on_mob_died(entity_id: String, killer: String, xp_each: int,
+		_participants: Array, xp_recipients: Array) -> void:
 	var m: Variant = _reg_mob(entity_id)
 	if m == null:
 		return
 	var me := NetworkManager.my_username
-	if me in participants and xp_each > 0:
+	# Eligibility now lives in xp_recipients (damagers + warband-shared),
+	# NOT in participants. Chunk-streamers who joined for visibility but
+	# never dealt damage are intentionally excluded from this list.
+	if me in xp_recipients and xp_each > 0:
 		# Kill reward, split evenly by the server, mirrors the local _award_combat_xp split.
 		GameManager.add_xp("melee", xp_each)
 		GameManager.add_xp("defense", maxi(1, floori(xp_each * 0.3)))

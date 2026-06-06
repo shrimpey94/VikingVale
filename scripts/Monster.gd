@@ -238,7 +238,7 @@ func _input_event(_viewport: Viewport, event: InputEvent, _shape: int) -> void:
 func take_damage(amount: int) -> int:
 	var dmg := maxi(1, amount - defense)
 	current_hp = maxi(0, current_hp - dmg)
-	_hit_flash = 0.30
+	_hit_flash = 0.10
 	queue_redraw()
 	if current_hp <= 0:
 		_die()
@@ -308,7 +308,7 @@ func set_server_hp(hp: int, maximum: int) -> void:
 	queue_redraw()
 
 func flash_hit() -> void:
-	_hit_flash = 0.30
+	_hit_flash = 0.10
 	queue_redraw()
 
 ## Visual death only — XP/loot are handled by World based on the server result.
@@ -360,9 +360,11 @@ func _draw() -> void:
 		bob  = sin(_time * 2.2) * 1.5
 		sway = 0.0
 	# Hit reaction — recoil shake while the damage flash is active.
+	# Shake formula re-normalized for the shorter 0.10s flash window so the
+	# motion still feels punchy rather than imperceptible.
 	var shake := 0.0
 	if _hit_flash > 0.0:
-		shake = sin(_hit_flash * 90.0) * (_hit_flash / 0.30) * 3.0
+		shake = sin(_hit_flash * 120.0) * (_hit_flash / 0.10) * 3.0
 	draw_set_transform(Vector2(shake + sway, bob), 0.0, Vector2.ONE)
 	_draw_outline()
 	match monster_type:
@@ -395,7 +397,10 @@ func _draw() -> void:
 	if is_hovered:
 		draw_circle(Vector2.ZERO, _radius() + 3.0, Color(1, 1, 0, 0.25))
 	if _hit_flash > 0.0:
-		draw_circle(Vector2.ZERO, _radius() + 2.0, Color(1.0, 0.25, 0.25, _hit_flash * 0.65))
+		# White flash sized to envelope the sprite — alpha tracks the timer
+		# linearly so the pop fades cleanly over the 0.10s window.
+		var a := clampf(_hit_flash / 0.10, 0.0, 1.0)
+		draw_circle(Vector2.ZERO, _radius() + 2.0, Color(1.0, 1.0, 1.0, a * 0.85))
 	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 	_draw_hp_bar()
 

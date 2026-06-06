@@ -4862,14 +4862,50 @@ async def _handle_monster_damage(ws, session: dict, msg: dict) -> None:
 async def _monster_die(mid: str, st: dict) -> None:
     st["alive"] = False
     st["respawn_until"] = time.time() + MONSTER_RESPAWN
-    killer_pid = max(st["damage"], key=st["damage"].get) if st["damage"] else None
-    n = max(1, len(st["participants"]))
+    damage_dict = st.get("damage", {})
+    # Killer = top-damage dealer. Drives loot drop authority on the client.
+    killer_pid = max(damage_dict, key=damage_dict.get) if damage_dict else None
+    # XP eligibility — ONLY players who dealt damage, plus the warband rule.
+    # World.gd sends monster_join for every chunk-streamed monster (so the
+    # server knows they exist), which adds chunk-loaders to `participants`
+    # without them ever engaging. We can't trust participants here; damage
+    # is the only honest signal of "this player actually fought".
+    damagers = [pid for pid, dmg in damage_dict.items() if int(dmg) > 0]
+    # Warband rule — if 2+ players from the SAME warband dealt damage, every
+    # member of that warband who joined the fight (participants list) also
+    # gets full XP, including those who didn't personally swing. Solo
+    # warband members fall back to the per-player default.
+    warband_of: dict = {}
+    with _db() as conn:
+        for pid in damagers:
+            wb = _clan_id_for_player(conn, pid)
+            if wb:
+                warband_of[pid] = wb
+        warband_counts: dict = {}
+        for wb in warband_of.values():
+            warband_counts[wb] = warband_counts.get(wb, 0) + 1
+        bonus_warbands = {wb for wb, n in warband_counts.items() if n >= 2}
+        xp_recipient_pids = set(damagers)
+        if bonus_warbands:
+            for pid in st.get("participants", []):
+                if pid in xp_recipient_pids:
+                    continue
+                wb = _clan_id_for_player(conn, pid)
+                if wb in bonus_warbands:
+                    xp_recipient_pids.add(pid)
+    n = max(1, len(xp_recipient_pids))
     xp_each = max(1, st["xp_reward"] // n)
+    # Resolve all three lists to usernames in one pass.
     part_names = []
     for pid in st["participants"]:
         pws = _ws_for_player(pid)
         if pws is not None:
             part_names.append(sessions[pws]["username"])
+    xp_recipients = []
+    for pid in xp_recipient_pids:
+        pws = _ws_for_player(pid)
+        if pws is not None:
+            xp_recipients.append(sessions[pws]["username"])
     killer_name = ""
     if killer_pid is not None:
         kws = _ws_for_player(killer_pid)
@@ -4877,7 +4913,10 @@ async def _monster_die(mid: str, st: dict) -> None:
             killer_name = sessions[kws]["username"]
     _broadcast_near(st["x"], st["y"],
                     {"type": "monster_died", "id": mid, "killer": killer_name,
-                     "xp_each": xp_each, "participants": part_names})
+                     "xp_each": xp_each, "participants": part_names,
+                     # Authoritative XP-eligible username list. Clients
+                     # check membership in THIS, not in `participants`.
+                     "xp_recipients": xp_recipients})
     # Phase 5 gold drop — server rolls amount + broadcasts a world pile to
     # nearby clients. First player to walk over and pick it up wins the
     # whole pile (see _handle_gold_pile_pickup). Monsters not in
@@ -4887,30 +4926,16 @@ async def _monster_die(mid: str, st: dict) -> None:
     if gmax > 0:
         amount = random.randint(gmin, gmax)
         _spawn_gold_pile(st["x"], st["y"], amount)
-    # Quest progress — every participant gets credit for kill-type
-    # objectives matching this monster_type. Only push state to clients
-    # whose row actually changed (the helper returns True per player).
-    for pid in part_names_to_ids(part_names):
+    # Quest progress — only XP-eligible players (damagers + warband-shared)
+    # get kill credit. Mirrors the XP rule so chunk-streamers aren't given
+    # progress on quests they didn't actually fight for.
+    for pid in xp_recipient_pids:
         if _quest_progress(pid, "kill", mtype, 1):
             pws = _ws_for_player(pid)
             if pws is not None:
                 await _push_quest_state(pws, sessions[pws])
     st["participants"] = []
     st["damage"] = {}
-
-
-def part_names_to_ids(names: list) -> list:
-    """Maps a list of usernames back to player_ids by looking them up in the
-    live sessions dict. Used by the kill-quest progress hook so every
-    participant in a shared fight gets credit. Players who logged out before
-    the death tick aren't credited — their session is gone."""
-    out = []
-    for nm in names:
-        for s in sessions.values():
-            if s.get("username") == nm:
-                out.append(s["id"])
-                break
-    return out
 
 
 async def _handle_monster_leave(ws, session: dict, msg: dict) -> None:

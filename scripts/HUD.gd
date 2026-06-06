@@ -196,6 +196,11 @@ const PROXIMITY_RADIUS := 96.0   # 3 tiles at 32 px/tile
 var _last_interaction_pos: Vector2 = Vector2.ZERO
 var _has_last_interaction: bool    = false
 
+# Dedicated CanvasLayer at layer 95 for floating damage numbers + the red
+# vignette flash. Lives above every HUD modal so combat feedback is never
+# occluded by a panel that happened to be open. Lazy-built on first use.
+var _dmg_layer: CanvasLayer = null
+
 # Thrall tab internals
 var _thrall_task_list: VBoxContainer = null
 
@@ -2963,25 +2968,107 @@ func _award_combat_xp() -> void:
 
 # ── Overworld combat helpers ──────────────────────────────────────────────────
 
-func _show_damage_number(world_pos: Vector2, amount: int, from_player: bool) -> void:
+## Floating damage number above the world target. Lives on a dedicated
+## CanvasLayer at layer 95 (above HUD UI / QuestLog modal / everything) so
+## the readout is never occluded by panels that pop mid-fight.
+##
+## `from_player` = true  → monster took damage. White/yellow text.
+## `from_player` = false → player took damage. Red text + screen vignette.
+## `critical`   = true   → gold text, +4 font size. Hook is in place for
+##                         when the combat system flags crits; no path
+##                         currently sets it.
+func _show_damage_number(world_pos: Vector2, amount: int,
+		from_player: bool, critical: bool = false) -> void:
+	if _dmg_layer == null:
+		_build_dmg_layer()
 	var canvas_pos: Vector2 = get_viewport().get_canvas_transform() * world_pos
 	var lbl := Label.new()
 	lbl.text = "-%d" % amount
-	var col := Color(1.0, 1.0, 1.0, 1.0) if from_player else Color(1.0, 0.22, 0.22, 1.0)
+	# Palette per spec: white/yellow for the player's hits, red for the
+	# monster's hits, gold for crits. Bold outline for legibility on bright
+	# tile backgrounds.
+	var col: Color
+	var fs: int = 16
+	if critical:
+		col = Color(1.00, 0.85, 0.20)
+		fs  = 20
+	elif from_player:
+		col = Color(1.00, 0.98, 0.65)   # warm yellow-white
+	else:
+		col = Color(1.00, 0.30, 0.30)
 	lbl.add_theme_color_override("font_color", col)
-	lbl.add_theme_font_size_override("font_size", 14)
-	lbl.add_theme_color_override("font_shadow_color", Color(0.0, 0.0, 0.0, 0.85))
-	lbl.add_theme_constant_override("shadow_offset_x", 1)
-	lbl.add_theme_constant_override("shadow_offset_y", 1)
-	var start_x: float = canvas_pos.x + randf_range(-12.0, 12.0)
-	var start_y: float = canvas_pos.y - 20.0
+	lbl.add_theme_font_size_override("font_size", fs)
+	lbl.add_theme_color_override("font_outline_color", Color(0.0, 0.0, 0.0, 1.0))
+	lbl.add_theme_constant_override("outline_size", 3)
+	var start_x: float = canvas_pos.x + randf_range(-8.0, 8.0)
+	var start_y: float = canvas_pos.y - 24.0
 	lbl.position = Vector2(start_x - 12.0, start_y)
-	add_child(lbl)
+	_dmg_layer.add_child(lbl)
+	# Float upward 30 px over 0.8 s, fade to transparent in the same window.
 	var tw := lbl.create_tween()
 	tw.set_parallel(true)
-	tw.tween_property(lbl, "position:y", start_y - 44.0, 1.0).set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_QUAD)
-	tw.tween_property(lbl, "modulate:a", 0.0, 1.0).set_ease(Tween.EASE_IN).set_trans(Tween.TRANS_QUAD)
+	tw.tween_property(lbl, "position:y", start_y - 30.0, 0.8) \
+		.set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_QUAD)
+	tw.tween_property(lbl, "modulate:a", 0.0, 0.8) \
+		.set_ease(Tween.EASE_IN).set_trans(Tween.TRANS_QUAD)
 	tw.chain().tween_callback(func() -> void: lbl.queue_free())
+	# Player took damage → flash the screen edges red. The vignette also
+	# lives on _dmg_layer so it sits above all other UI.
+	if not from_player:
+		_show_damage_vignette()
+
+## Lazy-init the dedicated CanvasLayer for damage numbers + vignette. Layer
+## 95 puts it above QuestLog (80) and quest dialog (85) so combat feedback
+## never gets hidden behind a modal that was already open.
+func _build_dmg_layer() -> void:
+	_dmg_layer = CanvasLayer.new()
+	_dmg_layer.layer = 95
+	get_tree().root.add_child.call_deferred(_dmg_layer)
+
+## Red screen-edge vignette — four ColorRects (top/bottom/left/right) that
+## fade from full alpha to transparent over 0.2 s. Approximates a real
+## radial vignette without needing a shader. Spawned only on player hits.
+func _show_damage_vignette() -> void:
+	if _dmg_layer == null:
+		_build_dmg_layer()
+	var wrap := Control.new()
+	wrap.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	wrap.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_dmg_layer.add_child(wrap)
+	var thickness := 80.0
+	var col := Color(0.95, 0.10, 0.10, 0.55)
+	# Top bar
+	var top := ColorRect.new()
+	top.color = col
+	top.anchor_left = 0.0; top.anchor_right = 1.0
+	top.offset_bottom = thickness
+	wrap.add_child(top)
+	# Bottom bar
+	var bot := ColorRect.new()
+	bot.color = col
+	bot.anchor_left = 0.0; bot.anchor_right = 1.0
+	bot.anchor_top  = 1.0; bot.anchor_bottom = 1.0
+	bot.offset_top  = -thickness
+	wrap.add_child(bot)
+	# Left bar
+	var lft := ColorRect.new()
+	lft.color = col
+	lft.anchor_top = 0.0; lft.anchor_bottom = 1.0
+	lft.offset_right = thickness
+	wrap.add_child(lft)
+	# Right bar
+	var rgt := ColorRect.new()
+	rgt.color = col
+	rgt.anchor_left  = 1.0; rgt.anchor_right = 1.0
+	rgt.anchor_top   = 0.0; rgt.anchor_bottom = 1.0
+	rgt.offset_left  = -thickness
+	wrap.add_child(rgt)
+	# Single tween on the wrapping Control's modulate handles all four bars
+	# at once. 0.2 s fade per spec.
+	var tw := wrap.create_tween()
+	tw.tween_property(wrap, "modulate:a", 0.0, 0.2) \
+		.set_ease(Tween.EASE_IN).set_trans(Tween.TRANS_QUAD)
+	tw.chain().tween_callback(func() -> void: wrap.queue_free())
 
 func _on_player_died() -> void:
 	var flash := ColorRect.new()

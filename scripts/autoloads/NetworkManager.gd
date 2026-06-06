@@ -764,8 +764,15 @@ func _handle(msg: Dictionary) -> void:
 				int(msg.get("hp", 0)), int(msg.get("max_hp", 1)))
 
 		"monster_died":
+			# xp_recipients defaults to participants for old server builds
+			# that haven't shipped the eligibility-fix patch yet — keeps the
+			# client compatible with both versions during the rollout.
+			var xpr: Variant = msg.get("xp_recipients",
+				msg.get("participants", []))
 			Events.mob_died.emit(str(msg.get("id", "")), str(msg.get("killer", "")),
-				int(msg.get("xp_each", 0)), msg.get("participants", []) as Array)
+				int(msg.get("xp_each", 0)),
+				msg.get("participants", []) as Array,
+				xpr as Array)
 
 		"monster_respawned":
 			Events.mob_respawned.emit(str(msg.get("id", "")))

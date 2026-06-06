@@ -73,7 +73,12 @@ extends Node
 ## Shared combat (server-authoritative monsters)
 @warning_ignore("unused_signal") signal mob_state(entity_id: String, hp: int, max_hp: int)
 @warning_ignore("unused_signal") signal mob_hit(entity_id: String, x: float, y: float, amount: int, by_username: String, hp: int, max_hp: int)
-@warning_ignore("unused_signal") signal mob_died(entity_id: String, killer: String, xp_each: int, participants: Array)
+## xp_recipients is the AUTHORITATIVE list of usernames that should award
+## XP for this kill. Computed server-side from the damage dict + the
+## warband rule (2+ same-warband damagers → all warband participants share).
+## participants is preserved for UI display ("Bjorn and Sigrid killed the
+## troll") but never used for XP eligibility.
+@warning_ignore("unused_signal") signal mob_died(entity_id: String, killer: String, xp_each: int, participants: Array, xp_recipients: Array)
 @warning_ignore("unused_signal") signal mob_respawned(entity_id: String)
 @warning_ignore("unused_signal") signal mob_dead_on_join(entity_id: String, respawn_in: float)
 @warning_ignore("unused_signal") signal mob_full(entity_id: String)

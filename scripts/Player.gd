@@ -9,6 +9,15 @@ const TILE := 32.0
 const INTERACT_RANGE  := 54.0
 const MELEE_RANGE     := 40.0
 const DISENGAGE_RANGE := 160.0
+# Combat-style attack ranges. On melee, the engagement distance is computed
+# per-monster from its shadow footprint (edge-to-edge gap of MELEE_EDGE_GAP);
+# ranged and magic use a fixed cone the player must already be inside when
+# clicking. Disengage extends each by 20% so a target nudging out a few
+# pixels doesn't immediately break the fight.
+const MELEE_EDGE_GAP  := 2.0     # px gap between player edge and monster edge
+const PLAYER_RADIUS   := 8.0     # rough horizontal half-width of the sprite
+const RANGED_RANGE    := 350.0
+const MAGIC_RANGE     := 400.0
 
 enum PlayerState { IDLE, MOVING, ACTING }
 
@@ -164,7 +173,58 @@ func _on_monster_targeted(monster: Node) -> void:
 	if _state == PlayerState.ACTING:
 		Events.player_stop_action.emit()
 	_target_interactable = null
-	_target_monster      = monster
+	if monster == null or not (monster is Node2D):
+		return
+	var style := GameManager.combat_style
+	var dist := global_position.distance_to((monster as Node2D).global_position)
+	# ── Ranged: check arrows + in-range, then start without moving ──
+	if style == "ranged":
+		if GameManager.get_item_qty("arrows") <= 0:
+			Events.chat_message.emit("You have no arrows.")
+			return
+		if dist > RANGED_RANGE:
+			Events.chat_message.emit("Target is out of range.")
+			return
+		_target_monster = monster
+		_target_pos     = global_position   # stand still
+		Events.open_combat.emit(monster)
+		_in_combat = true
+		return
+	# ── Magic: check active rune in stock + in-range, then start without moving ──
+	if style == "magic":
+		var rune_id: String = GameManager.active_rune
+		if rune_id == "" or GameManager.get_item_qty(rune_id) <= 0:
+			Events.chat_message.emit("You don't have enough runes.")
+			return
+		if dist > MAGIC_RANGE:
+			Events.chat_message.emit("Target is out of range.")
+			return
+		_target_monster = monster
+		_target_pos     = global_position
+		Events.open_combat.emit(monster)
+		_in_combat = true
+		return
+	# ── Melee: walk in until edge-to-edge gap is satisfied ──
+	_target_monster = monster
+
+## Edge-to-edge stop distance for melee. Sum of player radius + the monster's
+## horizontal shadow-footprint radius + MELEE_EDGE_GAP. Falls back to a
+## sensible default if the monster doesn't expose _shadow_footprint.
+func _melee_stop_dist(monster: Node) -> float:
+	var mr := 10.0
+	if monster.has_method("_shadow_footprint"):
+		var fp: Vector2 = monster.call("_shadow_footprint") as Vector2
+		mr = fp.x
+	return PLAYER_RADIUS + mr + MELEE_EDGE_GAP
+
+## World-space point on the line from monster→player at the stop distance.
+## The player walks here instead of the monster's center so they end up just
+## outside the body silhouette.
+func _melee_stop_pos(monster: Node2D, stop_dist: float) -> Vector2:
+	var to_player := global_position - monster.global_position
+	if to_player.length() < 0.5:
+		return monster.global_position + Vector2(stop_dist, 0.0)
+	return monster.global_position + to_player.normalized() * stop_dist
 
 func _on_combat_ended_player() -> void:
 	_target_monster = null
@@ -211,20 +271,33 @@ func _physics_process(delta: float) -> void:
 	if _ground == null:
 		_ground = get_tree().get_first_node_in_group("ground")
 
-	# Monster approach / disengage (runs every frame before movement)
+	# Monster approach / disengage (runs every frame before movement).
+	# Approach behavior depends on the active combat style:
+	#   melee  — walk in until edge-to-edge gap is satisfied, then auto-engage.
+	#   ranged — engagement was set at click time; only disengage if too far.
+	#   magic  — same as ranged.
 	if _target_monster != null:
 		if not is_instance_valid(_target_monster) or not (_target_monster.get("is_alive") as bool):
 			_target_monster = null
 			_in_combat      = false
 		else:
-			var dist := global_position.distance_to((_target_monster as Node2D).global_position)
-			if _in_combat and dist > DISENGAGE_RANGE:
+			var mon2d := _target_monster as Node2D
+			var dist := global_position.distance_to(mon2d.global_position)
+			var style := GameManager.combat_style
+			var disengage: float
+			match style:
+				"ranged": disengage = RANGED_RANGE * 1.20
+				"magic":  disengage = MAGIC_RANGE  * 1.20
+				_:        disengage = DISENGAGE_RANGE
+			if _in_combat and dist > disengage:
 				Events.combat_ended.emit()
-			elif not _in_combat and dist <= MELEE_RANGE:
-				Events.open_combat.emit(_target_monster)
-				_in_combat = true
-			elif not _in_combat:
-				_target_pos = (_target_monster as Node2D).global_position
+			elif not _in_combat and style == "melee":
+				var stop_dist := _melee_stop_dist(_target_monster)
+				if dist <= stop_dist + 0.5:
+					Events.open_combat.emit(_target_monster)
+					_in_combat = true
+				else:
+					_target_pos = _melee_stop_pos(mon2d, stop_dist)
 
 	var spd := _move_speed()
 	var kb := _keyboard_direction()
