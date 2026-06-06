@@ -6,12 +6,14 @@
 [ext_resource type="PackedScene" uid="uid://dnlb1u6vhb06o" path="res://player.tscn" id="4_player"]
 
 [node name="World" type="Node2D" unique_id=1593510405]
+y_sort_enabled = true
 script = ExtResource("1_world")
 
 [node name="Ground" type="Node2D" parent="." unique_id=149144306]
 script = ExtResource("2_ground")
 
 [node name="Interactables" type="Node2D" parent="." unique_id=456036586]
+y_sort_enabled = true
 
 [node name="Player" parent="." unique_id=1363916911 instance=ExtResource("4_player")]
 position = Vector2(400, 400)

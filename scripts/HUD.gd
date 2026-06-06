@@ -387,6 +387,26 @@ func _build_ui() -> void:
 	_build_quest_log()
 	_build_quest_dialog()
 	_build_quest_markers()
+	_build_vignette()
+
+# Post-processing vignette — fullscreen ColorRect at layer 2, above world
+# (layer 0) and HUD UI (default layer 1) but below QuestMarkers (5), quest
+# modals (80/85), and the damage layer (95). Modal panels and combat
+# feedback stay undimmed; the world and HUD chrome get the cinematic edge.
+const _VIGNETTE_SHADER = preload("res://shaders/vignette.gdshader")
+var _vignette_layer: CanvasLayer = null
+func _build_vignette() -> void:
+	_vignette_layer = CanvasLayer.new()
+	_vignette_layer.layer = 2
+	var rect := ColorRect.new()
+	rect.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	rect.color = Color.WHITE   # shader overwrites COLOR in fragment
+	var mat := ShaderMaterial.new()
+	mat.shader = _VIGNETTE_SHADER
+	rect.material = mat
+	_vignette_layer.add_child.call_deferred(rect)
+	get_tree().root.add_child.call_deferred(_vignette_layer)
 
 # Floating WoW-style QuestLog modal. Self-managing: spawns once at startup
 # and listens for Events.open_quest_log to show itself; auto-refreshes on
