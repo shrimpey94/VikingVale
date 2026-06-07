@@ -87,6 +87,8 @@ static func entries() -> Array:
 		_res("herb", "Herb Patch",      "foraging",  1, "Pick", Color(0.62, 0.82, 0.20)),
 		_res("herb", "Mushroom Patch",  "foraging", 10, "Pick", Color(0.72, 0.55, 0.38)),
 		_res("herb", "Moonbloom Patch", "foraging", 40, "Pick", Color(0.78, 0.62, 0.95)),
+		_res("herb", "Berry Bush",      "foraging", 25, "Pick", Color(0.24, 0.50, 0.20)),
+		_res("herb", "Ancient Root",    "foraging", 65, "Pick", Color(0.42, 0.28, 0.12)),
 		# ── Stations / structures (admin-placeable; town-only by default) ─────
 		_res("forge",        "Forge",          "smithing",     1, "Use",     Color(0.60, 0.45, 0.20)),
 		_res("fire",         "Campfire",       "cooking",      1, "Cook",    Color(0.95, 0.55, 0.10)),

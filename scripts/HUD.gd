@@ -163,8 +163,17 @@ var _bank_stash_slots: Array[Dictionary] = []   # same, for bank storage
 
 # Chat
 var _chat_vbox:       VBoxContainer  = null
-var _chat_history:    Array[String]  = []
-const CHAT_MAX       := 40
+# Each history entry: {text: String, category: String} — category is one of
+# "world" / "private" / "events". Used to filter the displayed list when
+# the player switches tabs. CHAT_MAX caps the buffer globally; per-tab
+# display is just a filter over the same buffer.
+var _chat_history:    Array[Dictionary] = []
+const CHAT_MAX       := 120
+const CHAT_CAT_WORLD   := "world"
+const CHAT_CAT_PRIVATE := "private"
+const CHAT_CAT_EVENTS  := "events"
+var _chat_active_cat:  String = "world"
+var _chat_tab_btns:    Dictionary = {}    # category → Button
 var _chat_panel:      PanelContainer = null
 var _chat_content:    VBoxContainer  = null   # scroll + line_edit wrapper
 var _chat_minimized:  bool           = false
@@ -1290,7 +1299,7 @@ func _start_whisper(username: String) -> void:
 	if _chat_minimized:
 		_chat_minimized = false
 		_chat_content.visible = true
-		_chat_panel.offset_top = -220
+		_chat_panel.offset_top = -CHAT_H - 60
 	_chat_line_edit.text = "/w %s " % username
 	_chat_line_edit.grab_focus()
 	_chat_line_edit.caret_column = _chat_line_edit.text.length()
@@ -1799,11 +1808,12 @@ func _build_persistent_combat_strip() -> void:
 	panel.add_theme_stylebox_override("panel", _rs(RS_BG, RS_BORDER, 2))
 	panel.anchor_left = 1.0; panel.anchor_right = 1.0
 	panel.anchor_top  = 1.0; panel.anchor_bottom = 1.0
-	# Sits ABOVE the chat panel (chat occupies offset_top -220 → bottom -44).
-	# Width matches the chat for visual alignment. Tall enough for both the
-	# style row and a rune sub-row underneath.
-	panel.offset_left   = -286; panel.offset_right  = -6
-	panel.offset_top    = -286; panel.offset_bottom = -224
+	# Sits ABOVE the chat panel. Chat is now 2.5× larger (CHAT_W × CHAT_H,
+	# top at -CHAT_H-60); the strip clears it with a 4 px gap. Width also
+	# matched to CHAT_W for visual alignment along the right edge.
+	panel.offset_left   = -CHAT_W - 6; panel.offset_right  = -6
+	panel.offset_top    = -CHAT_H - 128
+	panel.offset_bottom = -CHAT_H - 64
 	add_child(panel)
 
 	var root := VBoxContainer.new()
@@ -3686,46 +3696,71 @@ func _fill_bank_slot(s: Dictionary, items: Array, i: int) -> void:
 	qty_lbl.text = "x%d" % item["qty"]
 
 # ── CHAT BOX ──────────────────────────────────────────────────────────────────
+## Chat panel — 2.5× larger than the original (480×400 vs 280×176) with
+## three filter tabs at the top: World, Private, Events. Messages flow
+## into a single history buffer with per-message category tagging; the
+## active tab filters which messages render.
+const CHAT_W := 480
+const CHAT_H := 400
 func _build_chat_box() -> void:
 	var chat_bg := StyleBoxFlat.new()
-	chat_bg.bg_color = Color(0.06, 0.04, 0.02, 0.88)
+	chat_bg.bg_color = Color(0.06, 0.04, 0.02, 0.90)
 	chat_bg.set_border_width_all(2)
 	chat_bg.border_color = RS_BORDER.darkened(0.3)
-	chat_bg.set_corner_radius_all(2)
+	chat_bg.set_corner_radius_all(3)
 
 	_chat_panel = PanelContainer.new()
 	_chat_panel.add_theme_stylebox_override("panel", chat_bg)
 	_chat_panel.anchor_left   = 1.0; _chat_panel.anchor_right  = 1.0
 	_chat_panel.anchor_top    = 1.0; _chat_panel.anchor_bottom = 1.0
-	_chat_panel.offset_left   = -286; _chat_panel.offset_right  = -6
-	_chat_panel.offset_top    = -220; _chat_panel.offset_bottom = -44
+	_chat_panel.offset_left   = -CHAT_W - 6; _chat_panel.offset_right  = -6
+	_chat_panel.offset_top    = -CHAT_H - 60; _chat_panel.offset_bottom = -60
 	add_child(_chat_panel)
 
 	var vbox := VBoxContainer.new()
-	vbox.add_theme_constant_override("separation", 2)
+	vbox.add_theme_constant_override("separation", 4)
 	_chat_panel.add_child(vbox)
 
-	# Header row with title + collapse button
+	# Header: title + collapse button.
 	var hdr := HBoxContainer.new()
-	hdr.add_theme_constant_override("separation", 0)
+	hdr.add_theme_constant_override("separation", 2)
 	vbox.add_child(hdr)
 	var chat_title := Label.new()
 	chat_title.text = "Chat"
 	chat_title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	chat_title.add_theme_color_override("font_color", RS_DIM)
-	chat_title.add_theme_font_size_override("font_size", 9)
+	chat_title.add_theme_font_size_override("font_size", 13)
 	hdr.add_child(chat_title)
 	var chat_collapse := Button.new()
 	chat_collapse.text = "▲"
 	chat_collapse.flat = true
-	chat_collapse.custom_minimum_size = Vector2(16, 14)
-	chat_collapse.add_theme_font_size_override("font_size", 8)
+	chat_collapse.custom_minimum_size = Vector2(28, 22)
+	chat_collapse.add_theme_font_size_override("font_size", 12)
 	chat_collapse.add_theme_color_override("font_color", RS_DIM)
 	hdr.add_child(chat_collapse)
 
-	# Content: scroll + input (wrapped so we can hide both at once)
+	# Tab row — World / Private / Events filter.
+	var tab_row := HBoxContainer.new()
+	tab_row.add_theme_constant_override("separation", 4)
+	vbox.add_child(tab_row)
+	for entry: Array in [
+			["World",   CHAT_CAT_WORLD],
+			["Private", CHAT_CAT_PRIVATE],
+			["Events",  CHAT_CAT_EVENTS],
+		]:
+		var btn := Button.new()
+		btn.text = entry[0]
+		btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		btn.custom_minimum_size = Vector2(0, 26)
+		btn.add_theme_font_size_override("font_size", 12)
+		var cat: String = entry[1]
+		btn.pressed.connect(func() -> void: _set_chat_category(cat))
+		tab_row.add_child(btn)
+		_chat_tab_btns[cat] = btn
+
+	# Content: scroll + input (wrapped so we can hide both at once).
 	_chat_content = VBoxContainer.new()
-	_chat_content.add_theme_constant_override("separation", 2)
+	_chat_content.add_theme_constant_override("separation", 4)
 	_chat_content.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	vbox.add_child(_chat_content)
 
@@ -3736,12 +3771,13 @@ func _build_chat_box() -> void:
 
 	_chat_vbox = VBoxContainer.new()
 	_chat_vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_chat_vbox.add_theme_constant_override("separation", 1)
+	_chat_vbox.add_theme_constant_override("separation", 2)
 	scroll.add_child(_chat_vbox)
 
 	var line_edit := LineEdit.new()
-	line_edit.placeholder_text = "..."
-	line_edit.add_theme_font_size_override("font_size", 9)
+	line_edit.placeholder_text = "Type to chat..."
+	line_edit.custom_minimum_size = Vector2(0, 30)
+	line_edit.add_theme_font_size_override("font_size", 14)
 	line_edit.add_theme_color_override("font_color", RS_TEXT)
 	line_edit.add_theme_stylebox_override("normal", _rs(RS_BTN_N, RS_BORDER.darkened(0.4), 1))
 	line_edit.add_theme_stylebox_override("focus",  _rs(RS_BTN_N, RS_BORDER, 1))
@@ -3758,38 +3794,103 @@ func _build_chat_box() -> void:
 		_chat_minimized = not _chat_minimized
 		_chat_content.visible = not _chat_minimized
 		chat_collapse.text = "▼" if _chat_minimized else "▲"
-		# Collapsed: panel shrinks to header only (~22px from bottom)
-		_chat_panel.offset_top = -66 if _chat_minimized else -220)
+		# Collapsed: panel shrinks to header + tabs (~80px); expanded:
+		# returns to full CHAT_H + 60 bottom margin.
+		_chat_panel.offset_top = -100 if _chat_minimized else -CHAT_H - 60)
 
-func _add_chat_message(msg: String) -> void:
+	_set_chat_category(CHAT_CAT_WORLD)
+
+## Switch the visible tab. Updates highlight on the tab buttons and
+## refilters the rendered message list — history is untouched.
+func _set_chat_category(cat: String) -> void:
+	_chat_active_cat = cat
+	for c: Variant in _chat_tab_btns.keys():
+		var b := _chat_tab_btns[c] as Button
+		var active: bool = (c == cat)
+		var sb_n := _rs(RS_BTN_A if active else RS_BTN_N,
+			RS_GOLD if active else RS_BORDER.darkened(0.4), 2)
+		b.add_theme_stylebox_override("normal", sb_n)
+		b.add_theme_color_override("font_color", RS_GOLD if active else RS_TEXT)
+	_refresh_chat_display()
+
+## Wipes and rebuilds the rendered chat list from `_chat_history`, keeping
+## only messages whose category matches the active tab.
+func _refresh_chat_display() -> void:
 	if _chat_vbox == null:
 		return
-	_chat_history.append(msg)
+	for child: Node in _chat_vbox.get_children():
+		child.queue_free()
+	for entry: Dictionary in _chat_history:
+		if str(entry.get("category", CHAT_CAT_WORLD)) != _chat_active_cat:
+			continue
+		var lbl := Label.new()
+		lbl.text = str(entry.get("text", ""))
+		lbl.add_theme_color_override("font_color", RS_TEXT)
+		lbl.add_theme_font_size_override("font_size", 13)
+		lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		_chat_vbox.add_child(lbl)
+
+## Public entry point used by Events.chat_message. Auto-classifies the
+## message by content — XP / quest / loss notifications go to Events,
+## anything starting with the whisper marker goes to Private, the rest
+## are World chat. Callers that already know the category should use
+## `_add_chat_message_typed(msg, cat)` directly.
+func _add_chat_message(msg: String) -> void:
+	_add_chat_message_typed(msg, _categorize_chat(msg))
+
+func _categorize_chat(msg: String) -> String:
+	# Whisper convention used elsewhere in the codebase: bracket-prefixed
+	# whisper banners ("[Whisper to ...]" / "[Whisper from ...]"). Anything
+	# else with system-event hallmarks (+XP gain, » kill banner, « quest
+	# reward, "You moved too far", etc.) is treated as an Event.
+	if msg.begins_with("[Whisper") or msg.begins_with("[From ") \
+			or msg.begins_with("[To "):
+		return CHAT_CAT_PRIVATE
+	if msg.begins_with("+") or msg.begins_with("» ") or msg.begins_with("« ") \
+			or msg.begins_with("You ") or msg.begins_with("Thrall") \
+			or msg.begins_with("[Server") or msg.begins_with("[Admin") \
+			or msg.begins_with("[Usage") or msg.begins_with("[Unknown") \
+			or msg.contains(" XP"):
+		return CHAT_CAT_EVENTS
+	return CHAT_CAT_WORLD
+
+## Append a chat line with an explicit category. The list renders only
+## when the message matches the active tab — but it ALWAYS lives in
+## history so toggling tabs reveals prior traffic.
+func _add_chat_message_typed(msg: String, category: String) -> void:
+	if _chat_vbox == null:
+		return
+	_chat_history.append({"text": msg, "category": category})
 	while _chat_history.size() > CHAT_MAX:
 		_chat_history.pop_front()
-		if _chat_vbox.get_child_count() > 0:
+	# Append directly only if this message belongs to the active tab —
+	# faster than rebuilding the whole list on every chat line.
+	if category == _chat_active_cat:
+		var lbl := Label.new()
+		lbl.text = msg
+		lbl.add_theme_color_override("font_color", RS_TEXT)
+		lbl.add_theme_font_size_override("font_size", 13)
+		lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		_chat_vbox.add_child(lbl)
+		# Trim the visible list if it's outgrown the buffer.
+		while _chat_vbox.get_child_count() > CHAT_MAX:
 			_chat_vbox.get_child(0).queue_free()
-
-	var lbl := Label.new()
-	lbl.text = msg
-	lbl.add_theme_color_override("font_color", RS_TEXT)
-	lbl.add_theme_font_size_override("font_size", 9)
-	lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	_chat_vbox.add_child(lbl)
-
-	# Auto-scroll to bottom
-	await get_tree().process_frame
-	var scroll := _chat_vbox.get_parent() as ScrollContainer
-	if scroll != null:
-		scroll.scroll_vertical = scroll.get_v_scroll_bar().max_value as int
+		# Auto-scroll to bottom.
+		await get_tree().process_frame
+		var scroll := _chat_vbox.get_parent() as ScrollContainer
+		if scroll != null:
+			scroll.scroll_vertical = int(scroll.get_v_scroll_bar().max_value)
 
 func _on_chat_xp(skill: String, amount: int) -> void:
-	_add_chat_message("+%d %s XP" % [amount, skill.capitalize()])
+	_add_chat_message_typed("+%d %s XP" % [amount, skill.capitalize()],
+		CHAT_CAT_EVENTS)
 
 func _on_thrall_returned(gains: Dictionary) -> void:
 	for skill: Variant in gains.keys():
 		var val: int = gains[skill]
-		_add_chat_message("Thrall returned: +%d %s XP" % [val, (skill as String).capitalize()])
+		_add_chat_message_typed(
+			"Thrall returned: +%d %s XP" % [val, (skill as String).capitalize()],
+			CHAT_CAT_EVENTS)
 
 # ── MINIMAP ───────────────────────────────────────────────────────────────────
 func _build_minimap() -> void:

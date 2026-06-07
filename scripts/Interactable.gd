@@ -128,7 +128,13 @@ func _setup_collision() -> void:
 		return
 	var rect := RectangleShape2D.new()
 	match interactable_type_str:
-		"tree":     rect.size = Vector2(24, 34)
+		"tree":
+			# Ancient Tree's sprite is ~2.5× the others; the click area
+			# follows so the player can reliably hit anywhere on the canopy.
+			if display_name == "Ancient Tree":
+				rect.size = Vector2(56, 68)
+			else:
+				rect.size = Vector2(24, 34)
 		"rock":     rect.size = Vector2(32, 26)
 		"essence":  rect.size = Vector2(30, 30)
 		"fish":     rect.size = Vector2(42, 22)
@@ -400,6 +406,12 @@ func _skill_to_action() -> String:
 # ── Hover ────────────────────────────────────────────────────────────────────
 func _on_hover_enter() -> void:
 	is_hovered = true
+	# Whole-sprite 20% brightness boost via CanvasItem.self_modulate.
+	# Applies to every sub-draw inside _draw_body without touching the
+	# per-type draw functions. Depleted nodes don't get the boost — they
+	# read as "spent" and shouldn't pulse like they're selectable.
+	if _state != State.DEPLETED:
+		self_modulate = Color(1.20, 1.20, 1.20)
 	queue_redraw()
 	var hud := _find_hud()
 	if hud and _state != State.DEPLETED:
@@ -407,6 +419,7 @@ func _on_hover_enter() -> void:
 
 func _on_hover_exit() -> void:
 	is_hovered = false
+	self_modulate = Color.WHITE
 	queue_redraw()
 	var hud := _find_hud()
 	if hud:
@@ -609,14 +622,25 @@ func _draw() -> void:
 		var c := p["color"] as Color
 		draw_circle(p["pos"], r, Color(c.r, c.g, c.b, a))
 
-	# Hover outline (outside shake)
-	if is_hovered and _state != State.DEPLETED:
-		draw_rect(Rect2(-20, -22, 40, 44), Color.YELLOW, false, 2.0)
+	# Hover indication is delivered via self_modulate (set in the
+	# mouse_entered / mouse_exited callbacks), not a yellow outline rect.
+	# Whole-sprite brightness boost reads as "selectable" without the
+	# clutter of a bounding box around every node.
 
 func _draw_body() -> void:
 	var ratio := float(_hp) / float(max(_max_hp, 1))
 	var c  := color.lightened(0.22) if is_hovered else color
 	var cd := color.darkened(0.35)
+
+	# Depth pass — bracket every sprite with a back-halo (magical types only),
+	# an organic ground stain (resource nodes only), the per-type draw, then
+	# a directional gradient overlay. Costs 1-3 extra draw calls per node
+	# and dramatically lifts the depth read against the new terrain shader.
+	if _has_ground_stain():
+		_draw_organic_stain()
+	var glow := _magic_glow_color()
+	if glow.a > 0.0:
+		_draw_magic_inner_glow(glow)
 
 	match interactable_type_str:
 		"tree":     _draw_tree(ratio, c, cd)
@@ -638,9 +662,101 @@ func _draw_body() -> void:
 		"stone":        _draw_stone(c, cd)
 		_:              draw_rect(Rect2(-14, -14, 28, 28), c)
 
-	# Greyed overlay when depleted (except forge/fire)
+	# Directional shading overlay — top-down light from upper-left. Matches
+	# the terrain shader's directional pass so sprites read as part of the
+	# same scene rather than flat decals sitting on top of shaded ground.
+	_draw_depth_overlay()
+
+	# Greyed overlay when depleted (except forge/fire — those keep their
+	# active fire/ember animations even when "out of HP" because they're
+	# stations, not gatherables).
 	if _state == State.DEPLETED and interactable_type_str not in ["forge", "fire"]:
 		draw_rect(Rect2(-20, -22, 40, 44), Color(0, 0, 0, 0.45))
+
+## True for node types that exist as physical objects on the ground
+## (trees, rocks, foragables, mining nodes, runestone, pickups). False for
+## structures, doors, etc. which read as built-on-top-of-the-tile.
+func _has_ground_stain() -> bool:
+	# Small ground pickups (stick, stone) read better WITHOUT a shadow —
+	# they're flat litter on the ground, not 3D objects casting one.
+	# Same rule for LootDrop and gold piles (see LootDrop._draw).
+	match interactable_type_str:
+		"tree", "rock", "essence", "fish", "herb", "runestone":
+			return true
+	return false
+
+## Three-circle organic blob beneath the sprite. Wider than a single ellipse
+## and asymmetric so it doesn't read as a perfect oval. Pure dark alpha so
+## it stacks correctly on top of grass/rock/whatever biome the tile is.
+func _draw_organic_stain() -> void:
+	var col := Color(0.03, 0.02, 0.02, 0.32)
+	draw_circle(Vector2( 2.0, 14.0), 13.0, col)
+	draw_circle(Vector2(-4.0, 13.0),  9.0, col)
+	draw_circle(Vector2( 6.0, 16.0),  8.0, Color(0.03, 0.02, 0.02, 0.22))
+
+## Per-vertex-color polygon: dark across the top, lighter across the bottom.
+## Subtle gradient overlay that matches the terrain's top-down lighting.
+## Same low amplitudes as the shader pass so sprites integrate seamlessly.
+func _draw_depth_overlay() -> void:
+	# Conservative bounding box — wide enough to envelope most sprites,
+	# narrow enough not to bleed onto neighbors. Trees extend above this
+	# but the canopy detail itself dominates so the overlay reads cleanly.
+	var pts := PackedVector2Array([
+		Vector2(-18, -22), Vector2(18, -22),
+		Vector2( 18,  14), Vector2(-18,  14),
+	])
+	var top_dark   := Color(0.0, 0.0, 0.0, 0.18)   # -18% multiplicative-ish
+	var bot_light  := Color(1.0, 1.0, 1.0, 0.08)   # +8% lightening
+	var cols := PackedColorArray([
+		top_dark, top_dark, bot_light, bot_light,
+	])
+	draw_polygon(pts, cols)
+
+## Subtle pulsing inner halo behind the sprite for magical nodes. Drawn
+## BEFORE the sprite so it sits underneath, reading as "this thing glows
+## from within" rather than a particle effect on top of it.
+func _draw_magic_inner_glow(c: Color) -> void:
+	var pulse := 0.55 + sin(_time_elapsed * 1.6) * 0.20
+	draw_circle(Vector2(0, -2), 18.0, Color(c.r, c.g, c.b, 0.08 * pulse))
+	draw_circle(Vector2(0, -2), 12.0, Color(c.r, c.g, c.b, 0.16 * pulse))
+	draw_circle(Vector2(0, -2),  7.0, Color(c.r, c.g, c.b, 0.22 * pulse))
+
+## Returns a non-transparent color when the node has a magical inner glow.
+## Triggers for: rune essence (always), runestone, ancient root, and the
+## two top-tier mining rocks (mithril/runite). Color picked to match the
+## ore tint so the halo reads as "the rock itself is glowing".
+func _magic_glow_color() -> Color:
+	if interactable_type_str == "essence":
+		return Color(0.65, 0.45, 1.00)
+	if interactable_type_str == "runestone":
+		return Color(0.80, 0.45, 1.00)
+	if interactable_type_str == "herb" and display_name == "Ancient Root":
+		return Color(1.00, 0.60, 0.18)
+	if interactable_type_str == "rock":
+		if required_level >= 85:
+			return Color(0.85, 0.40, 1.00)   # runite — purple
+		elif required_level >= 50:
+			return Color(0.55, 0.78, 1.00)   # mithril — blue
+	return Color(0, 0, 0, 0)
+
+# ── Tree variant + dome-shading helpers ──────────────────────────────────────
+## Deterministic per-position variant index in [0, modulo). Same tree at the
+## same world position always renders the same variant; place two trees at
+## (x, y) and (x+1, y) and they'll often pick different variants — making
+## forests look natural rather than copy-pasted. Used by oak / pine / cherry.
+func _tree_variant_index(modulo: int = 3) -> int:
+	var h: int = int(abs(position.x * 73.0 + position.y * 31.0))
+	return h % maxi(1, modulo)
+
+## Small bright shine dot drawn near the top-center of a circular canopy,
+## simulating the specular peak where overhead light hits the dome's
+## highest point. Paired with the rim-darken / top-lighten pass each tree
+## branch does explicitly.
+func _draw_canopy_shine(center: Vector2, base: Color) -> void:
+	draw_circle(center + Vector2(-2.5, -2.0), 2.2,
+		Color(1.0, 1.0, 1.0, 0.55))
+	draw_circle(center + Vector2(-2.5, -2.0), 1.0,
+		base.lightened(0.85).blend(Color(1, 1, 1, 0.85)))
 
 # ── HP-stage draw functions ───────────────────────────────────────────────────
 func _draw_tree(ratio: float, _c: Color, _cd: Color) -> void:
@@ -661,10 +777,20 @@ func _draw_tree(ratio: float, _c: Color, _cd: Color) -> void:
 	draw_colored_polygon(PackedVector2Array([Vector2(5, 8), Vector2(13, 14), Vector2(5, 14)]),
 		trunk_dark)
 
-	# Trunk
-	draw_rect(Rect2(-5, 6, 10, 16), trunk_brown)
-	draw_line(Vector2(-2, 7), Vector2(-2, 20), trunk_dark, 1.0)
-	draw_line(Vector2(2, 7), Vector2(2, 20), trunk_dark, 1.0)
+	# Trunk — width varies by per-position variant for oak/pine/cherry so
+	# a forest reads as a mix of stocky and slim trunks instead of identical
+	# silhouettes. Other tree types keep the standard 10-wide trunk.
+	var trunk_w := 10
+	if tname == "Oak Tree" or tname == "Pine Tree" or tname == "Cherry Tree" \
+			or tname == "":
+		match _tree_variant_index(3):
+			1: trunk_w = 12
+			2: trunk_w = 8
+			_: trunk_w = 10
+	var tw_half := float(trunk_w) * 0.5
+	draw_rect(Rect2(-tw_half, 6, float(trunk_w), 16), trunk_brown)
+	draw_line(Vector2(-tw_half + 3.0, 7), Vector2(-tw_half + 3.0, 20), trunk_dark, 1.0)
+	draw_line(Vector2( tw_half - 3.0, 7), Vector2( tw_half - 3.0, 20), trunk_dark, 1.0)
 
 	if ratio <= 0.5:
 		draw_colored_polygon(
@@ -672,82 +798,164 @@ func _draw_tree(ratio: float, _c: Color, _cd: Color) -> void:
 			Color(0.05, 0.05, 0.05))
 
 	if tname == "Pine Tree":
-		var c := Color(0.10, 0.42, 0.20)
+		# Variants: 0 = standard, 1 = tall/narrow, 2 = squat/wide. Selected
+		# deterministically from world position so a forest never repeats
+		# in a uniform line. Color hue shift is ±5% green for subtle variety.
+		var pv := _tree_variant_index(3)
+		var c_base := Color(0.10, 0.42, 0.20)
+		match pv:
+			1: c_base = Color(0.08, 0.44, 0.18)
+			2: c_base = Color(0.12, 0.40, 0.22)
+		var width_mul := 1.0
+		var height_mul := 1.0
+		match pv:
+			1: width_mul = 0.85; height_mul = 1.15
+			2: width_mul = 1.15; height_mul = 0.90
+		var c := c_base
 		if ratio > 0.75:
+			# Three layered triangles (back→front, dark→light) — dome shading
+			# via top-tip lighter color emulating overhead light. Rim is the
+			# back layer's darkened polygon at base. Tip shine added at the
+			# very top to sell the rounded surface.
 			draw_colored_polygon(PackedVector2Array([
-				Vector2(-14, 4), Vector2(14, 4), Vector2(0, -18)]), c.darkened(0.2))
+				Vector2(-14.0 * width_mul, 4),
+				Vector2( 14.0 * width_mul, 4),
+				Vector2( 0, -18.0 * height_mul)]), c.darkened(0.22))
 			draw_colored_polygon(PackedVector2Array([
-				Vector2(-11, -2), Vector2(11, -2), Vector2(0, -24)]), c)
+				Vector2(-11.0 * width_mul, -2),
+				Vector2( 11.0 * width_mul, -2),
+				Vector2( 0, -24.0 * height_mul)]), c)
 			draw_colored_polygon(PackedVector2Array([
-				Vector2(-8, -8), Vector2(8, -8), Vector2(0, -30)]), c.lightened(0.1))
+				Vector2(-8.0 * width_mul, -8),
+				Vector2( 8.0 * width_mul, -8),
+				Vector2( 0, -30.0 * height_mul)]), c.lightened(0.18))
+			# Top tip shine — pine's "dome" highlight.
+			draw_circle(Vector2(-1.5, -29.0 * height_mul + 1.0), 1.6,
+				Color(1.0, 1.0, 1.0, 0.55))
 		elif ratio > 0.5:
 			draw_colored_polygon(PackedVector2Array([
-				Vector2(-14, 4), Vector2(14, 4), Vector2(0, -18)]), c.darkened(0.2))
+				Vector2(-14.0 * width_mul, 4),
+				Vector2( 14.0 * width_mul, 4),
+				Vector2( 0, -18.0 * height_mul)]), c.darkened(0.22))
 			draw_colored_polygon(PackedVector2Array([
-				Vector2(-10, -3), Vector2(10, -3), Vector2(0, -22)]), c)
+				Vector2(-10.0 * width_mul, -3),
+				Vector2( 10.0 * width_mul, -3),
+				Vector2( 0, -22.0 * height_mul)]), c)
+			draw_circle(Vector2(-1.5, -21.0 * height_mul + 1.0), 1.4,
+				Color(1.0, 1.0, 1.0, 0.45))
 		elif ratio > 0.25:
 			draw_colored_polygon(PackedVector2Array([
-				Vector2(-10, 4), Vector2(10, 4), Vector2(0, -16)]), c.darkened(0.1))
+				Vector2(-10.0 * width_mul, 4),
+				Vector2( 10.0 * width_mul, 4),
+				Vector2( 0, -16.0 * height_mul)]), c.darkened(0.12))
 		else:
 			draw_colored_polygon(PackedVector2Array([
 				Vector2(-6, 4), Vector2(6, 4), Vector2(0, -10)]), c.darkened(0.35))
 
 	elif tname == "Cherry Tree":
-		# Pink blossom canopy
-		var bloom  := Color(0.98, 0.72, 0.80)
-		var bloom2 := Color(1.00, 0.88, 0.92)
+		# Variants: 0 standard round, 1 large oval-tall, 2 small wide-oval.
+		# Color shift ±5% on bloom hue for subtle pinkness variety.
+		var cv := _tree_variant_index(3)
+		var bloom_base := Color(0.98, 0.72, 0.80)
+		match cv:
+			1: bloom_base = Color(1.00, 0.68, 0.82)
+			2: bloom_base = Color(0.96, 0.76, 0.78)
+		var sx := 1.0
+		var sy := 1.0
+		match cv:
+			1: sx = 1.05; sy = 1.15
+			2: sx = 1.15; sy = 0.92
+		var bloom  := bloom_base
+		var bloom2 := bloom.lightened(0.18)
 		if ratio > 0.75:
-			draw_circle(Vector2(0, -4), 15, bloom)
-			draw_circle(Vector2(-9, 3), 10, bloom.darkened(0.08))
-			draw_circle(Vector2(9, 3), 10, bloom.darkened(0.05))
-			draw_circle(Vector2(0, -6), 11, bloom2)
-			# Petal highlights
+			# Rim — slightly oversized darkened pass for the dome edge.
+			draw_circle(Vector2(0, -4), 17.0 * sx, bloom.darkened(0.20))
+			draw_circle(Vector2(-9.0 * sx, 3), 12.0 * sx, bloom.darkened(0.22))
+			draw_circle(Vector2( 9.0 * sx, 3), 12.0 * sx, bloom.darkened(0.20))
+			# Main canopy.
+			draw_circle(Vector2(0, -4), 15.0 * sx, bloom)
+			draw_circle(Vector2(-9.0 * sx, 3), 10.0 * sx, bloom.darkened(0.08))
+			draw_circle(Vector2( 9.0 * sx, 3), 10.0 * sx, bloom.darkened(0.05))
+			# Top-center lighter pop.
+			draw_circle(Vector2(0, -6.0 * sy), 12.0 * sx, bloom2)
+			# Petal highlights.
 			for pi_i in range(5):
 				var pa := pi_i * TAU / 5.0
-				draw_circle(Vector2(cos(pa) * 8.0, sin(pa) * 6.0 - 4.0), 3.5, bloom2)
+				draw_circle(Vector2(cos(pa) * 8.0 * sx, sin(pa) * 6.0 - 4.0),
+					3.5, bloom2)
+			# Specular shine dot.
+			_draw_canopy_shine(Vector2(0, -7.0 * sy), bloom)
 		elif ratio > 0.5:
-			draw_circle(Vector2(0, -4), 14, bloom)
-			draw_circle(Vector2(-8, 3), 9, bloom.darkened(0.08))
+			draw_circle(Vector2(0, -4), 16.0 * sx, bloom.darkened(0.18))
+			draw_circle(Vector2(0, -4), 14.0 * sx, bloom)
+			draw_circle(Vector2(-8.0 * sx, 3), 9.0 * sx, bloom.darkened(0.08))
+			draw_circle(Vector2(0, -6.0 * sy), 8.0 * sx, bloom2)
+			_draw_canopy_shine(Vector2(0, -6.0 * sy), bloom)
 		elif ratio > 0.25:
-			draw_circle(Vector2(0, -4), 10, bloom.darkened(0.15))
+			draw_circle(Vector2(0, -4), 12.0 * sx, bloom.darkened(0.22))
+			draw_circle(Vector2(0, -4), 10.0 * sx, bloom.darkened(0.10))
 		else:
 			draw_circle(Vector2(0, -5), 6, bloom.darkened(0.3))
 
 	elif tname == "Ironwood Tree":
-		# Dark burgundy-brown hard canopy
+		# Dark burgundy-brown hard canopy. Dome shading via darker rim at
+		# the base polygon + lighter top polygon + tip shine.
 		var c := Color(0.28, 0.14, 0.08)
 		var cl := Color(0.40, 0.22, 0.12)
 		if ratio > 0.75:
+			# Rim base — darkened version of the base layer.
+			draw_colored_polygon(PackedVector2Array([
+				Vector2(-14, 6), Vector2(14, 6), Vector2(0, -21)]), c.darkened(0.20))
+			# Mid layer.
 			draw_colored_polygon(PackedVector2Array([
 				Vector2(-13, 5), Vector2(13, 5), Vector2(0, -20)]), c)
 			draw_colored_polygon(PackedVector2Array([
 				Vector2(-10, -2), Vector2(10, -2), Vector2(0, -26)]), cl)
+			# Top layer — lightened "dome top".
 			draw_colored_polygon(PackedVector2Array([
-				Vector2(-7, -9), Vector2(7, -9), Vector2(0, -32)]), c.lightened(0.1))
+				Vector2(-7, -9), Vector2(7, -9), Vector2(0, -32)]), c.lightened(0.18))
 			# Leaf dots
 			for li in range(6):
 				var la := li * TAU / 6.0
 				draw_circle(Vector2(cos(la) * 10.0, sin(la) * 6.0 - 6.0), 2.5,
 					Color(0.55, 0.30, 0.15, 0.70))
+			# Tip shine.
+			draw_circle(Vector2(-1.5, -30.0), 1.6, Color(1.0, 1.0, 1.0, 0.50))
 		elif ratio > 0.5:
+			draw_colored_polygon(PackedVector2Array([
+				Vector2(-14, 6), Vector2(14, 6), Vector2(0, -19)]), c.darkened(0.20))
 			draw_colored_polygon(PackedVector2Array([
 				Vector2(-13, 5), Vector2(13, 5), Vector2(0, -20)]), c)
 			draw_colored_polygon(PackedVector2Array([
-				Vector2(-10, -2), Vector2(10, -2), Vector2(0, -24)]), cl)
+				Vector2(-10, -2), Vector2(10, -2), Vector2(0, -24)]), cl.lightened(0.10))
+			draw_circle(Vector2(-1.0, -22.0), 1.3, Color(1.0, 1.0, 1.0, 0.42))
 		elif ratio > 0.25:
 			draw_colored_polygon(PackedVector2Array([
-				Vector2(-9, 5), Vector2(9, 5), Vector2(0, -16)]), c)
+				Vector2(-9, 5), Vector2(9, 5), Vector2(0, -16)]), c.darkened(0.15))
+			draw_colored_polygon(PackedVector2Array([
+				Vector2(-8, 4), Vector2(8, 4), Vector2(0, -15)]), c)
 		else:
 			draw_colored_polygon(PackedVector2Array([
 				Vector2(-5, 5), Vector2(5, 5), Vector2(0, -10)]), c.darkened(0.3))
 
 	elif tname == "Frost Tree":
-		# Icy crystalline canopy
+		# Icy crystalline canopy. Dome via darker rim crystals + a central
+		# lighter core with a specular highlight on the top-facing spike.
 		var ice   := Color(0.72, 0.90, 0.98)
 		var ice2  := Color(0.90, 0.97, 1.00)
-		var icedm := ice.darkened(0.15)
+		var icedm := ice.darkened(0.18)
 		if ratio > 0.75:
-			# Crystal spike cluster
+			# Dark rim ring — slightly larger crystals drawn first, become
+			# the outer edge of the dome.
+			for ri in range(6):
+				var ra := ri * TAU / 6.0 - PI / 6.0
+				var rr := 11.0 + (ri % 2) * 4.0
+				draw_colored_polygon(PackedVector2Array([
+					Vector2(cos(ra) * 5.0, sin(ra) * 3.5 - 4.0),
+					Vector2(cos(ra + 0.4) * 5.0, sin(ra + 0.4) * 3.5 - 4.0),
+					Vector2(cos(ra + 0.2) * float(rr), sin(ra + 0.2) * float(rr) - 4.0)]),
+					icedm)
+			# Main crystal spikes.
 			for ci in range(6):
 				var ca := ci * TAU / 6.0 - PI / 6.0
 				var cr := 9.0 + (ci % 2) * 4.0
@@ -756,7 +964,11 @@ func _draw_tree(ratio: float, _c: Color, _cd: Color) -> void:
 					Vector2(cos(ca + 0.4) * 5.0, sin(ca + 0.4) * 3.5 - 4.0),
 					Vector2(cos(ca + 0.2) * float(cr), sin(ca + 0.2) * float(cr) - 4.0)]),
 					ice if ci % 2 == 0 else ice2)
+			# Lighter dome core.
 			draw_circle(Vector2(0, -4), 7, ice2)
+			# Specular shine on the top-facing tip.
+			draw_circle(Vector2(-1.5, -10.0), 1.8, Color(1.0, 1.0, 1.0, 0.65))
+			draw_circle(Vector2(-1.5, -10.0), 0.8, Color(1.0, 1.0, 1.0, 0.95))
 		elif ratio > 0.5:
 			for ci in range(4):
 				var ca := ci * TAU / 4.0
@@ -774,22 +986,141 @@ func _draw_tree(ratio: float, _c: Color, _cd: Color) -> void:
 		draw_line(Vector2(-2, 7), Vector2(-2, 20), Color(0.55, 0.75, 0.88), 1.0)
 		draw_line(Vector2(2, 7), Vector2(2, 20), Color(0.55, 0.75, 0.88), 1.0)
 
+	elif tname == "Ancient Tree":
+		_draw_ancient_tree(ratio)
+
 	else:
-		# Oak (default)
-		var c := Color(0.18, 0.55, 0.15)
+		# Oak (default tname or unmatched). Variants: 0 standard round,
+		# 1 large tall-oval, 2 small wide-oval. Green hue shifts ±5%.
+		var ov := _tree_variant_index(3)
+		var c_base := Color(0.18, 0.55, 0.15)
+		match ov:
+			1: c_base = Color(0.16, 0.58, 0.13)
+			2: c_base = Color(0.20, 0.52, 0.17)
+		var sx := 1.0
+		var sy := 1.0
+		match ov:
+			1: sx = 1.05; sy = 1.15
+			2: sx = 1.15; sy = 0.88
+		var c := c_base
 		if ratio > 0.75:
-			draw_circle(Vector2(0, -4), 15, c.darkened(0.12))
-			draw_circle(Vector2(-9, 3), 10, c)
-			draw_circle(Vector2(9, 3), 10, c)
-			draw_circle(Vector2(0, -6), 12, c.lightened(0.10))
+			# Dome shading: darker outer rim ring → main canopy → lighter
+			# top pop → specular shine dot. The rim is drawn as oversized
+			# darkened versions of each cluster circle so the silhouette
+			# rim reads consistently around the entire canopy footprint.
+			draw_circle(Vector2(0, -4),       17.0 * sx, c.darkened(0.20))
+			draw_circle(Vector2(-9.0 * sx, 3), 11.5 * sx, c.darkened(0.22))
+			draw_circle(Vector2( 9.0 * sx, 3), 11.5 * sx, c.darkened(0.20))
+			# Main canopy.
+			draw_circle(Vector2(0, -4),       15.0 * sx, c.darkened(0.05))
+			draw_circle(Vector2(-9.0 * sx, 3), 10.0 * sx, c)
+			draw_circle(Vector2( 9.0 * sx, 3), 10.0 * sx, c)
+			# Top-center lighter pop — the dome's overhead-lit surface.
+			draw_circle(Vector2(0, -6.0 * sy), 12.0 * sx, c.lightened(0.18))
+			draw_circle(Vector2(-3, -8.0 * sy), 5.5 * sx, c.lightened(0.28))
+			# Specular shine dot.
+			_draw_canopy_shine(Vector2(0, -7.0 * sy), c)
 		elif ratio > 0.5:
-			draw_circle(Vector2(0, -4), 15, c)
-			draw_circle(Vector2(-9, 3), 10, c)
-			draw_circle(Vector2(8, 4), 5, c.darkened(0.3))
+			draw_circle(Vector2(0, -4),       16.5 * sx, c.darkened(0.22))
+			draw_circle(Vector2(0, -4),       15.0 * sx, c)
+			draw_circle(Vector2(-9.0 * sx, 3), 10.0 * sx, c)
+			draw_circle(Vector2(8.0 * sx, 4),  5.0,       c.darkened(0.3))
+			draw_circle(Vector2(0, -6.0 * sy), 10.0 * sx, c.lightened(0.15))
+			_draw_canopy_shine(Vector2(0, -6.0 * sy), c)
 		elif ratio > 0.25:
-			draw_circle(Vector2(0, -4), 12, c)
+			draw_circle(Vector2(0, -4), 13.0 * sx, c.darkened(0.22))
+			draw_circle(Vector2(0, -4), 12.0 * sx, c)
 		else:
 			draw_circle(Vector2(0, -5), 7, c.darkened(0.2))
+
+## Ancient Tree — 2.5× the size of any other tree. Deep gold-green canopy,
+## visible golden glow aura radiating outward in pulsing rings, massive
+## dark trunk with five root flares spreading from the base. Most impressive
+## sprite in the game by design — readable from across the screen.
+func _draw_ancient_tree(ratio: float) -> void:
+	var trunk_dark   := Color(0.18, 0.10, 0.04)
+	var trunk_mid    := Color(0.30, 0.18, 0.08)
+	var trunk_lt     := Color(0.45, 0.28, 0.12)
+	var canopy_dk    := Color(0.18, 0.30, 0.10)
+	var canopy_md    := Color(0.32, 0.50, 0.18)
+	var canopy_lt    := Color(0.62, 0.78, 0.32)
+	var gold         := Color(0.98, 0.82, 0.30)
+	var gold_warm    := Color(1.00, 0.90, 0.50)
+	# Pulsing aura modulates alpha + radius over a ~3s cycle.
+	var pulse := 0.85 + sin(_time_elapsed * 1.1) * 0.15
+	var pulse2 := 0.70 + sin(_time_elapsed * 1.1 + 0.8) * 0.30
+
+	# ── Massive root spread (drawn first, sits under trunk) ─────────────
+	var roots: Array[Vector2] = [
+		Vector2(-26, 22), Vector2(-16, 28), Vector2( 0, 30),
+		Vector2( 16, 28), Vector2( 26, 22),
+	]
+	for rp: Vector2 in roots:
+		draw_colored_polygon(PackedVector2Array([
+			Vector2(rp.x * 0.3, 8.0), rp, Vector2(rp.x * 0.6, rp.y + 4.0),
+		]), trunk_dark)
+		draw_line(Vector2(rp.x * 0.4, 9.0), rp, trunk_mid, 1.0)
+
+	# ── Massive trunk ────────────────────────────────────────────────────
+	draw_rect(Rect2(-9, 4, 18, 32), trunk_dark)
+	draw_rect(Rect2(-7, 4, 14, 32), trunk_mid)
+	draw_rect(Rect2(-7, 4, 3,  32), trunk_dark)            # left shadow strip
+	draw_rect(Rect2( 5, 4, 2,  32), trunk_lt)              # right highlight strip
+	# Bark grain — diagonal cracks.
+	for bi in range(4):
+		var by := 8 + bi * 7
+		draw_line(Vector2(-5, by), Vector2(-2, by + 5), trunk_dark, 1.0)
+		draw_line(Vector2( 5, by), Vector2( 2, by + 5), trunk_dark, 1.0)
+	# Trunk knot detail at mid-height.
+	draw_circle(Vector2(-2, 18), 2.0, trunk_dark)
+	draw_circle(Vector2(-2, 18), 1.1, trunk_lt.darkened(0.20))
+
+	# ── Golden glow aura (3 rings of pulsing low-alpha gold) ────────────
+	if ratio > 0.25:
+		var aura_r := 50.0
+		draw_circle(Vector2(0, -14), aura_r * pulse,
+			Color(gold.r, gold.g, gold.b, 0.06))
+		draw_circle(Vector2(0, -14), aura_r * 0.78,
+			Color(gold.r, gold.g, gold.b, 0.10 * pulse))
+		draw_circle(Vector2(0, -14), aura_r * 0.58,
+			Color(gold.r, gold.g, gold.b, 0.16 * pulse))
+
+	# ── Canopy — layered circles for depth, scale by ratio ──────────────
+	if ratio > 0.75:
+		# Full canopy — five layers stacking dark→mid→light.
+		draw_circle(Vector2( 0,  -8), 34, canopy_dk)
+		draw_circle(Vector2(-22, -2), 18, canopy_dk)
+		draw_circle(Vector2( 22, -2), 18, canopy_dk)
+		draw_circle(Vector2( 0, -14), 30, canopy_md)
+		draw_circle(Vector2(-18, -8), 14, canopy_md)
+		draw_circle(Vector2( 18, -8), 14, canopy_md)
+		draw_circle(Vector2( 0, -20), 24, canopy_lt)
+		draw_circle(Vector2(-10, -24), 12, canopy_lt)
+		draw_circle(Vector2( 10, -24), 12, canopy_lt)
+		# Golden leaf sparkles around the canopy edge.
+		for li in range(10):
+			var la := float(li) * TAU / 10.0
+			var lr := 22.0 + float(li % 3) * 5.0
+			draw_circle(Vector2(cos(la) * lr, sin(la) * lr * 0.7 - 14.0),
+				2.2, Color(gold_warm.r, gold_warm.g, gold_warm.b, 0.85 * pulse2))
+		# Central highlight bloom.
+		draw_circle(Vector2(0, -18), 8.0,
+			Color(gold_warm.r, gold_warm.g, gold_warm.b, 0.45 * pulse))
+	elif ratio > 0.5:
+		draw_circle(Vector2( 0,  -8), 30, canopy_dk)
+		draw_circle(Vector2(-18, -2), 14, canopy_dk)
+		draw_circle(Vector2( 18, -2), 14, canopy_dk)
+		draw_circle(Vector2( 0, -14), 24, canopy_md)
+		draw_circle(Vector2( 0, -18), 16, canopy_lt)
+		for li in range(6):
+			var la := float(li) * TAU / 6.0
+			draw_circle(Vector2(cos(la) * 18.0, sin(la) * 12.0 - 12.0),
+				1.8, Color(gold.r, gold.g, gold.b, 0.65 * pulse2))
+	elif ratio > 0.25:
+		draw_circle(Vector2(0, -10), 22, canopy_dk)
+		draw_circle(Vector2(0, -14), 16, canopy_md)
+	else:
+		draw_circle(Vector2(0, -10), 12, canopy_dk.darkened(0.25))
 
 ## Mining rock dispatch. Each tier has a distinct silhouette so the player
 ## can read the ore type at a glance without relying purely on color:
@@ -1016,6 +1347,11 @@ func _draw_herb(ratio: float, c: Color, cd: Color) -> void:
 	if _state == State.DEPLETED:
 		draw_rect(Rect2(-9, -2, 18, 10), cd.darkened(0.5))
 		return
+	# Dispatch by name so each forageable can read distinct at a glance.
+	match display_name:
+		"Berry Bush":    _draw_berry_bush(ratio); return
+		"Ancient Root":  _draw_ancient_root(ratio); return
+		_:               pass
 
 	# Soil patch
 	draw_rect(Rect2(-10, -1, 20, 12), cd.darkened(0.4))
@@ -1037,6 +1373,99 @@ func _draw_herb(ratio: float, c: Color, cd: Color) -> void:
 		draw_circle(Vector2(4, -4), 5, c.lightened(0.05))
 	else:
 		draw_circle(Vector2(0, -3), 4, c.darkened(0.10))
+
+## Berry Bush — overlapping leaf-cluster bush, slightly wider than tall.
+## Red and purple berries scattered across the canopy with tiny highlights,
+## soft ground stain beneath. Quantity of berries scales with `ratio`.
+func _draw_berry_bush(ratio: float) -> void:
+	var leaf_dk := Color(0.10, 0.32, 0.10)
+	var leaf_md := Color(0.22, 0.48, 0.18)
+	var leaf_lt := Color(0.40, 0.65, 0.25)
+	var red    := Color(0.85, 0.18, 0.22)
+	var purple := Color(0.55, 0.18, 0.65)
+	# Soft ground stain (wider than tall).
+	draw_circle(Vector2(0.0, 8.0), 13.0, Color(0.04, 0.04, 0.03, 0.30))
+	draw_circle(Vector2(-3.0, 10.0), 8.0, Color(0.04, 0.04, 0.03, 0.22))
+	# Bush body — three large dark clusters forming a wide footprint.
+	draw_circle(Vector2(-8.0, -1.0), 9.5, leaf_dk)
+	draw_circle(Vector2( 8.0, -1.0), 9.5, leaf_dk)
+	draw_circle(Vector2( 0.0, -6.0), 10.0, leaf_dk)
+	# Mid-tone overlay — slightly inset so the dark forms a rim.
+	draw_circle(Vector2(-6.0, -2.0), 7.0, leaf_md)
+	draw_circle(Vector2( 6.0, -2.0), 7.0, leaf_md)
+	draw_circle(Vector2( 0.0, -5.0), 8.0, leaf_md)
+	# Highlight pops.
+	draw_circle(Vector2(-3.0, -4.0), 4.5, leaf_lt)
+	draw_circle(Vector2( 4.0, -5.0), 4.0, leaf_lt)
+	# Berries — scattered across the surface, count scales with ratio.
+	var berries := PackedVector2Array([
+		Vector2(-6, -4), Vector2( 3, -2), Vector2(-2, -8),
+		Vector2( 7, -4), Vector2(-8,  1), Vector2( 2,  2),
+		Vector2(-4, -7), Vector2( 6,  1), Vector2( 0, -3),
+	])
+	var berry_cols: Array[Color] = [
+		red, purple, red, red, purple, red, purple, red, purple,
+	]
+	var berry_count: int = clampi(int(ratio * float(berries.size())) + 2, 2, berries.size())
+	for i in range(berry_count):
+		var p: Vector2 = berries[i]
+		var bc: Color = berry_cols[i]
+		draw_circle(p, 1.7, bc.darkened(0.30))
+		draw_circle(p, 1.4, bc)
+		draw_circle(p + Vector2(-0.4, -0.4), 0.5, bc.lightened(0.55))
+
+## Ancient Root — gnarled twisted root emerging from ground with multiple
+## dark brown tendrils spreading outward and small glowing amber rune
+## carvings etched into the surface. Pulse on the runes drives the eye.
+func _draw_ancient_root(_ratio: float) -> void:
+	var root_dk := Color(0.10, 0.06, 0.03)
+	var root_md := Color(0.28, 0.18, 0.08)
+	var root_lt := Color(0.45, 0.30, 0.14)
+	var rune := Color(1.00, 0.65, 0.18)
+	var pulse := 0.65 + sin(_time_elapsed * 2.4) * 0.30
+	# Dark ground stain with radiating root lines (six of them).
+	draw_circle(Vector2(0.0, 6.0), 16.0, Color(0.05, 0.03, 0.02, 0.45))
+	draw_circle(Vector2(2.0, 8.0), 11.0, Color(0.05, 0.03, 0.02, 0.40))
+	for ri in range(6):
+		var ra := float(ri) * TAU / 6.0
+		draw_line(
+			Vector2(cos(ra) * 6.0, sin(ra) * 4.0 + 4.0),
+			Vector2(cos(ra) * 17.0, sin(ra) * 11.0 + 4.0),
+			Color(0.05, 0.03, 0.02, 0.65), 1.6)
+	# Tendrils spreading out from the central root (5 of them, biased upward).
+	for ti in range(5):
+		var ta := -PI * 0.5 + (float(ti) - 2.0) * 0.55
+		var tx := cos(ta) * 13.0
+		var ty := sin(ta) * 6.0
+		draw_line(Vector2(0.0, 0.0), Vector2(tx, ty), root_dk, 3.0)
+		draw_line(Vector2(0.0, 0.0), Vector2(tx, ty), root_md, 1.8)
+	# Main twisted root body — dark base + mid-tone interior + highlight ridge.
+	draw_colored_polygon(PackedVector2Array([
+		Vector2(-8, 6), Vector2(-4, -8), Vector2( 4,-10),
+		Vector2( 8,-2), Vector2( 6, 6), Vector2(-6, 8),
+	]), root_dk)
+	draw_colored_polygon(PackedVector2Array([
+		Vector2(-6, 4), Vector2(-2, -6), Vector2( 3, -8),
+		Vector2( 6,-1), Vector2( 4, 4), Vector2(-4, 5),
+	]), root_md)
+	draw_line(Vector2(-4, 4), Vector2(-1, -6), root_lt, 1.2)
+	draw_line(Vector2( 1,-6), Vector2( 5, -1), root_lt, 1.2)
+	# Rune carvings — geometric glowing symbols. Pulse modulates alpha.
+	var rune_a := Color(rune.r, rune.g, rune.b, pulse)
+	# Triangle (top of root)
+	draw_line(Vector2(-3, -3), Vector2( 0, -6), rune_a, 1.6)
+	draw_line(Vector2( 0, -6), Vector2( 3, -3), rune_a, 1.6)
+	draw_line(Vector2(-3, -3), Vector2( 3, -3), rune_a, 1.6)
+	# Twin vertical bars
+	draw_line(Vector2(-2,  0), Vector2(-2,  3), rune_a, 1.6)
+	draw_line(Vector2( 2,  0), Vector2( 2,  3), rune_a, 1.6)
+	# Small diamond
+	draw_line(Vector2( 0,  1), Vector2( 2,  3), rune_a, 1.6)
+	draw_line(Vector2( 2,  3), Vector2( 0,  5), rune_a, 1.6)
+	draw_line(Vector2( 0,  5), Vector2(-2,  3), rune_a, 1.6)
+	draw_line(Vector2(-2,  3), Vector2( 0,  1), rune_a, 1.6)
+	# Rune sparkle center dot
+	draw_circle(Vector2(0, -1), 0.8, Color(1.0, 0.92, 0.55, pulse))
 
 func _draw_fire(_c: Color) -> void:
 	# Stone ring

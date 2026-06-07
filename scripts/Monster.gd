@@ -69,8 +69,17 @@ func _ready() -> void:
 	collision_mask  = 0
 	_setup_collision()
 	_last_pos = global_position   # avoid 1-frame "moving" pose on spawn
-	mouse_entered.connect(func() -> void: is_hovered = true;  queue_redraw())
-	mouse_exited.connect( func() -> void: is_hovered = false; queue_redraw())
+	mouse_entered.connect(func() -> void:
+		is_hovered = true
+		# 20% brightness boost while hovered. Only when alive; a corpse
+		# shouldn't pulse like it's clickable.
+		if is_alive:
+			self_modulate = Color(1.20, 1.20, 1.20)
+		queue_redraw())
+	mouse_exited.connect(func() -> void:
+		is_hovered = false
+		self_modulate = Color.WHITE
+		queue_redraw())
 
 func start_pursuit(player: Node2D) -> void:
 	_pursuing      = true
@@ -394,8 +403,9 @@ func _draw() -> void:
 		"ancient_troll":    _draw_ancient_troll()
 		"frost_wyrm":       _draw_frost_wyrm()
 		"magma_elemental":  _draw_magma_elemental()
-	if is_hovered:
-		draw_circle(Vector2.ZERO, _radius() + 3.0, Color(1, 1, 0, 0.25))
+	# Hover indication is delivered via self_modulate (see mouse_entered
+	# callback) — no yellow halo circle. White hit-flash still draws as
+	# before because it's a distinct combat signal, not a hover state.
 	if _hit_flash > 0.0:
 		# White flash sized to envelope the sprite — alpha tracks the timer
 		# linearly so the pop fades cleanly over the 0.10s window.

@@ -50,8 +50,14 @@ func _ready() -> void:
 	circ.radius = 9.0
 	cs.shape = circ
 	add_child(cs)
-	mouse_entered.connect(func() -> void: _hovered = true;  queue_redraw())
-	mouse_exited.connect( func() -> void: _hovered = false; queue_redraw())
+	mouse_entered.connect(func() -> void:
+		_hovered = true
+		self_modulate = Color(1.20, 1.20, 1.20)
+		queue_redraw())
+	mouse_exited.connect(func() -> void:
+		_hovered = false
+		self_modulate = Color.WHITE
+		queue_redraw())
 
 func _process(delta: float) -> void:
 	_bob      += delta * 2.8
@@ -95,11 +101,10 @@ func _draw() -> void:
 	# so no ground shadow is drawn. The bob already animates the icon enough
 	# to make it read as a pickup.
 	if _icon_tex != null:
-		# Draw the 16×16 icon centred, with bob offset
+		# Draw the 16×16 icon centred, with bob offset. Hover indication is
+		# delivered via self_modulate from the mouse_entered callback —
+		# no yellow ring around the icon.
 		draw_texture(_icon_tex, Vector2(-8.0, -8.0 + bob_y))
-		# Hover glow ring
-		if _hovered:
-			draw_arc(Vector2(0.0, bob_y), 10.0, 0.0, TAU, 24, Color(1.0, 0.95, 0.55, 0.80), 1.5)
 	else:
 		# Fallback: simple coloured circle when icon not yet generated
 		draw_circle(Vector2(0.0, bob_y), 7.0, item_color)

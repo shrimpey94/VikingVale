@@ -63,6 +63,7 @@ func _pick_target() -> void:
 
 func _on_hover_enter() -> void:
 	_is_hovered = true
+	self_modulate = Color(1.20, 1.20, 1.20)
 	queue_redraw()
 	var nodes := get_tree().get_nodes_in_group("hud")
 	if nodes.size() > 0:
@@ -71,6 +72,7 @@ func _on_hover_enter() -> void:
 
 func _on_hover_exit() -> void:
 	_is_hovered = false
+	self_modulate = Color.WHITE
 	queue_redraw()
 	var nodes := get_tree().get_nodes_in_group("hud")
 	if nodes.size() > 0:
@@ -203,8 +205,7 @@ func _draw() -> void:
 		draw_rect(Rect2(-1.5, -32, 3, 7), Color(0.08, 0.08, 0.08))
 		draw_circle(Vector2(0, -26), 1.5, Color(0.08, 0.08, 0.08))
 
-	# Hover outline
-	if _is_hovered:
-		draw_rect(Rect2(-12, -26, 24, 40), Color.YELLOW, false, 2.0)
-
+	# Hover indication is delivered via self_modulate (see _on_hover_enter)
+	# rather than a yellow outline rect — same visual language across every
+	# clickable entity in the world.
 	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)

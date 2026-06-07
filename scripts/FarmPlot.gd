@@ -28,8 +28,14 @@ func _ready() -> void:
 	rect.size = Vector2(44, 34)
 	cs.shape  = rect
 	add_child(cs)
-	mouse_entered.connect(func() -> void: _is_hovered = true;  queue_redraw())
-	mouse_exited.connect( func() -> void: _is_hovered = false; queue_redraw())
+	mouse_entered.connect(func() -> void:
+		_is_hovered = true
+		self_modulate = Color(1.20, 1.20, 1.20)
+		queue_redraw())
+	mouse_exited.connect(func() -> void:
+		_is_hovered = false
+		self_modulate = Color.WHITE
+		queue_redraw())
 	Events.player_interacted.connect(_on_player_interacted)
 	queue_redraw()
 
@@ -110,7 +116,9 @@ func _draw() -> void:
 		draw_circle(Vector2(16, -12), 2.0, Color(0.40, 0.70, 0.95, 0.8))
 
 	if _is_hovered:
-		draw_rect(Rect2(-23, -17, 46, 34), Color(1, 1, 1, 0.5), false, 1.5)
+		# Hover indication is delivered via self_modulate from the
+		# mouse_entered callback — no outline rect.
+		pass
 		var font := ThemeDB.fallback_font
 		if font != null:
 			var label := "Farm Plot"
