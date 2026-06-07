@@ -632,15 +632,20 @@ func _draw_body() -> void:
 	var c  := color.lightened(0.22) if is_hovered else color
 	var cd := color.darkened(0.35)
 
-	# Depth pass — bracket every sprite with a back-halo (magical types only),
-	# an organic ground stain (resource nodes only), the per-type draw, then
-	# a directional gradient overlay. Costs 1-3 extra draw calls per node
-	# and dramatically lifts the depth read against the new terrain shader.
-	if _has_ground_stain():
-		_draw_organic_stain()
-	var glow := _magic_glow_color()
-	if glow.a > 0.0:
-		_draw_magic_inner_glow(glow)
+	# Depth pass — bracket every LIVE sprite with a back-halo (magical types
+	# only), an organic ground stain (resource nodes only), the per-type
+	# draw, then a directional gradient overlay. Depleted nodes intentionally
+	# skip the entire bracketing pass: the depth overlay's 36×36 bounding
+	# rect bleeds past the small stump/broken/empty depleted sprites and
+	# reads as a subtle dark square ghost over the ground. The depleted art
+	# stands on its own without any post-pass help.
+	var depleted := _state == State.DEPLETED
+	if not depleted:
+		if _has_ground_stain():
+			_draw_organic_stain()
+		var glow := _magic_glow_color()
+		if glow.a > 0.0:
+			_draw_magic_inner_glow(glow)
 
 	match interactable_type_str:
 		"tree":     _draw_tree(ratio, c, cd)
@@ -665,13 +670,15 @@ func _draw_body() -> void:
 	# Directional shading overlay — top-down light from upper-left. Matches
 	# the terrain shader's directional pass so sprites read as part of the
 	# same scene rather than flat decals sitting on top of shaded ground.
-	_draw_depth_overlay()
+	# Gated on live state: see the comment above the bracket helpers.
+	if not depleted:
+		_draw_depth_overlay()
 
-	# Greyed overlay when depleted (except forge/fire — those keep their
-	# active fire/ember animations even when "out of HP" because they're
-	# stations, not gatherables).
-	if _state == State.DEPLETED and interactable_type_str not in ["forge", "fire"]:
-		draw_rect(Rect2(-20, -22, 40, 44), Color(0, 0, 0, 0.45))
+	# (Removed) Depleted state used to draw a 40×44 dark rect overlay on top
+	# of the sprite. That stacked on top of each type's already-distinct
+	# depleted art (tree stump, broken rock, empty soil patch, etc.) and
+	# leaked a visible black square onto the world after every gather /
+	# combat resolution. The depleted sprites stand on their own.
 
 ## True for node types that exist as physical objects on the ground
 ## (trees, rocks, foragables, mining nodes, runestone, pickups). False for

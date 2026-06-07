@@ -502,9 +502,11 @@ func _radius() -> float:
 		_:                            return 10.0
 
 func _draw_dead() -> void:
+	# Corpse silhouette only. The 16×8 black rect that used to draw above
+	# the corpse was a label background for "DEAD" text that no longer
+	# exists — it lingered as a floating black square over every corpse
+	# until the respawn fired. Removed.
 	draw_circle(Vector2.ZERO, _radius(), Color(0.2, 0.2, 0.2, 0.4))
-	var lbl_pos := Vector2(-8, -_radius() - 10)
-	draw_rect(Rect2(lbl_pos, Vector2(16, 8)), Color(0,0,0,0.5))
 
 func _draw_hp_bar() -> void:
 	var ratio := float(current_hp) / float(max_hp)
