@@ -112,6 +112,10 @@ func _set_stats() -> void:
 			_max_hp = 9999; _swing_interval = 1.0; _success_at_req = 1.0; _success_at_99 = 1.0; _regen_delay = 0.0
 		"crafting", "archery", "runestone", "construction", "auction_house":
 			_max_hp = 9999; _swing_interval = 1.0; _success_at_req = 1.0; _success_at_99 = 1.0; _regen_delay = 0.0
+		"stronghold", "banner", "outpost":
+			# Warband structures — never depleted, never gathered. Inspectable
+			# only. Visual integrity bar arrives in Phase C alongside raids.
+			_max_hp = 9999; _swing_interval = 1.0; _success_at_req = 1.0; _success_at_99 = 1.0; _regen_delay = 0.0
 		"stick", "stone":
 			_max_hp = 1; _swing_interval = 5.0; _success_at_req = 1.0; _success_at_99 = 1.0; _regen_delay = 25.0
 		"door":
@@ -135,6 +139,9 @@ func _setup_collision() -> void:
 				rect.size = Vector2(56, 68)
 			else:
 				rect.size = Vector2(24, 34)
+		"stronghold":  rect.size = Vector2(56, 64)
+		"banner":      rect.size = Vector2(20, 48)
+		"outpost":     rect.size = Vector2(32, 48)
 		"rock":     rect.size = Vector2(32, 26)
 		"essence":  rect.size = Vector2(30, 30)
 		"fish":     rect.size = Vector2(42, 22)
@@ -478,6 +485,20 @@ func _on_player_interacted(node: Node) -> void:
 		if entity_id != "":
 			NetworkManager.send_enter_interior(entity_id)
 		return
+	if interactable_type_str == "banner":
+		# Warband banner — server validates whether this is a raid (hostile)
+		# or reinforce (same warband) and applies the integrity change.
+		# We send both kinds and let the server's authority decide; the
+		# rejection path chats back the reason.
+		if entity_id != "":
+			NetworkManager.send_banner_action(entity_id)
+		return
+	if interactable_type_str == "stronghold" or interactable_type_str == "outpost":
+		# v1 — clicking a stronghold or outpost is a no-op flavor inspect.
+		# Future: open the warband info panel with member roster + held
+		# pledges + alliance status.
+		Events.chat_message.emit("You inspect the %s. (Coming soon.)" % display_name)
+		return
 	if interactable_type_str in ["stick", "stone"]:
 		if _is_server_managed():
 			_request_gather()
@@ -665,6 +686,9 @@ func _draw_body() -> void:
 		"door":         _draw_door(c, cd)
 		"stick":        _draw_stick(c)
 		"stone":        _draw_stone(c, cd)
+		"stronghold":   _draw_stronghold()
+		"banner":       _draw_banner()
+		"outpost":      _draw_outpost()
 		_:              draw_rect(Rect2(-14, -14, 28, 28), c)
 
 	# Directional shading overlay — top-down light from upper-left. Matches
@@ -1751,3 +1775,118 @@ func _draw_door(c: Color, cd: Color) -> void:
 	draw_circle(Vector2(7, 0), 0.8, Color(1.00, 0.92, 0.55))
 	# Subtle threshold shadow at the base.
 	draw_rect(Rect2(-13, 16, 26, 3), Color(0.0, 0.0, 0.0, 0.30))
+
+## ── Warband structures (placeholder visuals for v1) ────────────────────────
+## These three draws are intentionally chunky and readable from camera
+## distance — the player needs to spot a friendly stronghold from across
+## the wilderness. Warband sigil color (read from set_meta("warband_id"))
+## can be layered on top in a later polish pass; v1 uses fixed accent colors.
+
+## Stronghold — a stone keep with a watchtower and a flag on top. The most
+## impressive warband structure; built to be visible at low zoom.
+func _draw_stronghold() -> void:
+	var stone_dk := Color(0.32, 0.30, 0.26)
+	var stone_md := Color(0.50, 0.46, 0.40)
+	var stone_lt := Color(0.66, 0.62, 0.55)
+	var wood     := Color(0.42, 0.26, 0.10)
+	var iron     := Color(0.20, 0.20, 0.22)
+	var sigil    := Color(0.85, 0.20, 0.20)   # warband flag — recolor later
+	# Foundation block.
+	draw_rect(Rect2(-26, 6, 52, 22), stone_dk)
+	draw_rect(Rect2(-26, 6, 52, 4),  stone_md)
+	# Main keep body.
+	draw_rect(Rect2(-22, -18, 44, 26), stone_md)
+	draw_rect(Rect2(-22, -18, 44, 3),  stone_lt)
+	# Stone block detail — three horizontal seams.
+	for sy in [-8, 0, 8]:
+		draw_line(Vector2(-22, sy), Vector2(22, sy), stone_dk, 1.0)
+	# Crenelations along the top.
+	for cx in range(-22, 23, 6):
+		draw_rect(Rect2(cx, -22, 4, 6), stone_md)
+	# Central watchtower — taller, narrower.
+	draw_rect(Rect2(-8, -36, 16, 22), stone_md)
+	draw_rect(Rect2(-8, -36, 16, 3),  stone_lt)
+	# Tower crenelations.
+	for cx2 in [-8, -3, 2, 6]:
+		draw_rect(Rect2(cx2, -40, 3, 5), stone_md)
+	# Tower window (lit, warm).
+	draw_rect(Rect2(-3, -28, 6, 7), iron)
+	draw_rect(Rect2(-2, -27, 4, 5), Color(0.95, 0.65, 0.20, 0.85))
+	# Flagpole.
+	draw_line(Vector2(0, -40), Vector2(0, -56), wood, 2.0)
+	# Sigil flag waving to the right.
+	draw_colored_polygon(PackedVector2Array([
+		Vector2(0, -54), Vector2(12, -52), Vector2(14, -48),
+		Vector2(12, -44), Vector2(0, -46),
+	]), sigil)
+	draw_line(Vector2(0, -54), Vector2(0, -46), sigil.darkened(0.30), 1.0)
+	# Gate — wooden double doors at the base.
+	draw_rect(Rect2(-7, -2, 14, 18), wood)
+	draw_line(Vector2(0, -2), Vector2(0, 16), wood.darkened(0.35), 1.5)
+	draw_rect(Rect2(-8, -3, 16, 2), iron)
+	# Iron rivets on the gate.
+	draw_circle(Vector2(-4, 2),  0.9, iron)
+	draw_circle(Vector2( 4, 2),  0.9, iron)
+	draw_circle(Vector2(-4, 10), 0.9, iron)
+	draw_circle(Vector2( 4, 10), 0.9, iron)
+
+## Banner — a tall pole driven into the ground with a colored flag. Marks
+## a warband claim radius. Sigil color is per-warband; placeholder red.
+func _draw_banner() -> void:
+	var wood     := Color(0.32, 0.18, 0.06)
+	var wood_md  := Color(0.50, 0.30, 0.10)
+	var sigil    := Color(0.85, 0.20, 0.20)
+	var sigil_dk := sigil.darkened(0.30)
+	# Stone base where the pole is driven in.
+	draw_circle(Vector2(0, 18), 7.0, Color(0.42, 0.40, 0.36))
+	draw_circle(Vector2(0, 16), 5.0, Color(0.55, 0.52, 0.48))
+	# Pole.
+	draw_rect(Rect2(-1, -30, 2, 50), wood)
+	draw_rect(Rect2(-1, -30, 1, 50), wood_md)
+	# Crossbar near the top.
+	draw_rect(Rect2(-10, -28, 20, 2), wood)
+	# Flag — large rectangle hanging from the crossbar.
+	draw_rect(Rect2(-9, -26, 18, 22), sigil)
+	# Flag dark border / inner edge.
+	draw_rect(Rect2(-9, -26, 18, 2),  sigil_dk)
+	draw_rect(Rect2(-9, -6,  18, 2),  sigil_dk)
+	# Sigil mark in the center of the flag — a simple rune.
+	var rune := Color(1.0, 0.92, 0.55)
+	draw_line(Vector2(-3, -22), Vector2( 3, -22), rune, 1.5)
+	draw_line(Vector2( 0, -22), Vector2( 0, -10), rune, 1.5)
+	draw_line(Vector2(-3, -10), Vector2( 3, -10), rune, 1.5)
+	# Pole top finial.
+	draw_circle(Vector2(0, -30), 2.0, Color(0.75, 0.62, 0.20))
+	draw_circle(Vector2(0, -30), 1.0, Color(0.95, 0.82, 0.30))
+
+## Outpost — a smaller wooden watchtower. Boosts nearby banner integrity.
+func _draw_outpost() -> void:
+	var wood_dk := Color(0.30, 0.18, 0.06)
+	var wood_md := Color(0.52, 0.32, 0.12)
+	var wood_lt := Color(0.70, 0.48, 0.22)
+	var thatch  := Color(0.62, 0.45, 0.18)
+	# Foundation posts (4 corners).
+	for px in [-12, 12]:
+		draw_rect(Rect2(px - 1, -4, 3, 22), wood_dk)
+	# Cross-bracing X between front posts.
+	draw_line(Vector2(-12, -4), Vector2( 12, 18), wood_md, 1.5)
+	draw_line(Vector2( 12, -4), Vector2(-12, 18), wood_md, 1.5)
+	# Watchman's platform — horizontal plank deck.
+	draw_rect(Rect2(-14, -10, 28, 6), wood_md)
+	draw_rect(Rect2(-14, -10, 28, 1), wood_lt)
+	# Plank seams.
+	for sx in [-9, -3, 3, 9]:
+		draw_line(Vector2(sx, -10), Vector2(sx, -4), wood_dk, 1.0)
+	# Railing posts.
+	for rx in [-12, -4, 4, 12]:
+		draw_rect(Rect2(rx - 1, -18, 2, 9), wood_dk)
+	# Top rail.
+	draw_rect(Rect2(-14, -18, 28, 2), wood_md)
+	# Thatched canopy roof — triangular over the platform.
+	draw_colored_polygon(PackedVector2Array([
+		Vector2(-15, -18), Vector2( 0, -28), Vector2(15, -18),
+	]), thatch)
+	draw_line(Vector2(-15, -18), Vector2(0, -28), thatch.darkened(0.25), 1.0)
+	draw_line(Vector2( 15, -18), Vector2(0, -28), thatch.darkened(0.25), 1.0)
+	# Small horn / signal on top.
+	draw_circle(Vector2(0, -29), 1.5, Color(0.62, 0.55, 0.45))

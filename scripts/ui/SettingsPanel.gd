@@ -38,15 +38,18 @@ func _build() -> void:
 		add_child(row)
 
 	add_child(HSeparator.new())
-	var vol_lbl := Label.new()
-	vol_lbl.text = "Volume"
-	vol_lbl.add_theme_color_override("font_color", UITheme.TEXT)
-	vol_lbl.add_theme_font_size_override("font_size", 11)
-	add_child(vol_lbl)
-	var slider := HSlider.new()
-	slider.min_value = 0; slider.max_value = 100; slider.value = 80
-	slider.custom_minimum_size = Vector2(180, 20)
-	add_child(slider)
+	var vol_header := Label.new()
+	vol_header.text = "Volume"
+	vol_header.add_theme_color_override("font_color", UITheme.GOLD)
+	vol_header.add_theme_font_size_override("font_size", 11)
+	add_child(vol_header)
+	# Bus names match AudioManager.BUS_* constants. Using string literals
+	# here lets the editor's static analyzer resolve before the autoload
+	# loads; AudioManager looks them up at runtime by name anyway.
+	_add_volume_slider("Master",   "Master")
+	_add_volume_slider("Music",    "Music")
+	_add_volume_slider("Effects",  "SFX")
+	_add_volume_slider("Ambience", "Ambience")
 
 	add_child(HSeparator.new())
 	var logout_btn := Button.new()
@@ -59,6 +62,27 @@ func _build() -> void:
 	logout_btn.add_theme_font_size_override("font_size", 12)
 	logout_btn.pressed.connect(_on_logout_pressed)
 	add_child(logout_btn)
+
+func _add_volume_slider(label_text: String, bus_name: String) -> void:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 6)
+	var lbl := Label.new()
+	lbl.text = label_text
+	lbl.custom_minimum_size = Vector2(70, 0)
+	lbl.add_theme_color_override("font_color", UITheme.TEXT)
+	lbl.add_theme_font_size_override("font_size", 10)
+	row.add_child(lbl)
+	var slider := HSlider.new()
+	slider.min_value = 0
+	slider.max_value = 100
+	slider.step = 1
+	slider.value = AudioManager.get_bus_volume(bus_name)
+	slider.custom_minimum_size = Vector2(140, 20)
+	slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	slider.value_changed.connect(func(v: float) -> void:
+		AudioManager.set_bus_volume(bus_name, int(v)))
+	row.add_child(slider)
+	add_child(row)
 
 func _on_logout_pressed() -> void:
 	var dlg := ConfirmationDialog.new()

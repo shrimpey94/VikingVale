@@ -394,6 +394,23 @@ func send_build_farm_plot(x: float, y: float) -> void:
 	if state == NetState.LOGGED_IN:
 		_send({"type": "build_farm_plot", "x": x, "y": y})
 
+## Warband-gated build for stronghold / banner / outpost. Server enforces
+## per-warband caps + stronghold spacing + banner non-overlap rules and
+## broadcasts world_entity_add on success.
+func send_build_warband_structure(kind: String, x: float, y: float) -> void:
+	if state == NetState.LOGGED_IN:
+		_send({"type": "build_warband_structure",
+			"kind": kind, "x": x, "y": y})
+
+## Banner click action — server inspects ownership and chooses raid (hostile)
+## or reinforce (same-warband + bank gold spend). The client sends BOTH
+## intents; server's auth handlers reject the one that doesn't apply.
+func send_banner_action(entity_id: String) -> void:
+	if state != NetState.LOGGED_IN:
+		return
+	_send({"type": "banner_raid", "entity_id": entity_id})
+	_send({"type": "banner_reinforce", "entity_id": entity_id})
+
 func send_clan_info() -> void:
 	if state == NetState.LOGGED_IN:
 		_send({"type": "clan_info"})

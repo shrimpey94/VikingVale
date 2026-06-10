@@ -257,6 +257,216 @@ _QUESTS_PY = {
                     "items": [{"id": "dragon_scale", "name": "Dragon Scale",
                                "qty": 3, "color": [0.20, 0.75, 0.35, 1.0]}]},
     },
+    # ──────────────────────────────────────────────────────────────────────
+    # Act 1 → Act 2 hand-off + Act 2 Five Tokens + Act 3 Town Pledges.
+    # Mirror of scripts/QuestData.gd entries — keep in sync manually.
+    # ──────────────────────────────────────────────────────────────────────
+    "q_old_bjarnes_letter": {
+        "title": "Old Bjarne's Letter",
+        "description": "Bjarne has pressed a sealed letter into your hand. He told you to find the Ironwood Hermit Skade — somewhere west of Ironwood Keep, in the central plains nobody walks anymore. \"Read nothing,\" he said. \"Just put it in her hand.\"",
+        "giver_npc": "Elder Bjarne",
+        "required": {"melee": 10, "woodcutting": 10},
+        "repeatable": False, "daily": False, "boss": False,
+        "chain_next": "q_token_frost",
+        "objectives": [
+            {"type": "talk", "target_id": "Ironwood Hermit Skade",
+             "quantity": 1, "display": "Deliver Bjarne's letter to Skade"},
+        ],
+        "rewards": {"xp": {"melee": 200, "vitality": 50}, "gold": 150,
+                    "items": []},
+    },
+    "q_token_frost": {
+        "title": "The Frost Token",
+        "description": "Skade has told you what Bjarne could not write: the High Seat is real, and it cannot be sat without the Five Tokens. The first lies on the chest of the Ice Draugr Captain at Frostheim's glacier shrine.",
+        "giver_npc": "Hunter Ragnhild",
+        "required": {"melee": 25},
+        "repeatable": False, "daily": False, "boss": False,
+        "chain_next": "q_token_iron",
+        "objectives": [
+            {"type": "kill", "target_id": "ice_draugr", "quantity": 3,
+             "display": "Slay Ice Draugr at the glacier"},
+        ],
+        "rewards": {"xp": {"melee": 600, "vitality": 100, "defense": 100},
+                    "gold": 400,
+                    "items": [{"id": "frost_token", "name": "Frost Token",
+                               "qty": 1, "color": [0.72, 0.90, 0.98, 1.0]}]},
+    },
+    "q_token_iron": {
+        "title": "The Iron Token",
+        "description": "Bjarne tells you the second Token has rested in Kjelvik for two hundred years. He will only give it up when you have proven you understand what it costs.",
+        "giver_npc": "Elder Bjarne",
+        "required": {"melee": 30},
+        "repeatable": False, "daily": False, "boss": False,
+        "chain_next": "q_token_sea",
+        "objectives": [
+            {"type": "kill", "target_id": "draugr", "quantity": 5,
+             "display": "Slay Draugr near Kjelvik"},
+            {"type": "talk", "target_id": "Elder Bjarne", "quantity": 1,
+             "display": "Return to Bjarne"},
+        ],
+        "rewards": {"xp": {"melee": 800, "vitality": 150, "defense": 150},
+                    "gold": 600,
+                    "items": [{"id": "iron_token", "name": "Iron Token",
+                               "qty": 1, "color": [0.62, 0.62, 0.68, 1.0]}]},
+    },
+    "q_token_sea": {
+        "title": "The Sea Token",
+        "description": "Sea Captain Valdis at Bjorn's Landing keeps the third Token at a shrine somewhere along the eastern cliffs — but she will only sail you there once you have proven your worth as a deep-water hand.",
+        "giver_npc": "Sea Captain Valdis",
+        "required": {"fishing": 30},
+        "repeatable": False, "daily": False, "boss": False,
+        "chain_next": "q_token_heart",
+        "objectives": [
+            {"type": "gather", "target_id": "lobster", "quantity": 5,
+             "display": "Catch Lobsters for Valdis"},
+            {"type": "talk", "target_id": "Sea Captain Valdis", "quantity": 1,
+             "display": "Return to Valdis"},
+        ],
+        "rewards": {"xp": {"fishing": 500, "melee": 300}, "gold": 500,
+                    "items": [{"id": "sea_token", "name": "Sea Token",
+                               "qty": 1, "color": [0.20, 0.55, 0.92, 1.0]}]},
+    },
+    "q_token_heart": {
+        "title": "The Heart Token",
+        "description": "The Heart Token lies at Skade's hermitage itself, in the center plains where the maps say nothing exists.",
+        "giver_npc": "Ironwood Hermit Skade",
+        "required": {"melee": 40, "magic": 25},
+        "repeatable": False, "daily": False, "boss": False,
+        "chain_next": "q_token_fifth",
+        "objectives": [
+            {"type": "talk", "target_id": "Ironwood Hermit Skade",
+             "quantity": 1, "display": "Return to Skade's hermitage"},
+        ],
+        "rewards": {"xp": {"magic": 800, "vitality": 200}, "gold": 700,
+                    "items": [{"id": "heart_token", "name": "Heart Token",
+                               "qty": 1, "color": [0.85, 0.30, 0.30, 1.0]}]},
+    },
+    "q_token_fifth": {
+        "title": "The Fifth Token",
+        "description": "Four Tokens. Captain Sten waits at the Helheim shore. The road is the Ashlands. The price is three Spectral Warriors slain on the way.",
+        "giver_npc": "Captain Sten",
+        "required": {"melee": 50, "vitality": 30},
+        "repeatable": False, "daily": False, "boss": False, "chain_next": "",
+        "objectives": [
+            {"type": "kill", "target_id": "spectral_warrior", "quantity": 3,
+             "display": "Slay Spectral Warriors on the Ashlands road"},
+            {"type": "talk", "target_id": "Captain Sten", "quantity": 1,
+             "display": "Bring the essences to Sten"},
+        ],
+        "rewards": {"xp": {"melee": 2000, "vitality": 400, "magic": 400},
+                    "gold": 2000,
+                    "items": [
+                        {"id": "fifth_token", "name": "Fifth Token",
+                         "qty": 1, "color": [0.92, 0.78, 0.20, 1.0]},
+                        # Marker item — server checks for this id to unlock
+                        # warband creation. Don't drop on death.
+                        {"id": "high_seat_warrant",
+                         "name": "Warrant of the High Seat", "qty": 1,
+                         "color": [0.95, 0.85, 0.30, 1.0]},
+                    ]},
+    },
+    "q_pledge_kjelvik": {
+        "title": "Pledge of Kjelvik",
+        "description": "Bjarne accepts that the High Seat is yours to seek. Bring him 20 Iron Bars to rebuild the wall and clear 10 Skeletons from the Great Hall cellars.",
+        "giver_npc": "Elder Bjarne",
+        "required": {"melee": 50, "smithing": 40},
+        "repeatable": False, "daily": False, "boss": False, "chain_next": "",
+        "objectives": [
+            {"type": "gather", "target_id": "iron_bar", "quantity": 20,
+             "display": "Forge Iron Bars for Kjelvik's wall"},
+            {"type": "kill", "target_id": "skeleton", "quantity": 10,
+             "display": "Clear the Great Hall cellars"},
+            {"type": "talk", "target_id": "Elder Bjarne", "quantity": 1,
+             "display": "Swear the oath at the stone seat"},
+        ],
+        "rewards": {"xp": {"melee": 1500, "smithing": 800, "defense": 400},
+                    "gold": 3000,
+                    "items": [{"id": "pledge_kjelvik",
+                               "name": "Pledge of Kjelvik", "qty": 1,
+                               "color": [0.62, 0.62, 0.68, 1.0]}]},
+    },
+    "q_pledge_bjorn": {
+        "title": "Pledge of Bjorn's Landing",
+        "description": "Bring Valdis 5 Raw Sharks and slay 8 Bandits raiding the coast road.",
+        "giver_npc": "Sea Captain Valdis",
+        "required": {"fishing": 50, "melee": 45},
+        "repeatable": False, "daily": False, "boss": False, "chain_next": "",
+        "objectives": [
+            {"type": "gather", "target_id": "raw_shark", "quantity": 5,
+             "display": "Bring Valdis Raw Sharks"},
+            {"type": "kill", "target_id": "bandit", "quantity": 8,
+             "display": "Clear the coast-road bandits"},
+            {"type": "talk", "target_id": "Sea Captain Valdis", "quantity": 1,
+             "display": "Swear the oath at the dock-end shrine"},
+        ],
+        "rewards": {"xp": {"fishing": 1200, "melee": 1000, "defense": 400},
+                    "gold": 3000,
+                    "items": [{"id": "pledge_bjorn",
+                               "name": "Pledge of Bjorn's Landing", "qty": 1,
+                               "color": [0.20, 0.55, 0.92, 1.0]}]},
+    },
+    "q_pledge_frostheim": {
+        "title": "Pledge of Frostheim",
+        "description": "Slay 15 Goblins and 5 Ice Wolves at the high passes and bring Ragnhild 10 Frost Logs for the palisade.",
+        "giver_npc": "Hunter Ragnhild",
+        "required": {"melee": 50, "woodcutting": 50},
+        "repeatable": False, "daily": False, "boss": False, "chain_next": "",
+        "objectives": [
+            {"type": "kill", "target_id": "goblin", "quantity": 15,
+             "display": "Slay Goblins at the high passes"},
+            {"type": "kill", "target_id": "ice_wolf", "quantity": 5,
+             "display": "Slay Ice Wolves"},
+            {"type": "gather", "target_id": "frost_log", "quantity": 10,
+             "display": "Gather Frost Logs for the palisade"},
+            {"type": "talk", "target_id": "Hunter Ragnhild", "quantity": 1,
+             "display": "Swear the oath at the mountain shrine"},
+        ],
+        "rewards": {"xp": {"melee": 1500, "woodcutting": 800, "defense": 400},
+                    "gold": 3000,
+                    "items": [{"id": "pledge_frostheim",
+                               "name": "Pledge of Frostheim", "qty": 1,
+                               "color": [0.72, 0.90, 0.98, 1.0]}]},
+    },
+    "q_pledge_ironwood": {
+        "title": "Pledge of Ironwood Keep",
+        "description": "Bring Ulfr 15 Ironwood Logs and clear 12 Wolves from the dark grove.",
+        "giver_npc": "Blacksmith Ulfr",
+        "required": {"melee": 50, "smithing": 50, "woodcutting": 45},
+        "repeatable": False, "daily": False, "boss": False, "chain_next": "",
+        "objectives": [
+            {"type": "gather", "target_id": "ironwood_log", "quantity": 15,
+             "display": "Gather Ironwood Logs"},
+            {"type": "kill", "target_id": "wolf", "quantity": 12,
+             "display": "Clear wolves from the dark grove"},
+            {"type": "talk", "target_id": "Blacksmith Ulfr", "quantity": 1,
+             "display": "Swear the oath at the Ironwood Tree"},
+        ],
+        "rewards": {"xp": {"smithing": 1500, "woodcutting": 800, "melee": 600},
+                    "gold": 3000,
+                    "items": [{"id": "pledge_ironwood",
+                               "name": "Pledge of Ironwood Keep", "qty": 1,
+                               "color": [0.28, 0.14, 0.08, 1.0]}]},
+    },
+    "q_pledge_eastmark": {
+        "title": "Pledge of Eastmark Post",
+        "description": "Slay 10 Draugr on the Ashlands patrol and 5 Fire Imps beyond the rim.",
+        "giver_npc": "Scout Halfdan",
+        "required": {"melee": 55, "vitality": 35},
+        "repeatable": False, "daily": False, "boss": False, "chain_next": "",
+        "objectives": [
+            {"type": "kill", "target_id": "draugr", "quantity": 10,
+             "display": "Clear Draugr on the Ashlands patrol"},
+            {"type": "kill", "target_id": "fire_imp", "quantity": 5,
+             "display": "Slay Fire Imps beyond the rim"},
+            {"type": "talk", "target_id": "Scout Halfdan", "quantity": 1,
+             "display": "Swear the oath at the perimeter watchstone"},
+        ],
+        "rewards": {"xp": {"melee": 1800, "vitality": 500, "defense": 500},
+                    "gold": 3000,
+                    "items": [{"id": "pledge_eastmark",
+                               "name": "Pledge of Eastmark Post", "qty": 1,
+                               "color": [0.85, 0.30, 0.18, 1.0]}]},
+    },
 }
 
 
@@ -884,10 +1094,47 @@ def _migrate_v9(conn) -> None:
     """)
 
 
+def _migrate_v10(conn) -> None:
+    """Town pledges — which warband holds each of the five towns. One row
+    per town (max 5 rows ever). When a warband completes a pledge quest
+    for a town, the existing row is UPSERTed to point to that warband.
+    `path` is 'diplomatic' or 'conquest' for future cosmetic/audit use."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS town_pledges (
+            town_id     TEXT PRIMARY KEY,
+            warband_id  TEXT NOT NULL,
+            pledged_at  REAL NOT NULL,
+            path        TEXT NOT NULL DEFAULT 'diplomatic'
+        )
+    """)
+
+
+def _migrate_v11(conn) -> None:
+    """Warband alliances — one-pact-per-warband. Composite PK with the
+    smaller id first (lexicographic) so a pair (A, B) is stored as
+    (min, max) — prevents duplicate (A,B)/(B,A) rows. Server enforces
+    the single-pact rule at insert time by checking that neither warband
+    already appears in any row."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS warband_alliances (
+            warband_a   TEXT NOT NULL,
+            warband_b   TEXT NOT NULL,
+            pacted_at   REAL NOT NULL,
+            PRIMARY KEY (warband_a, warband_b)
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_alliances_a ON warband_alliances (warband_a)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_alliances_b ON warband_alliances (warband_b)
+    """)
+
+
 _MIGRATIONS = [
     _migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4,
     _migrate_v5, _migrate_v6, _migrate_v7, _migrate_v8,
-    _migrate_v9,
+    _migrate_v9, _migrate_v10, _migrate_v11,
 ]
 
 
@@ -2598,6 +2845,31 @@ def _inv_take_qty(inventory: list, item_id: str, qty: int) -> int:
     return removed
 
 
+def _player_has_item(player_id: str, item_id: str, min_qty: int = 1) -> bool:
+    """True if the player's persisted inventory contains at least min_qty of
+    item_id. Used by gates that need to check item-based prerequisites
+    (e.g. warband creation requires the High Seat Warrant). Reads from
+    SQLite, not session cache, so it works even when the player is
+    offline-checked by an admin or background task."""
+    try:
+        with _db() as conn:
+            row = conn.execute(
+                "SELECT inventory FROM players WHERE id=?",
+                (player_id,)).fetchone()
+        if row is None:
+            return False
+        inv = json.loads(row["inventory"] or "[]")
+    except Exception:
+        return False
+    total = 0
+    for it in inv:
+        if isinstance(it, dict) and str(it.get("id", "")) == item_id:
+            total += int(it.get("qty", 0))
+            if total >= min_qty:
+                return True
+    return False
+
+
 _LOSS_LOG_CAP_DB = 50   # SQLite-backed cap (was 20 in-memory)
 
 
@@ -3236,8 +3508,38 @@ async def _handle_shop_sell(ws, session: dict, msg: dict) -> None:
         mult = _player_sell_back_multiplier(skill_xp)
         unit_price = int(round(base * mult))
         gain = unit_price * removed
+        # Town pledge tax skim — when this town is pledged to a warband,
+        # 5% of the sale value is rerouted from the player to the warband's
+        # shared bank gold. Player still sees `gain - tax` in their pocket;
+        # tax appears in the warband's clan gold pool. Looked up by the
+        # shopkeeper's NPC name (we have npc_id; map back to a known town).
+        npc_name = ""
+        try:
+            sess_state = shopkeeper_state.get(npc_id, {})
+            shop_id = str(sess_state.get("shop_id", ""))
+            # Best-effort: try to find the NPC's name from world_entities
+            # cache. Falls through to empty string → no tax if not found.
+            we_row = conn.execute(
+                "SELECT data FROM world_entities WHERE id=?",
+                (npc_id,)).fetchone()
+            if we_row:
+                we_data = json.loads(we_row["data"] or "{}")
+                npc_name = str(we_data.get("npc_name", ""))
+        except Exception:
+            pass
+        town_id = _town_of_shopkeeper(npc_id, npc_name)
+        tax = 0
+        if town_id:
+            warband_id = _warband_holding_town(conn, town_id)
+            if warband_id:
+                tax = int(gain * 0.05)
+                if tax > 0:
+                    conn.execute(
+                        "UPDATE clans SET gold = COALESCE(gold, 0) + ? WHERE id = ?",
+                        (tax, warband_id))
+        net_gain = gain - tax
         current_gold = int(row["gold"] or 0)
-        new_gold = current_gold + gain
+        new_gold = current_gold + net_gain
         conn.execute(
             "UPDATE players SET gold=?, inventory=? WHERE id=?",
             (new_gold, json.dumps(inventory), session["id"]))
@@ -3246,7 +3548,10 @@ async def _handle_shop_sell(ws, session: dict, msg: dict) -> None:
     await _push_gold_and_inventory(ws, session, new_gold, inventory)
     await _send(ws, {"type": "shop_result", "ok": True,
                      "sold_qty": removed,
-                     "gold_gained": gain})
+                     "gold_gained": net_gain})
+    if tax > 0:
+        await _send(ws, {"type": "chat", "username": "System",
+                         "text": f"({tax}g town tax to the ruling warband.)"})
 
 
 async def _handle_shop_close(ws, session: dict, msg: dict) -> None:
@@ -3528,6 +3833,283 @@ async def _handle_build_farm_plot(ws, session: dict, msg: dict) -> None:
     print(f"[farm] {session['username']} built a plot at ({x:.0f},{y:.0f})")
 
 
+# ── Warband structures (stronghold / banner / outpost) ───────────────────────
+# Same persistence pattern as farm_plot but with three new kinds and
+# explicit per-warband caps + spatial rules.
+
+WARBAND_STRUCTURE_RULES = {
+    "stronghold": {
+        "min_construction": 50,
+        "min_warband_size": 6,      # leader + 5 members
+        "per_warband_cap":  1,
+        "spacing_px":       2048.0, # 64 tiles between any two strongholds
+    },
+    "banner": {
+        "min_construction": 25,
+        "min_warband_size": 1,
+        "per_warband_cap":  12,
+        # Banner non-overlap: each banner claims a 16-tile radius (512 px),
+        # so two banners must be at LEAST 1024 px (32 tiles) apart so their
+        # claim circles don't intersect.
+        "spacing_px":       1024.0,
+    },
+    "outpost": {
+        "min_construction": 20,
+        "min_warband_size": 1,
+        # Outpost cap is per-warband total. Three outposts per banner is
+        # enforced more loosely: server caps the total at 3 × banner_count
+        # so a warband with 4 banners can have up to 12 outposts.
+        "per_warband_cap":  36,
+        "spacing_px":       128.0,  # token spacing so outposts don't stack
+    },
+}
+
+
+def _warband_size(conn, clan_id: str) -> int:
+    row = conn.execute(
+        "SELECT COUNT(*) AS c FROM clan_members WHERE clan_id=?",
+        (clan_id,)).fetchone()
+    return int(row["c"]) if row else 0
+
+
+def _warband_entity_count(conn, clan_id: str, kind: str) -> int:
+    """Count world_entities for this warband+kind. Reads `warband_id` out
+    of the data JSON — slow path uses LIKE; acceptable at our row count."""
+    rows = conn.execute(
+        "SELECT data FROM world_entities WHERE kind=?", (kind,)).fetchall()
+    n = 0
+    for r in rows:
+        try:
+            d = json.loads(r["data"] or "{}")
+        except Exception:
+            continue
+        if str(d.get("warband_id", "")) == clan_id:
+            n += 1
+    return n
+
+
+def _nearest_entity_distance(conn, kind: str, x: float, y: float) -> float:
+    """Returns the distance in px from (x, y) to the nearest existing entity
+    of `kind`. INF if none exist."""
+    rows = conn.execute(
+        "SELECT x, y FROM world_entities WHERE kind=?", (kind,)).fetchall()
+    best = float("inf")
+    for r in rows:
+        dx = float(r["x"]) - x
+        dy = float(r["y"]) - y
+        d2 = dx * dx + dy * dy
+        if d2 < best * best:
+            best = d2 ** 0.5
+    return best
+
+
+async def _handle_banner_raid(ws, session: dict, msg: dict) -> None:
+    """Player clicked an enemy banner with intent to raid. Drops banner
+    integrity by 25; if it falls to 0, the banner is destroyed (removed
+    from world_entities) and the tile reverts to neutral. Mission-based
+    means there's no PvP — the raider takes a single deliberate action
+    against the structure rather than an opposing player. Rules:
+       - Banner must exist.
+       - Raider's warband ≠ banner's warband.
+       - Raider's warband not allied with banner's warband.
+       - Raider must be within 256 px of the banner (close-quarters)."""
+    eid = str(msg.get("entity_id", "")).strip()
+    if not eid:
+        return
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT id, x, y, data FROM world_entities "
+            "WHERE id = ? AND kind = 'banner'",
+            (eid,)).fetchone()
+        if row is None:
+            await _send(ws, {"type": "chat", "username": "System",
+                             "text": "That banner no longer exists."})
+            return
+        try:
+            data = json.loads(row["data"] or "{}")
+        except Exception:
+            data = {}
+        banner_warband = str(data.get("warband_id", ""))
+        cid = _clan_id_for_player(conn, session["id"])
+        if cid is None:
+            await _send(ws, {"type": "chat", "username": "System",
+                             "text": "Only warband members can raid."})
+            return
+        if cid == banner_warband:
+            await _send(ws, {"type": "chat", "username": "System",
+                             "text": "That's your own banner."})
+            return
+        if _are_allied(conn, cid, banner_warband):
+            await _send(ws, {"type": "chat", "username": "System",
+                             "text": "Allied warbands cannot raid each other."})
+            return
+        # Proximity gate — within 256 px (8 tiles) of the banner.
+        bx, by = float(row["x"]), float(row["y"])
+        sx, sy = float(session.get("x", 0.0)), float(session.get("y", 0.0))
+        if (sx - bx) ** 2 + (sy - by) ** 2 > 256.0 * 256.0:
+            await _send(ws, {"type": "chat", "username": "System",
+                             "text": "You must be at the banner to raid it."})
+            return
+        # Apply 25 integrity damage.
+        cur_int = int(data.get("integrity", 100))
+        new_int = max(0, cur_int - 25)
+        data["integrity"] = new_int
+        if new_int <= 0:
+            conn.execute("DELETE FROM world_entities WHERE id=?", (eid,))
+            conn.commit()
+            _broadcast({"type": "world_entity_remove", "id": eid})
+            _broadcast({"type": "chat", "username": "System",
+                        "text": f"A warband banner has fallen at "
+                                f"({int(bx)},{int(by)})."})
+            print(f"[raid] banner {eid} destroyed by {session['username']}")
+            return
+        conn.execute(
+            "UPDATE world_entities SET data=? WHERE id=?",
+            (json.dumps(data), eid))
+        conn.commit()
+    _broadcast({"type": "world_entity_update", "id": eid, "data": data})
+    await _send(ws, {"type": "chat", "username": "System",
+                     "text": f"You strike the banner. Integrity: {new_int}/100."})
+
+
+async def _handle_banner_reinforce(ws, session: dict, msg: dict) -> None:
+    """Owner-warband member spends 200 gold from the warband bank to
+    restore 20 integrity to one of their banners. Capped at 100."""
+    eid = str(msg.get("entity_id", "")).strip()
+    if not eid:
+        return
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT id, x, y, data FROM world_entities "
+            "WHERE id = ? AND kind = 'banner'",
+            (eid,)).fetchone()
+        if row is None:
+            return
+        try:
+            data = json.loads(row["data"] or "{}")
+        except Exception:
+            data = {}
+        banner_warband = str(data.get("warband_id", ""))
+        cid = _clan_id_for_player(conn, session["id"])
+        if cid != banner_warband:
+            await _send(ws, {"type": "chat", "username": "System",
+                             "text": "Only members of the owning warband can "
+                                      "reinforce this banner."})
+            return
+        clan_row = conn.execute("SELECT gold FROM clans WHERE id=?",
+                                (cid,)).fetchone()
+        cur_gold = int(clan_row["gold"] or 0) if clan_row else 0
+        if cur_gold < 200:
+            await _send(ws, {"type": "chat", "username": "System",
+                             "text": "Your warband bank needs 200g to "
+                                      "reinforce a banner."})
+            return
+        cur_int = int(data.get("integrity", 100))
+        if cur_int >= 100:
+            await _send(ws, {"type": "chat", "username": "System",
+                             "text": "Banner already at full integrity."})
+            return
+        new_int = min(100, cur_int + 20)
+        data["integrity"] = new_int
+        new_gold = cur_gold - 200
+        conn.execute("UPDATE clans SET gold=? WHERE id=?", (new_gold, cid))
+        conn.execute(
+            "UPDATE world_entities SET data=? WHERE id=?",
+            (json.dumps(data), eid))
+        conn.commit()
+    _broadcast({"type": "world_entity_update", "id": eid, "data": data})
+    await _send(ws, {"type": "chat", "username": "System",
+                     "text": f"Banner reinforced. Integrity: {new_int}/100. "
+                              f"(-200g warband bank)"})
+
+
+async def _handle_build_warband_structure(ws, session: dict, msg: dict) -> None:
+    """Place a warband stronghold / banner / outpost at (x, y). Validates:
+       1. Warband membership + Warrant of the High Seat (admins exempt).
+       2. Per-kind construction level + warband size requirements.
+       3. Per-warband cap (1 stronghold, 12 banners, 36 outposts).
+       4. Spatial: stronghold-vs-stronghold 2048 px, banner non-overlap
+          1024 px, outpost token-spacing 128 px.
+    On success: INSERT into world_entities with data {warband_id, owner,
+    integrity}, broadcast world_entity_add for live render."""
+    kind = str(msg.get("kind", "")).strip()
+    if kind not in WARBAND_STRUCTURE_RULES:
+        await _send(ws, {"type": "chat", "username": "System",
+                         "text": f"Unknown structure kind: {kind}"})
+        return
+    rules = WARBAND_STRUCTURE_RULES[kind]
+    x = float(msg.get("x", session["x"]))
+    y = float(msg.get("y", session["y"]))
+    admin = _is_admin(session)
+    with _db() as conn:
+        cid = _clan_id_for_player(conn, session["id"])
+        if cid is None:
+            await _send(ws, {"type": "chat", "username": "System",
+                             "text": "Only warband members can build that."})
+            return
+        # Warrant check (admins exempt).
+        if not admin and not _player_has_item(session["id"], "high_seat_warrant"):
+            await _send(ws, {"type": "chat", "username": "System",
+                             "text": "Your warband needs the Warrant of the "
+                                      "High Seat to build that."})
+            return
+        # Construction level.
+        row = conn.execute("SELECT skill_xp FROM players WHERE id=?",
+                           (session["id"],)).fetchone()
+        skill_xp = json.loads(row["skill_xp"] or "{}") if row else {}
+        clv = _calc_level(int(skill_xp.get("construction", 0)))
+        if not admin and clv < rules["min_construction"]:
+            await _send(ws, {"type": "chat", "username": "System",
+                             "text": f"Requires Construction level "
+                                      f"{rules['min_construction']}."})
+            return
+        # Warband size (only stronghold has > 1 today, but the field
+        # generalizes cleanly).
+        if rules["min_warband_size"] > 1:
+            wsz = _warband_size(conn, cid)
+            if not admin and wsz < rules["min_warband_size"]:
+                await _send(ws, {"type": "chat", "username": "System",
+                                 "text": f"Your warband needs at least "
+                                          f"{rules['min_warband_size']} members "
+                                          f"to build a {kind}."})
+                return
+        # Per-warband cap.
+        owned = _warband_entity_count(conn, cid, kind)
+        if not admin and owned >= rules["per_warband_cap"]:
+            await _send(ws, {"type": "chat", "username": "System",
+                             "text": f"Warband already has {owned} "
+                                      f"{kind}(s) — cap reached."})
+            return
+        # Spacing rule — same-kind only (stronghold-vs-stronghold,
+        # banner-vs-banner, outpost-vs-outpost).
+        nearest = _nearest_entity_distance(conn, kind, x, y)
+        if not admin and nearest < rules["spacing_px"]:
+            await _send(ws, {"type": "chat", "username": "System",
+                             "text": f"Too close to another {kind} "
+                                      f"({int(nearest)} px, need "
+                                      f"{int(rules['spacing_px'])}+)."})
+            return
+        # All checks pass — insert.
+        eid = "a:" + secrets.token_hex(8)
+        data = {
+            "warband_id": cid,
+            "owner":      session["username"],
+            "integrity":  100,
+        }
+        conn.execute(
+            "INSERT INTO world_entities (id, kind, subtype, x, y, data) "
+            "VALUES (?,?,?,?,?,?)",
+            (eid, kind, kind, x, y, json.dumps(data)))
+        conn.commit()
+    entity = {"id": eid, "kind": kind, "subtype": kind,
+              "x": x, "y": y, "data": data}
+    _broadcast({"type": "world_entity_add", "entity": entity})
+    await _send(ws, {"type": "chat", "username": "System",
+                     "text": f"You raise a warband {kind}."})
+    print(f"[warband] {session['username']} built {kind} at "
+          f"({x:.0f},{y:.0f}) for clan {cid}")
+
+
 # ── Clan / Warband handlers ───────────────────────────────────────────────────
 
 CLAN_COST = 10000
@@ -3591,6 +4173,15 @@ async def _handle_clan_create(ws, session: dict, msg: dict) -> None:
     if len(name) < 3 or len(name) > 24:
         await _send(ws, {"type": "clan_result", "ok": False,
                          "reason": "Clan name must be 3–24 characters."})
+        return
+    # Warband-creation prerequisite: the Five Tokens quest line awards the
+    # "Warrant of the High Seat" on completion. No warrant = no warband.
+    # Admins bypass — they can stress-test the system without farming Tokens.
+    if not _is_admin(session) and not _player_has_item(session["id"],
+            "high_seat_warrant"):
+        await _send(ws, {"type": "clan_result", "ok": False,
+                         "reason": "You must earn the Warrant of the High Seat. "
+                                    "Complete the Five Tokens quest line first."})
         return
     with _db() as conn:
         if _clan_id_for_player(conn, session["id"]) is not None:
@@ -3724,6 +4315,134 @@ async def _handle_clan_kick(ws, session: dict, msg: dict) -> None:
         await _send(kws, {"type": "clan_info", "clan": None})
         await _send(kws, {"type": "chat", "username": "System",
                           "text": "You were removed from the clan."})
+
+
+# ── Warband alliances ────────────────────────────────────────────────────────
+# /ally <name>     — leader proposes pact. Stored as a pending offer in
+#                    memory until target leader also issues /ally <name>.
+#                    Both within 60s → pact written to warband_alliances.
+# /unally          — leader dissolves an existing pact.
+
+_pending_ally_offers: dict = {}    # proposer_clan_id → (target_clan_id, expires_at)
+ALLY_OFFER_TIMEOUT = 60.0
+
+
+def _alliance_of(conn, clan_id: str) -> str:
+    """Returns the ally warband_id for `clan_id`, or '' if not allied.
+    Checks both columns of the warband_alliances row (pair stored
+    canonically with min id first)."""
+    row = conn.execute(
+        "SELECT warband_a, warband_b FROM warband_alliances "
+        "WHERE warband_a = ? OR warband_b = ? LIMIT 1",
+        (clan_id, clan_id)).fetchone()
+    if row is None:
+        return ""
+    if str(row["warband_a"]) == clan_id:
+        return str(row["warband_b"])
+    return str(row["warband_a"])
+
+
+def _are_allied(conn, a: str, b: str) -> bool:
+    if not a or not b or a == b:
+        return False
+    ally = _alliance_of(conn, a)
+    return ally == b
+
+
+async def _handle_ally_command(ws, session: dict, text: str) -> None:
+    """Handles /ally <warband_name> and /unally. Leader-only. Server
+    enforces one-pact-per-warband and the 60s mutual-handshake window."""
+    with _db() as conn:
+        cid = _clan_id_for_player(conn, session["id"])
+        if cid is None:
+            await _send(ws, {"type": "chat", "username": "System",
+                             "text": "You are not in a warband."})
+            return
+        clan = conn.execute("SELECT leader_id, name FROM clans WHERE id=?",
+                            (cid,)).fetchone()
+        if not clan or clan["leader_id"] != session["id"]:
+            await _send(ws, {"type": "chat", "username": "System",
+                             "text": "Only the warband leader can do that."})
+            return
+        # /unally
+        if text == "/unally":
+            cur_ally = _alliance_of(conn, cid)
+            if not cur_ally:
+                await _send(ws, {"type": "chat", "username": "System",
+                                 "text": "Your warband has no ally."})
+                return
+            conn.execute(
+                "DELETE FROM warband_alliances "
+                "WHERE warband_a = ? OR warband_b = ?", (cid, cid))
+            conn.commit()
+            other_name_row = conn.execute(
+                "SELECT name FROM clans WHERE id=?", (cur_ally,)).fetchone()
+            other_name = str(other_name_row["name"]) if other_name_row else cur_ally
+            _broadcast({"type": "chat", "username": "System",
+                        "text": f"{clan['name']} and {other_name} are no "
+                                f"longer allied."})
+            return
+        # /ally <name>
+        target_name = text[len("/ally "):].strip()
+        if not target_name:
+            await _send(ws, {"type": "chat", "username": "System",
+                             "text": "Usage: /ally <warband name>"})
+            return
+        target_row = conn.execute(
+            "SELECT id, leader_id FROM clans WHERE name = ? COLLATE NOCASE",
+            (target_name,)).fetchone()
+        if not target_row:
+            await _send(ws, {"type": "chat", "username": "System",
+                             "text": f"No warband named '{target_name}'."})
+            return
+        target_cid = str(target_row["id"])
+        if target_cid == cid:
+            await _send(ws, {"type": "chat", "username": "System",
+                             "text": "You cannot ally with your own warband."})
+            return
+        # One-pact rule.
+        if _alliance_of(conn, cid):
+            await _send(ws, {"type": "chat", "username": "System",
+                             "text": "Your warband already has an ally. "
+                                     "Use /unally to break the pact first."})
+            return
+        if _alliance_of(conn, target_cid):
+            await _send(ws, {"type": "chat", "username": "System",
+                             "text": "That warband already has an ally."})
+            return
+        now = time.time()
+        # Reciprocal check — did the OTHER leader call /ally on US recently?
+        their_offer = _pending_ally_offers.get(target_cid)
+        if their_offer and their_offer[0] == cid and their_offer[1] >= now:
+            # Pact forged — canonical (min, max) row.
+            a, b = (cid, target_cid) if cid < target_cid else (target_cid, cid)
+            conn.execute(
+                "INSERT INTO warband_alliances (warband_a, warband_b, pacted_at) "
+                "VALUES (?, ?, ?)",
+                (a, b, now))
+            conn.commit()
+            _pending_ally_offers.pop(target_cid, None)
+            _pending_ally_offers.pop(cid, None)
+            our_name_row = conn.execute(
+                "SELECT name FROM clans WHERE id=?", (cid,)).fetchone()
+            _broadcast({"type": "chat", "username": "System",
+                        "text": f"⚔ {our_name_row['name']} and "
+                                f"{target_row['leader_id'] and target_name} "
+                                f"have forged an alliance."})
+            return
+        # First leader to propose — record offer, await reciprocal.
+        _pending_ally_offers[cid] = (target_cid, now + ALLY_OFFER_TIMEOUT)
+        await _send(ws, {"type": "chat", "username": "System",
+                         "text": f"Alliance offered to {target_name}. "
+                                 f"Their leader has 60s to accept by typing "
+                                 f"/ally {clan['name']}."})
+        # Notify the target leader if online.
+        tws = _ws_for_player(str(target_row["leader_id"]))
+        if tws is not None:
+            await _send(tws, {"type": "chat", "username": "System",
+                              "text": f"{clan['name']} offers your warband "
+                                      f"an alliance. Type /ally "
+                                      f"{clan['name']} within 60s to accept."})
 
 
 async def _handle_clan_bank_deposit(ws, session: dict, msg: dict) -> None:
@@ -4114,6 +4833,79 @@ def _quest_grant_rewards(conn, session: dict, quest_id: str,
     }
 
 
+# Maps the per-town pledge quest id to its town_id slug. Five towns total.
+# Used by _maybe_apply_pledge AND by the shop-tax skim to look up which
+# warband should be credited on a sale.
+_PLEDGE_QUEST_TO_TOWN = {
+    "q_pledge_kjelvik":   "kjelvik",
+    "q_pledge_bjorn":     "bjorn",
+    "q_pledge_frostheim": "frostheim",
+    "q_pledge_ironwood":  "ironwood",
+    "q_pledge_eastmark":  "eastmark",
+}
+
+
+def _maybe_apply_pledge(conn, session: dict, quest_id: str, now: float) -> None:
+    """If `quest_id` is one of the five pledge quests, UPSERT a row in
+    town_pledges so the completer's warband becomes the new holder of
+    that town. Players not in a warband (rare since quests are gated by
+    Construction + the Warrant indirectly) get a chat warning but the
+    quest still completes — the pledge just doesn't bind."""
+    town_id = _PLEDGE_QUEST_TO_TOWN.get(quest_id)
+    if not town_id:
+        return
+    cid = _clan_id_for_player(conn, session["id"])
+    if cid is None:
+        return
+    conn.execute(
+        "INSERT INTO town_pledges (town_id, warband_id, pledged_at, path) "
+        "VALUES (?, ?, ?, 'diplomatic') "
+        "ON CONFLICT(town_id) DO UPDATE SET "
+        "  warband_id = excluded.warband_id, "
+        "  pledged_at = excluded.pledged_at",
+        (town_id, cid, now))
+    print(f"[pledge] {session['username']}'s warband {cid} now holds {town_id}")
+
+
+def _warband_holding_town(conn, town_id: str) -> str:
+    """Returns the warband_id holding `town_id`, or '' if unpledged."""
+    row = conn.execute(
+        "SELECT warband_id FROM town_pledges WHERE town_id=?",
+        (town_id,)).fetchone()
+    return str(row["warband_id"]) if row else ""
+
+
+def _town_of_shopkeeper(npc_id: str, npc_name: str) -> str:
+    """Resolve a shopkeeper's town_id for tax-skim lookups. We map by NPC
+    name (matches client-side `Lore.town_of_npc` table); npc_id is kept in
+    the signature for future per-shop overrides."""
+    name_to_town = {
+        # Bjorn's Landing
+        "Sea Captain Valdis": "bjorn",
+        "Fish Trader Knud": "bjorn",
+        "Sigrid the Fishmonger": "bjorn",
+        "Merchant Eydis": "bjorn",
+        # Kjelvik
+        "Elder Bjarne": "kjelvik",
+        "Trader Hroar": "kjelvik",
+        "Merchant Dalla": "kjelvik",
+        "Old Brynjar": "kjelvik",
+        # Frostheim
+        "Hunter Ragnhild": "frostheim",
+        "Merchant Bera": "frostheim",
+        "Brynhildr the Apothecary": "frostheim",
+        # Ironwood Keep
+        "Blacksmith Ulfr": "ironwood",
+        "Trader Thorvald": "ironwood",
+        "Torsten the Wanderer": "ironwood",
+        # Eastmark Post
+        "Scout Halfdan": "eastmark",
+        "Wandering Merchant Freyja": "eastmark",
+        "Captain Sten": "eastmark",
+    }
+    return name_to_town.get(npc_name, "")
+
+
 async def _handle_quest_complete(ws, session: dict, msg: dict) -> None:
     """Player turned in a completed quest at the giver NPC. Validates the
     active row exists, all objectives are filled, then atomically marks the
@@ -4147,6 +4939,10 @@ async def _handle_quest_complete(ws, session: dict, msg: dict) -> None:
             "WHERE player_id=? AND quest_id=? AND accepted_at=?",
             (now, session["id"], quest_id, float(row["accepted_at"])))
         result = _quest_grant_rewards(conn, session, quest_id, prior)
+        # Pledge side-effect: if this is a pledge quest, the completer's
+        # warband becomes the holder of that town. UPSERT against the
+        # existing row so transferring a pledge replaces the old warband.
+        _maybe_apply_pledge(conn, session, quest_id, now)
         conn.commit()
     # Push reward feedback to the client.
     if result:
@@ -5247,6 +6043,9 @@ async def _route_message(ws, session, mtype: str, msg: dict) -> None:
             if text.startswith("/promote ") or text.startswith("/demote "):
                 await _handle_admin_rank_command(ws, session, text)
                 return
+            if text.startswith("/ally ") or text == "/unally":
+                await _handle_ally_command(ws, session, text)
+                return
             text = profanity.censor(text)
             _broadcast({"type": "chat",
                         "username": session["username"], "text": text})
@@ -5312,6 +6111,12 @@ async def _route_message(ws, session, mtype: str, msg: dict) -> None:
         await _handle_admin_save_map(ws, session, msg)
     elif mtype == "build_farm_plot":
         await _handle_build_farm_plot(ws, session, msg)
+    elif mtype == "build_warband_structure":
+        await _handle_build_warband_structure(ws, session, msg)
+    elif mtype == "banner_raid":
+        await _handle_banner_raid(ws, session, msg)
+    elif mtype == "banner_reinforce":
+        await _handle_banner_reinforce(ws, session, msg)
     elif mtype == "player_drop":
         await _handle_player_drop(ws, session, msg)
     elif mtype == "player_died":

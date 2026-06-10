@@ -3996,6 +3996,29 @@ func _on_minimap_draw() -> void:
 			_:               dot_col = Color(0.20, 0.65, 0.20)
 		_minimap_canvas.draw_rect(Rect2(cx - 1.5, cy - 1.5, 3.0, 3.0), dot_col)
 
+	# Banner territory overlay — drawn AFTER terrain so radii are visible,
+	# tinted by warband_id sigil colour. Banners claim a 16-tile radius.
+	for node in get_tree().get_nodes_in_group("interactable"):
+		if not node is Node2D:
+			continue
+		var b2d := node as Node2D
+		var btype: String = b2d.get("interactable_type_str") if b2d.get("interactable_type_str") != null else ""
+		if btype != "banner":
+			continue
+		var bwx := b2d.global_position.x / 32.0
+		var bwy := b2d.global_position.y / 32.0
+		var bcx := (bwx - src_x) * TILE_PX
+		var bcy := (bwy - src_y) * TILE_PX
+		var brad := 16.0 * TILE_PX
+		if bcx + brad < 0.0 or bcx - brad > CANVAS_W or bcy + brad < 0.0 or bcy - brad > CANVAS_H:
+			continue
+		var warband_id: String = ""
+		if b2d.has_meta("warband_id"):
+			warband_id = String(b2d.get_meta("warband_id"))
+		var sigil := _warband_sigil_color(warband_id)
+		_minimap_canvas.draw_circle(Vector2(bcx, bcy), brad, Color(sigil.r, sigil.g, sigil.b, 0.22))
+		_minimap_canvas.draw_arc(Vector2(bcx, bcy), brad, 0.0, TAU, 24, Color(sigil.r, sigil.g, sigil.b, 0.85), 1.5)
+
 	# Player dot — always at canvas centre
 	_minimap_canvas.draw_circle(Vector2(CANVAS_W * 0.5, CANVAS_H * 0.5), 3.0, Color.WHITE)
 
@@ -4042,6 +4065,13 @@ func _regen_minimap() -> void:
 				bname = "plains"
 			img.set_pixel(tx, ty, _mm_color_for_biome(bname))
 	_minimap_texture = ImageTexture.create_from_image(img)
+
+func _warband_sigil_color(warband_id: String) -> Color:
+	if warband_id.is_empty():
+		return Color(0.75, 0.20, 0.20)
+	var h: int = warband_id.hash()
+	var hue: float = float(h & 0xFFFF) / 65535.0
+	return Color.from_hsv(hue, 0.65, 0.95, 1.0)
 
 func _mm_color_for_biome(bname: String) -> Color:
 	match bname:
@@ -4240,6 +4270,29 @@ func _build_all_construction_recipes() -> Array:
 		"input": [{"id": "oak_log", "name": "Oak Log", "qty": 10},
 				  {"id": "stick",   "name": "Stick",   "qty": 5}],
 		"xp": 120, "req_lv": 10})
+
+	# ── Warband settlements (placed in world, persisted server-side) ──────
+	# All three follow the farm_plot pattern: not added to inventory; the
+	# server inserts them into `world_entities` with warband_id in `data`
+	# JSON. Caps enforced server-side (1 stronghold + 12 banners + 3
+	# outposts per banner per warband).
+	out.append({"name": "Warband Stronghold", "id": "stronghold",
+		"color": Color(0.55, 0.30, 0.18), "skill": "construction",
+		"input": [{"id": "ironwood_log", "name": "Ironwood Log", "qty": 40},
+				  {"id": "mithril_bar",  "name": "Mithril Bar",  "qty": 20},
+				  {"id": "frost_log",    "name": "Frost Log",    "qty": 15}],
+		"xp": 800, "req_lv": 50})
+	out.append({"name": "Warband Banner", "id": "banner",
+		"color": Color(0.85, 0.25, 0.25), "skill": "construction",
+		"input": [{"id": "oak_log",  "name": "Oak Log",  "qty": 15},
+				  {"id": "iron_bar", "name": "Iron Bar", "qty": 5}],
+		"xp": 250, "req_lv": 25})
+	out.append({"name": "Warband Outpost", "id": "outpost",
+		"color": Color(0.62, 0.42, 0.20), "skill": "construction",
+		"input": [{"id": "pine_log",  "name": "Pine Log",  "qty": 20},
+				  {"id": "iron_bar",  "name": "Iron Bar",  "qty": 3}],
+		"xp": 180, "req_lv": 20})
+
 	# Boats remain craftable at the construction bench.
 	for boat: Dictionary in _CONSTRUCTION_RECIPES:
 		out.append(boat)
@@ -4318,9 +4371,14 @@ func _refresh_construction() -> void:
 	_refresh_recipe_window(_all_construction_recipes, "construction", _construct_recipe_btns)
 
 func _construct(recipe: Dictionary) -> void:
-	# Farm Plot is built in the world (warband-gated), not added as an item.
-	if str(recipe.get("id", "")) == "farm_plot":
+	# Farm Plot + warband structures are placed in the world (warband-gated),
+	# not added as inventory items. The server persists them in world_entities.
+	var rid := str(recipe.get("id", ""))
+	if rid == "farm_plot":
 		_build_farm_plot(recipe)
+		return
+	if rid == "stronghold" or rid == "banner" or rid == "outpost":
+		_build_warband_structure(rid, recipe)
 		return
 	for ing: Dictionary in recipe["input"] as Array:
 		if not GameManager.remove_item_qty(ing["id"] as String, ing["qty"] as int):
@@ -4345,6 +4403,33 @@ func _build_farm_plot(recipe: Dictionary) -> void:
 	GameManager.add_xp("construction", recipe["xp"] as int)
 	var pos := (players[0] as Node2D).global_position
 	NetworkManager.send_build_farm_plot(pos.x, pos.y)
+	_refresh_construction()
+
+## Place a warband structure (stronghold / banner / outpost) at the player's
+## current world position. Same envelope as `_build_farm_plot`: gate on
+## warband membership, take materials, grant XP, RPC the server. The server
+## enforces all spacing / cap rules and broadcasts world_entity_add for
+## every nearby client to render.
+func _build_warband_structure(kind: String, recipe: Dictionary) -> void:
+	if _clan.is_empty():
+		Events.chat_message.emit("You must be in a warband to build a %s." % kind)
+		return
+	for ing: Dictionary in recipe["input"] as Array:
+		if GameManager.get_item_qty(ing["id"] as String) < (ing["qty"] as int):
+			Events.chat_message.emit("You lack the materials for a %s." % kind)
+			return
+	var players := get_tree().get_nodes_in_group("player")
+	if players.is_empty():
+		return
+	# Local mat deduction + XP grant. Server can still reject (cap hit /
+	# spacing violation) — if it does, the server's chat_message response
+	# tells the player and the mats/XP need to be refunded. v1 ships
+	# optimistic; refund path comes later if the rejection rate is high.
+	for ing: Dictionary in recipe["input"] as Array:
+		GameManager.remove_item_qty(ing["id"] as String, ing["qty"] as int)
+	GameManager.add_xp("construction", recipe["xp"] as int)
+	var pos := (players[0] as Node2D).global_position
+	NetworkManager.send_build_warband_structure(kind, pos.x, pos.y)
 	_refresh_construction()
 
 func _on_open_construction() -> void:

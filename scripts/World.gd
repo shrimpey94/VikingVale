@@ -148,13 +148,18 @@ const _NPCS: Array = [
 		"Everything of value that passes through this port, I account for.", 16.0],
 	[Vector2(7808, 4480), "shopkeeper", "Fish Trader Knud",
 		"The finest catch from these waters.", 24.0],
-	[Vector2(7936, 4256), "tutor",      "Sea Captain Valdis",
+	# Sea Captain Valdis — Jarl of Bjorn's Landing in the lore. Quest-giver
+	# type so the `!` / `+` markers render on her for the Token + Pledge
+	# chain. Her dialogue/shop functions still work via name lookup.
+	[Vector2(7936, 4256), "quest",      "Sea Captain Valdis",
 		"The ocean depths hold monsters unlike any you've seen on land.", 32.0],
 	# ── Wilderness outposts ──────────────────────────────────────────────────────
 	[Vector2(2080, 1600), "worker", "Mountain Pass Guard Bjork",
 		"Turn back, traveller. The peaks ahead are treacherous.", 48.0],
-	[Vector2(3200, 5600), "worker", "Ironwood Hermit Skade",
-		"I have lived in these woods for forty years.", 80.0],
+	# Skade's hermitage — central plains, the empty zone in the world map.
+	# Quest-load-bearing for q_old_bjarnes_letter and q_token_heart.
+	[Vector2(4800, 4800), "worker", "Ironwood Hermit Skade",
+		"I have walked between the burning ones for forty years. Sit. Speak only what you must.", 32.0],
 	[Vector2(6400, 4200), "worker", "Coastal Scout Hafi",
 		"The eastern road is clear — for now. Keep your sword ready.", 64.0],
 ]
@@ -369,6 +374,25 @@ func _spawn_admin_entity(entity: Dictionary) -> void:
 			fp.set("entity_id", id)
 			_admin_registry[id] = fp
 			c.add_child(fp)
+		"stronghold", "banner", "outpost":
+			# Warband structures spawn as Interactable nodes with a custom
+			# type_str so they reuse all the depth-pass, hover, and
+			# collision plumbing. No gather logic — they're decorative for
+			# v1 (clicking later opens a warband info popup).
+			var ws_node: Node2D = _Interactable.instantiate()
+			ws_node.position              = pos
+			ws_node.interactable_type_str = kind
+			ws_node.display_name          = "Warband %s" % kind.capitalize()
+			ws_node.required_skill        = ""
+			ws_node.required_level        = 1
+			ws_node.action_label          = "Inspect"
+			# Owner warband_id stored in entity meta so click-handlers can
+			# look up which warband this belongs to.
+			ws_node.color                 = Color(0.55, 0.30, 0.18)
+			ws_node.entity_id             = id
+			ws_node.set_meta("warband_id", str(data.get("warband_id", "")))
+			_admin_registry[id] = ws_node
+			c.add_child(ws_node)
 	# Tag so the editor's unified click-search finds admin entities too (their
 	# a: id routes back to the admin placement handlers on delete/move).
 	if _admin_registry.has(id):

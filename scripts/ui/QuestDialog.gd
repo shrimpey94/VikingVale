@@ -13,6 +13,7 @@ extends CanvasLayer
 
 const VikingPanelScene = preload("res://scripts/ui/VikingPanel.gd")
 const QuestData   = preload("res://scripts/QuestData.gd")
+const Lore        = preload("res://scripts/Lore.gd")
 
 const PANEL_SIZE := Vector2(440, 480)
 
@@ -28,6 +29,10 @@ var _btn_row:    HBoxContainer  = null
 var _quest_id:   String = ""
 var _mode:       String = ""
 var _npc_name:   String = ""
+# When the user clicks "About this town", we stash the prior mode so the
+# Back button can restore the offer/reminder/turnin view rather than
+# defaulting to reminder.
+var _saved_mode: String = ""
 
 func _ready() -> void:
 	layer = 85   # above QuestLog (80) so it overlays if both pop together
@@ -151,14 +156,86 @@ func _refresh() -> void:
 		"offer":   _render_offer(def)
 		"turnin":  _render_turnin(def)
 		"reminder": _render_reminder(def)
+		"lore":    _render_lore(def)
 		_:         _render_reminder(def)
+	# "About this town" button — only on quest modes, never lore mode itself.
+	if _mode != "lore":
+		_add_lore_button()
 
 func _mode_label() -> String:
 	match _mode:
 		"offer":    return "New Quest"
 		"turnin":   return "Ready to Turn In"
 		"reminder": return "In Progress"
+		"lore":     return "About This Town"
 	return ""
+
+## LORE: town description + Jarl bio + Back button.
+func _render_lore(_def: Dictionary) -> void:
+	var town_id := Lore.town_of_npc(_npc_name)
+	var town: Dictionary = Lore.town(town_id) if town_id != "" else {}
+	if town.is_empty():
+		var lbl := Label.new()
+		lbl.text = "Little is known of this place."
+		lbl.add_theme_color_override("font_color", TEXT_DIM)
+		_body_root.add_child(lbl)
+		_add_btn("Back", TEXT_DIM, func() -> void:
+			_mode = "reminder"
+			_refresh())
+		return
+	# Region subtitle.
+	var region := Label.new()
+	region.text = str(town.get("region", ""))
+	region.add_theme_color_override("font_color", TEXT_DIM)
+	region.add_theme_font_size_override("font_size", 11)
+	_body_root.add_child(region)
+	# Description scroll.
+	var scroll := ScrollContainer.new()
+	scroll.custom_minimum_size = Vector2(0, 160)
+	scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	var col := VBoxContainer.new()
+	col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	col.add_theme_constant_override("separation", 6)
+	scroll.add_child(col)
+	var desc := Label.new()
+	desc.text = str(town.get("description", ""))
+	desc.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	desc.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	desc.add_theme_color_override("font_color", TEXT_WARM)
+	desc.add_theme_font_size_override("font_size", 12)
+	col.add_child(desc)
+	col.add_child(_thin_divider())
+	var jarl_head := Label.new()
+	jarl_head.text = "Jarl · %s" % str(town.get("jarl", ""))
+	jarl_head.add_theme_color_override("font_color", TEXT_GOLD)
+	jarl_head.add_theme_font_size_override("font_size", 12)
+	col.add_child(jarl_head)
+	var jarl_bio := Label.new()
+	jarl_bio.text = str(town.get("jarl_bio", ""))
+	jarl_bio.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	jarl_bio.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	jarl_bio.add_theme_color_override("font_color", TEXT_WARM)
+	jarl_bio.add_theme_font_size_override("font_size", 12)
+	col.add_child(jarl_bio)
+	_body_root.add_child(scroll)
+	_add_btn("Back", TEXT_DIM, func() -> void:
+		_mode = _saved_mode if _saved_mode != "" else "reminder"
+		_refresh())
+
+func _add_lore_button() -> void:
+	var town_id := Lore.town_of_npc(_npc_name)
+	if town_id == "":
+		return
+	var town: Dictionary = Lore.town(town_id)
+	if town.is_empty():
+		return
+	var label := "About %s" % str(town.get("name", "this town"))
+	_add_btn(label, TEXT_DIM, func() -> void:
+		_saved_mode = _mode
+		_mode = "lore"
+		_refresh())
 
 ## OFFER: description + objectives (no progress) + rewards preview + Accept/Decline
 func _render_offer(def: Dictionary) -> void:
