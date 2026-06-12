@@ -830,6 +830,9 @@ func _handle(msg: Dictionary) -> void:
 				var dmg := int(msg.get("damage", 0))
 				if dmg > 0:
 					GameManager.take_damage(dmg)
+					# Match the local-fight path so AudioManager hears it
+					# in server mode too (down-pitched melee_hit).
+					Events.monster_attack_landed.emit()
 
 		"friend_request":
 			Events.friend_request_received.emit(str(msg.get("from", "")))

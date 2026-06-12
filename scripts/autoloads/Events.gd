@@ -19,6 +19,45 @@ extends Node
 @warning_ignore("unused_signal") signal request_whisper(username: String)
 @warning_ignore("unused_signal") signal request_trade(username: String)
 @warning_ignore("unused_signal") signal xp_gained(skill: String, amount: int)
+## Fired by GameManager.add_xp the moment a skill crosses an integer level
+## threshold. AudioManager listens for the fanfare; HUD listens for the
+## floating level-up banner. Skill name is canonical ("attack", "fishing"…),
+## new_level is the level just reached.
+@warning_ignore("unused_signal") signal level_up(skill: String, new_level: int)
+## Fired by GameManager the instant a quest's turn-in is acknowledged by the
+## server. Distinct from quest_state_changed which also fires on accept /
+## progress / abandon — this one is "the chime moment".
+@warning_ignore("unused_signal") signal quest_completed(quest_id: String)
+## Player started an attack swing. `style` is "melee" / "ranged" / "magic".
+## Fired BEFORE damage resolves (during the windup) so the swing sound is
+## tightly coupled to the visible action.
+@warning_ignore("unused_signal") signal attack_swung(style: String)
+## Damage from the player landed on a target. Same style values. Fires once
+## per confirmed hit — projectile-on-arrival for ranged/magic, immediate
+## for melee.
+@warning_ignore("unused_signal") signal attack_landed(style: String)
+## Monster connected on the player. No params — AudioManager plays a
+## down-pitched, slightly randomized melee_hit so the player can tell
+## "I got hit" apart from "I hit them".
+@warning_ignore("unused_signal") signal monster_attack_landed()
+## Player left-clicked a monster. Carries the monster ref + viewport-space
+## screen position for the HUD to anchor the action popup. The popup decides
+## what happens next — combat is NOT auto-entered on click anymore.
+@warning_ignore("unused_signal") signal monster_clicked(monster: Node, screen_pos: Vector2)
+## Player picked "Attack" in the monster action popup. Combat starts
+## immediately on receipt — no proximity walk, no auto-engage. The player
+## stays where they are; the monster chases. Range / movement logic lives
+## on the server's aggro chase.
+@warning_ignore("unused_signal") signal monster_attack_chosen(monster: Node)
+## Right-click on any actionable node (monster, NPC, interactable) — HUD
+## inspects `node` and pops the type-appropriate menu (Attack/Examine for
+## a monster, Mine/Examine for a rock, Use Bank for a bank, Talk for an
+## NPC, etc.). `screen_pos` is viewport-space for menu anchoring.
+@warning_ignore("unused_signal") signal action_menu_requested(node: Node, screen_pos: Vector2)
+## Right-click on empty world space — drops the panel target selection so
+## the panel returns to the "no target" state (player HP + style toggles
+## only).
+@warning_ignore("unused_signal") signal target_cleared()
 @warning_ignore("unused_signal") signal item_gained(item_name: String, qty: int)
 @warning_ignore("unused_signal") signal open_forge()
 @warning_ignore("unused_signal") signal open_cooking()

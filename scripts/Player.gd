@@ -31,6 +31,7 @@ var _target_monster:  Node = null
 var _in_combat:       bool = false
 var _walk_time        := 0.0      # accumulates while MOVING for leg animation
 var _ground:          Node = null  # cached reference to Ground node
+var _footstep_frame:  int  = 0    # 0..3, ticks AudioManager.play_footstep on rollover
 
 # ── Boat / sailing state ─────────────────────────────────────────────────────
 var _sailing:         bool = false
@@ -117,7 +118,7 @@ func _ready() -> void:
 	Events.player_start_action.connect(_on_start_action)
 	Events.player_stop_action.connect(_on_stop_action)
 	Events.player_respawned.connect(_on_player_respawned)
-	Events.monster_targeted.connect(_on_monster_targeted)
+	Events.monster_attack_chosen.connect(_on_monster_attack_chosen)
 	Events.combat_ended.connect(_on_combat_ended_player)
 	Events.boat_toggle.connect(_toggle_boat)
 	# Reel minigame outcome — applies the catch on win, chats the loss on fail.
@@ -169,43 +170,28 @@ func _on_player_respawned(pos: Vector2) -> void:
 		Events.boat_prompt.emit("")
 	queue_redraw()
 
-func _on_monster_targeted(monster: Node) -> void:
+## Player picked "Attack" from the monster action popup. Combat starts
+## immediately — no proximity walk, no range check, no automated movement.
+## The player stays exactly where they are; the server's aggro chase brings
+## the monster to the player (DE_AGGRO leash raised to support 600+ px
+## engagement on the server side). Ranged / magic resource checks still
+## fire — if you click Attack with no arrows / no runes, the open_combat
+## call still goes through and HUD._launch_player_attack will fall back to
+## melee or post a chat warning. That keeps the popup decision authoritative
+## and matches "Attack means combat starts."
+func _on_monster_attack_chosen(monster: Node) -> void:
+	if monster == null or not (monster is Node2D) or not (monster.get("is_alive") as bool):
+		print("[combat-debug] attack chosen but monster invalid")
+		return
 	if _state == PlayerState.ACTING:
 		Events.player_stop_action.emit()
 	_target_interactable = null
-	if monster == null or not (monster is Node2D):
-		return
-	var style := GameManager.combat_style
-	var dist := global_position.distance_to((monster as Node2D).global_position)
-	# ── Ranged: check arrows + in-range, then start without moving ──
-	if style == "ranged":
-		if GameManager.get_item_qty("arrows") <= 0:
-			Events.chat_message.emit("You have no arrows.")
-			return
-		if dist > RANGED_RANGE:
-			Events.chat_message.emit("Target is out of range.")
-			return
-		_target_monster = monster
-		_target_pos     = global_position   # stand still
-		Events.open_combat.emit(monster)
-		_in_combat = true
-		return
-	# ── Magic: check active rune in stock + in-range, then start without moving ──
-	if style == "magic":
-		var rune_id: String = GameManager.active_rune
-		if rune_id == "" or GameManager.get_item_qty(rune_id) <= 0:
-			Events.chat_message.emit("You don't have enough runes.")
-			return
-		if dist > MAGIC_RANGE:
-			Events.chat_message.emit("Target is out of range.")
-			return
-		_target_monster = monster
-		_target_pos     = global_position
-		Events.open_combat.emit(monster)
-		_in_combat = true
-		return
-	# ── Melee: walk in until edge-to-edge gap is satisfied ──
-	_target_monster = monster
+	_target_monster      = monster
+	_target_pos          = global_position   # stand-still — explicit
+	velocity             = Vector2.ZERO
+	_in_combat           = true
+	print("[combat-debug] attack_chosen: instant combat open, no movement, style=%s" % GameManager.combat_style)
+	Events.open_combat.emit(monster)
 
 ## Edge-to-edge stop distance for melee. Sum of player radius + the monster's
 ## horizontal shadow-footprint radius + MELEE_EDGE_GAP. Falls back to a
@@ -271,33 +257,15 @@ func _physics_process(delta: float) -> void:
 	if _ground == null:
 		_ground = get_tree().get_first_node_in_group("ground")
 
-	# Monster approach / disengage (runs every frame before movement).
-	# Approach behavior depends on the active combat style:
-	#   melee  — walk in until edge-to-edge gap is satisfied, then auto-engage.
-	#   ranged — engagement was set at click time; only disengage if too far.
-	#   magic  — same as ranged.
+	# Monster state cleanup. The old auto-approach / auto-engage path is
+	# gone — combat is only entered from the "Attack" popup. This branch now
+	# does ONE job: drop _target_monster + _in_combat the moment the target
+	# becomes invalid (despawned, died, or admin-purged). The server's aggro
+	# chase governs distance, not the client.
 	if _target_monster != null:
 		if not is_instance_valid(_target_monster) or not (_target_monster.get("is_alive") as bool):
 			_target_monster = null
 			_in_combat      = false
-		else:
-			var mon2d := _target_monster as Node2D
-			var dist := global_position.distance_to(mon2d.global_position)
-			var style := GameManager.combat_style
-			var disengage: float
-			match style:
-				"ranged": disengage = RANGED_RANGE * 1.20
-				"magic":  disengage = MAGIC_RANGE  * 1.20
-				_:        disengage = DISENGAGE_RANGE
-			if _in_combat and dist > disengage:
-				Events.combat_ended.emit()
-			elif not _in_combat and style == "melee":
-				var stop_dist := _melee_stop_dist(_target_monster)
-				if dist <= stop_dist + 0.5:
-					Events.open_combat.emit(_target_monster)
-					_in_combat = true
-				else:
-					_target_pos = _melee_stop_pos(mon2d, stop_dist)
 
 	var spd := _move_speed()
 	var kb := _keyboard_direction()
@@ -341,6 +309,15 @@ func _physics_process(delta: float) -> void:
 	if _state == PlayerState.MOVING:
 		_walk_time += get_physics_process_delta_time()
 		queue_redraw()
+		# Footstep cadence — fire every 4 movement frames while actually
+		# moving (skip while sailing). AudioManager handles biome→sample
+		# mapping and alternates pitch internally so the L/R feet diverge.
+		if not _sailing and velocity != Vector2.ZERO:
+			_footstep_frame += 1
+			if _footstep_frame >= 4:
+				_footstep_frame = 0
+				var biome: String = _ground.biome_at_world(global_position) as String if _ground != null else "plains"
+				AudioManager.play_footstep(biome)
 
 	move_and_slide()
 
@@ -841,32 +818,49 @@ func _unhandled_input(event: InputEvent) -> void:
 				_target_monster      = null
 			else:
 				var mon := _query_monster(get_global_mouse_position())
-				if mon == null:
-					_target_monster = null
-				_target_interactable = null
-				_target_pos          = get_global_mouse_position()
+				if mon != null:
+					# Monster._input_event already emitted monster_clicked
+					# which routed to HUD's action popup. Player does NOT
+					# move on a monster click — combat only enters via the
+					# popup's "Attack" choice. We clear the stale
+					# interactable target but leave _target_pos alone so
+					# the player stands still while choosing.
+					_target_interactable = null
+				else:
+					_target_monster      = null
+					_target_interactable = null
+					_target_pos          = get_global_mouse_position()
 		MOUSE_BUTTON_RIGHT:
-			# Polish v3 — right-clicking a runestone opens the rune smithing UI
-			# without interrupting motion (the left-click 'Study' XP grant is
-			# still available). Checked BEFORE the cancel paths so it wins.
-			var ihit := _query_interactable(get_global_mouse_position())
-			if ihit != null and str(ihit.get("interactable_type_str")) == "runestone":
-				Events.open_runesmithing.emit()
+			# Generic right-click action menu. Routing order: monster → any
+			# interactable (rocks, trees, fish, herbs, NPCs, banks, forges,
+			# banners, doors, …) → other player → empty space.
+			var screen_pos := get_viewport().get_mouse_position()
+			var mon_r := _query_monster(get_global_mouse_position())
+			if mon_r != null:
+				Events.action_menu_requested.emit(mon_r, screen_pos)
 				get_viewport().set_input_as_handled()
 				return
-			if _state == PlayerState.ACTING:
-				Events.player_stop_action.emit()
-			if _in_combat:
-				Events.combat_ended.emit()
+			var ihit := _query_interactable(get_global_mouse_position())
+			if ihit != null:
+				Events.action_menu_requested.emit(ihit, screen_pos)
+				get_viewport().set_input_as_handled()
+				return
 			var op := _query_other_player(get_global_mouse_position())
 			if op != null:
 				var uname := str((op as Node2D).get_meta("username", "?"))
-				Events.player_context_menu.emit(uname, get_viewport().get_mouse_position())
+				Events.player_context_menu.emit(uname, screen_pos)
 				get_viewport().set_input_as_handled()
 				return
+			# Empty space — cancel current action, stop movement, drop the
+			# panel's selected target (combat-end is separately driven by
+			# the Flee button in the panel; right-click no longer kills an
+			# active fight by surprise).
+			if _state == PlayerState.ACTING:
+				Events.player_stop_action.emit()
 			_target_interactable = null
 			_target_pos          = global_position
 			velocity             = Vector2.ZERO
+			Events.target_cleared.emit()
 		MOUSE_BUTTON_WHEEL_UP:
 			if _cam != null:
 				_cam.zoom = (_cam.zoom * 1.1).clamp(Vector2(0.5, 0.5), Vector2(3.0, 3.0))

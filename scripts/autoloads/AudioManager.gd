@@ -80,15 +80,23 @@ var _volumes: Dictionary = {                 # bus name → 0..100
 	BUS_AMBIENCE: 50,
 }
 
-# Footstep gating — clients call play_footstep() per frame they're moving;
-# this rate-limits to one footstep per ~0.35s (≈ a walk cadence).
+# Footstep gating — Player.gd ticks play_footstep() every 4 movement frames;
+# this is a backstop cooldown so a runaway caller can't queue rapid-fire steps.
 var _footstep_cooldown: float = 0.0
-const _FOOTSTEP_INTERVAL := 0.35
+const _FOOTSTEP_INTERVAL := 0.20
 var _footstep_left: bool = true
 
 # Track the currently-playing music + ambience track for skip-if-same checks.
 var _current_music_id: String = ""
 var _current_ambience_id: String = ""
+
+# Biome poll — switches music (town/wilderness) and ambience based on the
+# player's current tile. Music (mode + intensity + phrases) is owned by
+# NorseMusic.gd; this poll only feeds the Ambience layer.
+var _biome_poll_t: float = 0.0
+const _BIOME_POLL_INTERVAL := 1.0
+var _player_node: Node2D = null
+var _ground_node: Node = null
 
 # ── Lifecycle ────────────────────────────────────────────────────────────────
 func _ready() -> void:
@@ -108,6 +116,40 @@ func _ready() -> void:
 func _process(delta: float) -> void:
 	if _footstep_cooldown > 0.0:
 		_footstep_cooldown -= delta
+	_biome_poll_t += delta
+	if _biome_poll_t >= _BIOME_POLL_INTERVAL:
+		_biome_poll_t = 0.0
+		_poll_biome_for_music_and_ambience()
+
+# Biome-driven ambience poll. Music is now owned by NorseMusic.gd — this
+# function ONLY handles the ambience layer (ocean/wind/forest/cave). The
+# spec says "Existing Ambience Should Stay Dominant" so the ambience system
+# stays here, unchanged, and plays UNDER whatever NorseMusic is rendering.
+func _poll_biome_for_music_and_ambience() -> void:
+	if _player_node == null or not is_instance_valid(_player_node):
+		_player_node = get_tree().get_first_node_in_group("player") as Node2D
+	if _ground_node == null or not is_instance_valid(_ground_node):
+		_ground_node = get_tree().get_first_node_in_group("ground")
+	if _player_node == null or _ground_node == null:
+		return
+	var biome: String = _ground_node.call("biome_at_world", _player_node.global_position) as String
+	var amb := _ambience_id_for_biome(biome)
+	if amb != "":
+		play_ambience(amb)
+	else:
+		stop_ambience()
+
+func _ambience_id_for_biome(biome: String) -> String:
+	match biome:
+		"coast", "ocean":
+			return "ocean"
+		"oak_forest", "pine_forest", "swamp":
+			return "forest"
+		"mountain", "cliff", "rocky":
+			return "cave"
+		"plains", "snow", "dark_forest":
+			return "wind"
+	return "wind"
 
 # ── Bus setup ────────────────────────────────────────────────────────────────
 func _ensure_buses() -> void:
@@ -338,8 +380,44 @@ func _wire_signal_bus() -> void:
 	Events.xp_gained.connect(_on_xp_gained)
 	Events.quest_state_changed.connect(_on_quest_state_changed)
 	Events.monster_killed.connect(_on_monster_killed)
-	Events.combat_ended.connect(_on_combat_ended)
-	Events.open_combat.connect(_on_open_combat)
+	# open_combat / combat_ended music is owned by NorseMusic.gd now.
+	Events.level_up.connect(_on_level_up)
+	Events.quest_completed.connect(_on_quest_completed)
+	Events.attack_swung.connect(_on_attack_swung)
+	Events.attack_landed.connect(_on_attack_landed)
+	Events.monster_attack_landed.connect(_on_monster_attack_landed)
+
+func _on_level_up(_skill: String, _new_level: int) -> void:
+	play_ui("level_up")
+
+func _on_quest_completed(_quest_id: String) -> void:
+	play_ui("quest_complete")
+
+func _on_attack_swung(style: String) -> void:
+	# Small pitch variance per swing so back-to-back combat doesn't sound
+	# mechanically identical.
+	match style:
+		"melee":  play_sfx("sword_swing", 0.6)
+		"ranged": play_sfx("bow_release", 0.4)
+		"magic":  play_sfx("spell_cast",  0.3)
+
+func _on_attack_landed(style: String) -> void:
+	match style:
+		"melee":  play_sfx("melee_hit",    0.5)
+		"ranged": play_sfx("arrow_impact", 0.5)
+		"magic":  play_sfx("magic_hit",    0.4)
+
+# Down-pitched melee_hit so the player can hear who's hitting whom.
+# Random pitch in [0.65, 0.80] — clearly below the player's swing range.
+func _on_monster_attack_landed() -> void:
+	if not _streams.has("melee_hit") or _sfx_pool.is_empty():
+		return
+	var p: AudioStreamPlayer = _sfx_pool[_sfx_idx]
+	_sfx_idx = (_sfx_idx + 1) % _sfx_pool.size()
+	p.stream = _streams["melee_hit"]
+	p.pitch_scale = randf_range(0.65, 0.80)
+	p.volume_db = -1.0
+	p.play()
 
 # Gathering hit — node_hit fires once per swing on a rock/tree/fish node.
 # The interactable's `type_str` determines which sound to play.
@@ -369,25 +447,56 @@ func _on_quest_state_changed() -> void:
 func _on_monster_killed(_monster_type: String) -> void:
 	pass
 
-func _on_open_combat(_monster: Node) -> void:
-	play_music("combat")
-
-func _on_combat_ended() -> void:
-	# Caller should re-establish ambience music. Default back to wilderness.
-	play_music("wilderness")
+# NOTE: Combat / biome / mode music handling moved to NorseMusic.gd.
+# AudioManager retains only the SFX, UI, and Ambience layers; music is now
+# fully owned by the Norse director. The play_music / stop_music API on
+# this class is left in place as a no-op for any legacy caller — there
+# should be none after the cutover, but keeping the surface stable avoids
+# regressions if any test or admin tool calls it directly.
 
 # ── Procedural generation stubs ──────────────────────────────────────────────
-## These are intentionally empty in this commit. The next pass will fill in
-## each with AudioStreamWAV synthesis (sine sweeps, noise bursts, ADSR
-## envelopes, layered loops). Until then the play_*() API is a safe no-op.
+## Each generation pass calls SoundForge and registers the result by ID.
+## Total startup cost: ≈ 1-2 seconds of GDScript loop work in dev builds —
+## acceptable for a single boot, called once from _ready.
+
+const _SoundForge = preload("res://scripts/autoloads/audio/SoundForge.gd")
+
 func _generate_sfx_sounds() -> void:
-	pass
+	# Combat
+	register_sound("sword_swing",    _SoundForge.gen_sword_swing())
+	register_sound("bow_release",    _SoundForge.gen_bow_release())
+	register_sound("spell_cast",     _SoundForge.gen_spell_cast())
+	register_sound("melee_hit",      _SoundForge.gen_melee_hit())
+	register_sound("magic_hit",      _SoundForge.gen_magic_hit())
+	register_sound("arrow_impact",   _SoundForge.gen_arrow_impact())
+	# Gathering
+	register_sound("mining_hit",     _SoundForge.gen_mining_hit())
+	register_sound("wood_chop",      _SoundForge.gen_wood_chop())
+	register_sound("fishing_cast",   _SoundForge.gen_fishing_cast())
+	register_sound("fishing_catch",  _SoundForge.gen_fishing_catch())
+	# Footsteps
+	register_sound("footstep_grass", _SoundForge.gen_footstep_grass())
+	register_sound("footstep_stone", _SoundForge.gen_footstep_stone())
+	register_sound("footstep_wood",  _SoundForge.gen_footstep_wood())
+	register_sound("footstep_dirt",  _SoundForge.gen_footstep_dirt())
 
 func _generate_ui_sounds() -> void:
-	pass
+	register_sound("click",          _SoundForge.gen_ui_click())
+	register_sound("tab_switch",     _SoundForge.gen_ui_tab_switch())
+	register_sound("quest_complete", _SoundForge.gen_quest_complete())
+	register_sound("level_up",       _SoundForge.gen_level_up())
+	register_sound("item_pickup",    _SoundForge.gen_item_pickup())
+	register_sound("craft_success",  _SoundForge.gen_craft_success())
 
 func _generate_ambience_sounds() -> void:
-	pass
+	register_sound("ocean",  _SoundForge.gen_amb_ocean())
+	register_sound("wind",   _SoundForge.gen_amb_wind())
+	register_sound("forest", _SoundForge.gen_amb_forest())
+	register_sound("cave",   _SoundForge.gen_amb_cave())
 
 func _generate_music_sounds() -> void:
+	# Empty by design — NorseMusic.gd owns all music generation now (its
+	# own _ready() pre-renders drones, phrase banks, and percussion loops).
+	# The old town / wilderness / combat one-shots in SoundForge are no
+	# longer referenced and would only burn ~3-5 s of startup time.
 	pass

@@ -219,10 +219,18 @@ func _process(delta: float) -> void:
 			if _regen_timer <= 0.0:
 				_respawn()
 	elif _pursuing and _pursue_target != null and is_instance_valid(_pursue_target):
-		var dir := _pursue_target.global_position - global_position
-		var dist := dir.length()
-		if dist > ATTACK_RANGE:
-			global_position += dir.normalized() * PURSUE_SPEED * delta
+		# Local pursuit is the OFFLINE / fallback path. When the monster is
+		# server-managed the server's AI loop owns the position, and
+		# World.gd tweens it via monster_pos_update broadcasts. Running
+		# local pursuit on top of that tween creates the "2-3 px shuffle"
+		# bug — both writers race for global_position every frame and the
+		# net movement is near zero. Guard so only the local-only path
+		# advances the monster here.
+		if not _is_server_managed():
+			var dir := _pursue_target.global_position - global_position
+			var dist := dir.length()
+			if dist > ATTACK_RANGE:
+				global_position += dir.normalized() * PURSUE_SPEED * delta
 	# ── Walking animation — drive from actual per-frame position delta so this
 	# works for both server-managed (tweened by World.gd from monster_pos_update)
 	# and local-pursue paths without each having to flip an "I'm moving" flag.
@@ -242,7 +250,11 @@ func _input_event(_viewport: Viewport, event: InputEvent, _shape: int) -> void:
 		return
 	if event is InputEventMouseButton and (event as InputEventMouseButton).pressed:
 		if (event as InputEventMouseButton).button_index == MOUSE_BUTTON_LEFT:
-			Events.monster_targeted.emit(self)
+			# Click pops the action menu — combat does NOT start until the
+			# player picks "Attack" from the popup. Screen pos comes from the
+			# viewport mouse position so the menu anchors under the cursor
+			# regardless of camera zoom.
+			Events.monster_clicked.emit(self, get_viewport().get_mouse_position())
 
 func take_damage(amount: int) -> int:
 	var dmg := maxi(1, amount - defense)

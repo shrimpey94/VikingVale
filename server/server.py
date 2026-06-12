@@ -2631,6 +2631,7 @@ async def _handle_admin_place(ws, session: dict, msg: dict) -> None:
             "INSERT INTO world_entities (id, kind, subtype, x, y, data) VALUES (?,?,?,?,?,?)",
             (eid, kind, subtype, x, y, json.dumps(data)))
         conn.commit()
+    _known_admin_entity_ids.add(eid)
     entity = {"id": eid, "kind": kind, "subtype": subtype, "x": x, "y": y, "data": data}
     _broadcast({"type": "world_entity_add", "entity": entity})
     await _admin_confirm(ws, f"Placed {kind} '{subtype}'.")
@@ -2680,11 +2681,19 @@ async def _handle_admin_delete(ws, session: dict, msg: dict) -> None:
     eid = str(msg.get("id", "")).strip()
     if not eid:
         return
+    # ALWAYS purge the AI/combat/SQLite state first. If `eid` is a static
+    # entity (rock / npc / banner) the purge is a no-op (returns False) and
+    # we fall through. If it's a monster (admin-placed `a:...` or procedural
+    # deterministic id), this kills the ghost-AI bug at the source.
+    was_monster = _purge_monster_state(eid)
+    if was_monster:
+        print(f"[admin] {session['username']} purged monster {eid}")
     if eid.startswith("a:"):
         # Admin-placed entity — remove from the persistent placement table.
         with _db() as conn:
             conn.execute("DELETE FROM world_entities WHERE id=?", (eid,))
             conn.commit()
+        _known_admin_entity_ids.discard(eid)
         _broadcast({"type": "world_entity_remove", "id": eid})
     else:
         # Pre-existing (procedural/hardcoded) entity — record a deletion edit.
@@ -2694,6 +2703,9 @@ async def _handle_admin_delete(ws, session: dict, msg: dict) -> None:
                 "ON CONFLICT(id) DO UPDATE SET deleted=1", (eid,))
             conn.commit()
         _broadcast({"type": "entity_edit", "id": eid, "deleted": True})
+    # Mark dead in the existence cache so the AI tick loop's safety net
+    # rejects any leftover monsters_state entry on the very next tick.
+    _purged_entity_ids.add(eid)
     await _admin_confirm(ws, "Deleted entity.")
 
 
@@ -5389,7 +5401,14 @@ MONSTER_AGGRO_BASE      = 120.0   # px, level-1 monsters' aggro radius
 MONSTER_AGGRO_PER_LV    = 2.0     # px per level on top of the base
 MONSTER_AGGRO_MIN       = 80.0    # floor, even for level 1
 MONSTER_AGGRO_MAX       = 220.0   # cap, even for level 99
-MONSTER_DE_AGGRO        = 250.0   # break aggro if target > this from monster home
+MONSTER_DE_AGGRO        = 1200.0  # break aggro if target > this from monster home.
+                                  # Raised from 250 so player-initiated combat
+                                  # via the "Attack" popup can engage from up to
+                                  # ~600 px away without the monster giving up
+                                  # mid-walk. The leash is measured from the
+                                  # monster's home (spawn point), so this gives
+                                  # ~1200 px of player movement headroom before
+                                  # the chase is officially abandoned.
 MONSTER_HOME_LEASH      = 300.0   # snap monster back home if it strays this far
 MONSTER_WANDER_RADIUS   = 80.0    # px around home for wander targets
 # Idle-between-movements timer. Each monster picks a random value from this
@@ -5629,6 +5648,16 @@ async def _handle_monster_join(ws, session: dict, msg: dict) -> None:
             return
         st["participants"].append(pid)
         st["damage"].setdefault(pid, 0)
+    # Force-aggro the engaging player. The new client flow opens combat the
+    # instant the player picks "Attack" from the popup — there is no
+    # proximity walk. The server therefore has to flip the monster into
+    # aggro chase mode pointed at THIS player so it starts walking toward
+    # them, even if they're 600+ px away. `last_attack_at` is left alone so
+    # an already-aggroed monster doesn't get its swing timer reset.
+    if _is_ai_seeded(st) and st.get("alive", True):
+        st["state"] = "aggro"
+        st["target_player"] = session["username"]
+        st.setdefault("last_attack_at", 0.0)
     await _send(ws, {"type": "monster_state", "id": mid,
                      "hp": st["hp"], "max_hp": st["max_hp"], "alive": True})
 
@@ -5737,8 +5766,31 @@ async def _monster_die(mid: str, st: dict) -> None:
 async def _handle_monster_leave(ws, session: dict, msg: dict) -> None:
     mid = str(msg.get("id", ""))
     st = monsters_state.get(mid)
-    if st is not None and session["id"] in st["participants"]:
-        st["participants"].remove(session["id"])
+    if st is None:
+        return
+    pid = session["id"]
+    if pid in st["participants"]:
+        st["participants"].remove(pid)
+    # If the leaving player was the aggro target, drop aggro. If other
+    # participants remain (co-op), repoint at the next still-online
+    # participant so the fight doesn't lose its target mid-swing. If no
+    # one is left, return the monster to idle so it doesn't chase nobody.
+    if st.get("target_player") == session["username"]:
+        new_target_user = None
+        for other_pid in list(st["participants"]):
+            other_ws = _ws_for_player(other_pid)
+            if other_ws is not None and other_ws in sessions:
+                new_target_user = sessions[other_ws]["username"]
+                break
+        if new_target_user is not None:
+            st["target_player"] = new_target_user
+        else:
+            st["state"] = "idle"
+            st["target_player"] = None
+            st["wander_x"] = st.get("home_x", st["x"])
+            st["wander_y"] = st.get("home_y", st["y"])
+            st["next_wander_at"] = time.time() + random.uniform(
+                *_wander_interval_for(st.get("monster_type", "")))
 
 
 async def _handle_monster_states(ws, session: dict, msg: dict) -> None:
@@ -5765,6 +5817,89 @@ def _clear_player_combat(player_id: str) -> None:
     for st in monsters_state.values():
         if player_id in st["participants"]:
             st["participants"].remove(player_id)
+
+
+# ── Entity-existence caches (safety net for ghost-monster cleanup) ──────────
+# `_purged_entity_ids` is the authoritative "this id is deleted" set. It
+# starts populated from `entity_edits.deleted=1` (procedural monsters that
+# admins deleted in prior sessions) and grows whenever `_handle_admin_delete`
+# runs. The monster AI loop checks it every tick — any mid in this set gets
+# purged and skipped, even if some prior code path forgot to call
+# `_purge_monster_state` directly.
+#
+# `_known_admin_entity_ids` mirrors the `world_entities` table for `a:...`
+# placeable entities. If an admin-placed monster's id is NOT in here, the
+# loop treats it as deleted. This catches the case where the world_entities
+# row was removed (admin_delete → DB delete) but somehow monsters_state still
+# had a leftover entry.
+_purged_entity_ids: set = set()
+_known_admin_entity_ids: set = set()
+
+
+def _load_entity_existence_caches() -> None:
+    """Hydrate both caches from SQLite at boot. Called once from main()."""
+    global _purged_entity_ids, _known_admin_entity_ids
+    with _db() as conn:
+        del_rows = conn.execute(
+            "SELECT id FROM entity_edits WHERE deleted=1").fetchall()
+        _purged_entity_ids = {str(r["id"]) for r in del_rows}
+        we_rows = conn.execute(
+            "SELECT id FROM world_entities WHERE id LIKE 'a:%'").fetchall()
+        _known_admin_entity_ids = {str(r["id"]) for r in we_rows}
+    print(f"[existence] loaded {len(_purged_entity_ids)} purged ids, "
+          f"{len(_known_admin_entity_ids)} admin entities")
+
+
+def _is_entity_marked_dead(mid: str) -> bool:
+    """True if the AI loop should skip + purge this monster id.
+    Cheap O(1) set lookups — safe to call every tick per monster."""
+    if mid in _purged_entity_ids:
+        return True
+    if mid.startswith("a:") and mid not in _known_admin_entity_ids:
+        return True
+    return False
+
+
+def _purge_monster_state(mid: str) -> bool:
+    """Hard-delete a monster from the live AI / combat / persistence layer.
+    Must be called from every admin-delete path (admin panel + slash commands
+    + admin_delete message). Without it `monsters_state[mid]` keeps ticking:
+    the AI loop chases players invisibly, attack broadcasts fire from a
+    monster the client already despawned, and respawn rolls in 30s.
+
+    Steps (must run synchronously, no awaits between them):
+      1. Pop the monsters_state entry. AI loop's per-tick snapshot
+         (`list(monsters_state.items())`) won't pick it up again next tick.
+      2. The popped entry took `participants` + `damage` + `target_player`
+         with it — no separate aggro / participant lookup tables exist.
+      3. Synchronously DELETE the SQLite monster_state row so a server
+         restart doesn't rehydrate the corpse.
+      4. Drop the id from the dirty set so the next flush doesn't try to
+         re-UPSERT it (the flush already handles "popped" gracefully via
+         the `st is None` branch, but skipping the work is cheaper).
+      5. Broadcast `monster_died` GLOBALLY (not _broadcast_near) — admin
+         deletes happen from arbitrary positions and any client with the
+         monster loaded into their world needs to free the visual.
+
+    Returns True if the monster existed and was purged, False if it wasn't
+    in monsters_state at all (caller-side logging only)."""
+    st = monsters_state.pop(mid, None)
+    _monster_state_dirty.discard(mid)
+    # SQLite delete is best-effort — a transient connection failure here
+    # shouldn't block the in-memory purge that's already done.
+    try:
+        with _db() as conn:
+            conn.execute(
+                "DELETE FROM monster_state WHERE monster_id=?", (mid,))
+            conn.commit()
+    except Exception as ex:
+        print(f"[purge_monster] DB delete failed for {mid}: {ex}")
+    # Use monster_died so clients reuse the existing death cleanup path
+    # (Events.mob_died → Monster node frees itself). Empty xp_recipients
+    # so no one gets credit for an admin delete.
+    _broadcast({"type": "monster_died", "id": mid, "killer": "",
+                "xp_each": 0, "participants": [], "xp_recipients": []})
+    return st is not None
 
 
 async def _world_tick_loop() -> None:
@@ -5839,6 +5974,18 @@ async def _monster_ai_loop() -> None:
         now = time.time()
         attack_msgs = []   # list of (x, y, msg) to broadcast after the tick
         for mid, st in list(monsters_state.items()):
+            # Safety net for ghost-monsters. If an admin deleted this entity
+            # (entity_edits.deleted=1 OR admin-placed row gone from
+            # world_entities), we MUST stop ticking it — otherwise the
+            # monster keeps chasing + attacking invisibly while the client
+            # has long since freed its visual. Cheap O(1) set check; the
+            # full purge (SQLite delete + monster_died broadcast) only runs
+            # the first time the safety net triggers.
+            if _is_entity_marked_dead(mid):
+                print(f"[ai_loop] purging ghost monster {mid} "
+                      f"(missed cleanup path)")
+                _purge_monster_state(mid)
+                continue
             if not st.get("alive", True):
                 continue
             if "state" not in st:
@@ -5859,17 +6006,29 @@ def _tick_monster_ai(mid: str, st: dict, now: float, attack_msgs: list) -> None:
     cur_x, cur_y = st["x"], st["y"]
 
     # Home leash — snap-back is the safety net for any state that drags the
-    # monster too far (chase de-aggro race, server tick stall, etc.).
-    leash2 = MONSTER_HOME_LEASH * MONSTER_HOME_LEASH
-    dx, dy = cur_x - home_x, cur_y - home_y
-    if dx * dx + dy * dy > leash2:
-        st["x"], st["y"] = home_x, home_y
-        st["state"] = "idle"
-        st["target_player"] = None
-        st["wander_x"], st["wander_y"] = home_x, home_y
-        st["next_wander_at"] = now + random.uniform(
-            *_wander_interval_for(st.get("monster_type", "")))
-        return
+    # monster too far (idle/wander glitches, server tick stall, etc.). It
+    # MUST be skipped during a legitimate aggro chase, otherwise a monster
+    # engaged from 400-1000 px away gets yanked home mid-chase before it
+    # can ever reach the player. That was the "monster shuffles 2-3 px and
+    # never closes the gap" bug — player would press Attack, server flipped
+    # state to aggro, the chase started, but after ~300 px from home the
+    # leash teleported the monster back and the cycle repeated.
+    #
+    # The aggro state covers the legitimate case; if target_player went
+    # missing the aggro branch below resets to idle naturally. So the only
+    # path that needs the leash is "stuck in idle/wander but somehow far
+    # from home" — that we keep.
+    if st["state"] != "aggro":
+        leash2 = MONSTER_HOME_LEASH * MONSTER_HOME_LEASH
+        dx, dy = cur_x - home_x, cur_y - home_y
+        if dx * dx + dy * dy > leash2:
+            st["x"], st["y"] = home_x, home_y
+            st["state"] = "idle"
+            st["target_player"] = None
+            st["wander_x"], st["wander_y"] = home_x, home_y
+            st["next_wander_at"] = now + random.uniform(
+                *_wander_interval_for(st.get("monster_type", "")))
+            return
 
     # ── Aggro / chase / attack ──
     if st["state"] == "aggro":
@@ -5912,22 +6071,21 @@ def _tick_monster_ai(mid: str, st: dict, now: float, attack_msgs: list) -> None:
             }))
         return
 
-    # ── Proximity aggro trigger (hostile only) ──
-    if st["hostile"]:
-        radius = float(st["aggro_radius"])
-        best_d2 = radius * radius
-        best_target = None
-        for sess in sessions.values():
-            sx, sy = float(sess.get("x", 0.0)), float(sess.get("y", 0.0))
-            ddx, ddy = sx - cur_x, sy - cur_y
-            d2 = ddx * ddx + ddy * ddy
-            if d2 < best_d2:
-                best_d2 = d2
-                best_target = sess
-        if best_target is not None:
-            st["state"] = "aggro"
-            st["target_player"] = best_target["username"]
-            return
+    # ── Proximity aggro: DISABLED ─────────────────────────────────────
+    # The new combat flow is strictly player-initiated: the player must
+    # left-click the monster (which opens the unified panel) and then
+    # press Attack to engage. There is no scenario where a monster should
+    # decide on its own to attack a player — chickens, rats, draugr,
+    # bears, everything stays passive until provoked. `_handle_monster_join`
+    # is the only path that sets state=aggro; the rest of this tick body
+    # below handles wandering, which is correct for unprovoked monsters.
+    #
+    # Removed (was the "Proximity aggro trigger (hostile only)" block):
+    #   - scanned every session within aggro_radius
+    #   - force-set state=aggro + target_player on the nearest one
+    # That made every hostile monster autoaggressive, including some that
+    # had been incorrectly flagged hostile (chickens / rats with stale
+    # SQLite rows from before the _PASSIVE_MONSTER_TYPES table existed).
 
     # ── Wander ──
     # The timer is the ONLY trigger that pulls a monster out of idle. The old
@@ -6269,6 +6427,11 @@ async def main() -> None:
     # so the first login already sees the cleaned-up world.
     _recover_sailing_boats()
     _purge_orphan_monster_state()
+    # Hydrate the entity-existence caches BEFORE loading monster state so
+    # the AI loop's first-tick safety net has a complete view. Order is
+    # idempotent — loading state then loading caches would work too, but
+    # this is the natural dependency direction.
+    _load_entity_existence_caches()
     # Rehydrate the AI dict from the persisted mirror (post-purge so only
     # valid rows reach memory). Non-boss monsters reset to full HP per the
     # partial-persist rule; bosses keep their last persisted HP.

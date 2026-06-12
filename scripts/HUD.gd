@@ -28,6 +28,28 @@ const RS_BTN_H  := Color(0.15, 0.09, 0.03)   # hover
 
 const RS_TEXT   := Color(0.92, 0.85, 0.62)
 const RS_DIM    := Color(0.60, 0.55, 0.38)
+
+# Proximity gate for right-click gather / interact actions. The player must
+# be within 1.5 tiles (48 px) of the target node or the action is refused
+# with a top-of-screen toast. Excludes Attack (its own range system),
+# Talk / Browse / Examine / Enter (dialog or warp actions that don't need
+# you to be hugging the node).
+const ACTION_PROXIMITY      := 48.0
+const GATED_ACTION_LABELS := {
+	"Chop": true, "Mine": true, "Fish": true, "Pick": true, "Gather": true,
+	"Smith": true, "Cook": true, "Craft": true, "Build": true,
+	"Study": true, "Runesmith": true, "Train": true, "Use Bank": true,
+}
+
+# Max distance at which the Attack button is enabled. 14 tiles × 32 px = 448 px.
+# The chase across this distance now actually completes — the server's home
+# leash used to teleport the monster back to spawn after ~300 px of chasing
+# regardless of aggro state, and Monster.gd's local pursuit fought with the
+# server's tween. Both fixed; this range is the new ceiling for engagement.
+# Also enforces a walkability check — the panel won't let you engage across
+# water or other impassable terrain since the monster's straight-line pathing
+# can't cross it.
+const ATTACK_INITIATE_RANGE := 448.0
 const RS_GOLD   := Color(1.00, 0.85, 0.25)
 const RS_GREEN  := Color(0.40, 0.90, 0.40)
 
@@ -98,15 +120,27 @@ var _hp_bar:            ProgressBar     = null
 var _hp_lbl:            Label           = null
 var _combat_window:     PanelContainer  = null
 var _combat_monster:    Node            = null
-var _combat_mon_bar:    ProgressBar     = null
-var _combat_mon_lbl:    Label           = null
+# Unified panel — _selected_target is the monster currently shown in the
+# panel's target section. May be set without _in_combat being true (player
+# clicked but hasn't pressed Attack yet). Cleared when the player closes
+# the panel, right-clicks, or the target dies.
+var _selected_target:   Node            = null
+var _target_section:    VBoxContainer   = null   # parent for the target rows (name/level/HP/Attack)
+var _target_name_lbl:   Label           = null
+var _target_lvl_lbl:    Label           = null
+var _target_hp_bar:     ProgressBar     = null
+var _target_hp_lbl:     Label           = null
+var _attack_btn:        Button          = null
+var _flee_btn:          Button          = null
+var _combat_log_box:    VBoxContainer   = null   # wraps log + flee, shown only in combat
 var _combat_plr_bar:    ProgressBar     = null
 var _combat_plr_lbl:    Label           = null
 var _combat_log:        Label           = null
 var _combat_style:      String          = "melee"
 var _style_btns:        Dictionary      = {}
-# Persistent-toggle UI (lives near the HP bar, mirrors GameManager state).
-var _persist_style_btns:  Dictionary    = {}     # "melee" / "ranged" / "magic" → Button
+# Rune sub-row — kept the `_persist_*` names because the existing rune-row
+# refresh/click handlers reference them. The row now lives inside the
+# unified panel, not in a separate persistent strip.
 var _persist_rune_row:    HBoxContainer = null   # visible only when style == "magic"
 var _persist_rune_btns:   Dictionary    = {}     # rune_id → Button
 # Per-fight "out of ammo / runes" fallback chat dedupe.
@@ -268,6 +302,9 @@ func _ready() -> void:
 	Events.ah_cancel_result.connect(_on_ah_cancel_result)
 	Events.idle_summary.connect(_show_idle_summary)
 	Events.player_context_menu.connect(_on_player_context_menu)
+	Events.monster_clicked.connect(_on_monster_clicked)
+	Events.action_menu_requested.connect(_on_action_menu_requested)
+	Events.target_cleared.connect(_clear_target)
 	Events.player_lookup_result.connect(_on_player_lookup_result)
 	Events.xp_gained.connect(_on_toast_xp)
 	Events.item_gained.connect(_on_toast_item)
@@ -295,6 +332,11 @@ func _process(delta: float) -> void:
 		_coords_lbl.text = "(%d, %d)" % [tx, ty]
 	if _in_combat:
 		_combat_tick(delta)
+	elif _selected_target != null:
+		# Out of combat but a target is selected — keep the panel's target
+		# HP bar live (target may be taking damage from other players or
+		# despawning). _update_combat_ui handles invalid/dead self-clear.
+		_update_combat_ui()
 	if _minimap_canvas != null:
 		_minimap_canvas.queue_redraw()
 	# Proximity auto-close — only ticks every PROXIMITY_TICK seconds to keep
@@ -379,7 +421,7 @@ func _build_ui() -> void:
 	_build_interaction_popup()
 	_build_coords_label()
 	_build_hp_bar()
-	_build_persistent_combat_strip()
+	# Persistent strip merged into the unified panel; no separate build call.
 	_build_forge_window()
 	_build_cook_window()
 	_build_craft_window()
@@ -1799,108 +1841,16 @@ func _on_player_hp_changed(current: int, maximum: int) -> void:
 	_hp_bar.value     = current
 	_hp_lbl.text      = "HP  %d / %d" % [current, maximum]
 
-# ── Persistent combat-style toggle (near the HP bar) ─────────────────────────
-## Three style buttons + a rune sub-row visible only when Magic is active.
-## Pushes through GameManager.set_combat_style so the choice persists across
-## logout. Combat-window buttons mirror via the combat_style_changed signal.
-func _build_persistent_combat_strip() -> void:
-	var panel := PanelContainer.new()
-	panel.add_theme_stylebox_override("panel", _rs(RS_BG, RS_BORDER, 2))
-	panel.anchor_left = 1.0; panel.anchor_right = 1.0
-	panel.anchor_top  = 1.0; panel.anchor_bottom = 1.0
-	# Sits ABOVE the chat panel. Chat is now 2.5× larger (CHAT_W × CHAT_H,
-	# top at -CHAT_H-60); the strip clears it with a 4 px gap. Width also
-	# matched to CHAT_W for visual alignment along the right edge.
-	panel.offset_left   = -CHAT_W - 6; panel.offset_right  = -6
-	panel.offset_top    = -CHAT_H - 128
-	panel.offset_bottom = -CHAT_H - 64
-	add_child(panel)
-
-	var root := VBoxContainer.new()
-	root.add_theme_constant_override("separation", 3)
-	panel.add_child(root)
-
-	# Three style buttons in a row.
-	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 3)
-	root.add_child(row)
-	for entry: Array in [["⚔", "melee"], ["🏹", "ranged"], ["✨", "magic"]]:
-		var sb := Button.new()
-		sb.text = entry[0] as String
-		sb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		sb.custom_minimum_size = Vector2(0, 22)
-		sb.add_theme_stylebox_override("normal",  _rs(RS_BTN_N, RS_BORDER.darkened(0.4), 2))
-		sb.add_theme_stylebox_override("hover",   _rs(RS_BTN_H, RS_GOLD, 2))
-		sb.add_theme_stylebox_override("pressed", _rs(RS_BTN_A, RS_GOLD, 2))
-		sb.add_theme_color_override("font_color", RS_TEXT)
-		sb.add_theme_font_size_override("font_size", 14)
-		var sval: String = entry[1] as String
-		_persist_style_btns[sval] = sb
-		sb.pressed.connect(func() -> void: _on_persist_style_pressed(sval))
-		row.add_child(sb)
-
-	# Rune sub-row — populated on demand by _refresh_persist_rune_row.
-	_persist_rune_row = HBoxContainer.new()
-	_persist_rune_row.add_theme_constant_override("separation", 2)
-	root.add_child(_persist_rune_row)
-
-	# Sync initial state from GameManager (loaded from server on login).
-	_combat_style = GameManager.combat_style
-	_refresh_persist_style_btns()
-	_refresh_persist_rune_row()
-
-	# Listen for any other path mutating combat style (combat window today; in
-	# theory other panels in the future).
-	Events.combat_style_changed.connect(_on_combat_style_changed_external)
-	# Inventory changes invalidate the rune row (player gained/lost runes).
-	Events.inventory_changed.connect(_refresh_persist_rune_row)
-	Events.xp_gained.connect(_on_xp_gained_for_rune_row)
-	# Server can change rank mid-session — admin gates may unlock more runes.
-	NetworkManager.admin_rank_changed.connect(_on_admin_rank_for_rune_row)
-
-## A style button on the persistent strip was clicked. Push through GameManager
-## so the value persists, then locally refresh both the strip highlight and
-## the combat-window mirror.
-func _on_persist_style_pressed(style: String) -> void:
-	# Magic with no active rune defaults to the highest-tier rune the player
-	# meets the level for AND owns (so the row never opens empty when the
-	# player has runes available).
-	var rune: String = GameManager.active_rune
-	if style == "magic" and rune == "":
-		rune = _best_available_rune()
-	GameManager.set_combat_style(style, rune)
-	_combat_style = style
-	_refresh_persist_style_btns()
-	_refresh_persist_rune_row()
-	_refresh_style_btns()   # combat-window mirror (no-op if window not built)
-
+# ── Rune sub-row (lives inside the unified panel; built next to style btns) ─
 ## A rune icon in the sub-row was clicked — set it as the active spell.
 func _on_persist_rune_pressed(rune_id: String) -> void:
 	GameManager.set_combat_style("magic", rune_id)
 	_combat_style = "magic"
-	_refresh_persist_style_btns()
+	_refresh_style_btns()
 	_refresh_persist_rune_row()
 
-func _refresh_persist_style_btns() -> void:
-	for sval: Variant in _persist_style_btns:
-		var sb := _persist_style_btns[sval] as Button
-		var active: bool = sval == _combat_style
-		if active and sval == "magic" and GameManager.active_rune != "":
-			# Tint the magic button with the active rune's color so the player
-			# sees at a glance which spell is loaded.
-			var col: Color = RuneSpells.color_for(GameManager.active_rune)
-			sb.add_theme_stylebox_override("normal", _rs(RS_BTN_A, col, 2))
-			sb.add_theme_color_override("font_color", col)
-		elif active:
-			sb.add_theme_stylebox_override("normal", _rs(RS_BTN_A, RS_GOLD, 2))
-			sb.add_theme_color_override("font_color", RS_GOLD)
-		else:
-			sb.add_theme_stylebox_override("normal", _rs(RS_BTN_N, RS_BORDER.darkened(0.4), 2))
-			sb.add_theme_color_override("font_color", RS_TEXT)
-
 ## Rebuild the rune sub-row to show only runes the player owns AND is
-## level-gated for. Hidden entirely when style != "magic" so the strip
-## takes minimal screen real estate when not casting.
+## level-gated for. Hidden entirely when style != "magic".
 func _refresh_persist_rune_row() -> void:
 	if _persist_rune_row == null:
 		return
@@ -1933,9 +1883,9 @@ func _refresh_persist_rune_row() -> void:
 
 func _on_combat_style_changed_external(style: String, _rune: String) -> void:
 	# Source-of-truth lives on GameManager; mirror to the local var and the
-	# combat-window buttons too (their state used to drive damage routing).
+	# in-panel style buttons. The persistent-strip mirror is gone — the
+	# unified panel's style row is the only style UI now.
 	_combat_style = style
-	_refresh_persist_style_btns()
 	_refresh_persist_rune_row()
 	_refresh_style_btns()
 
@@ -2561,61 +2511,124 @@ func _near_type(type_str: String, range_px: float = 80.0) -> bool:
 	return false
 
 # ── Combat window ─────────────────────────────────────────────────────────────
+## Unified Target / Combat panel. Replaces the old separate combat window +
+## persistent style strip. Lives top-right, default visible, collapsible.
+##
+## Sections (top → bottom):
+##   1. Header (title + collapse ✕)
+##   2. Target section (name + level + HP + Attack/Flee button)
+##      — hidden when no target selected, no monster in combat
+##   3. Player HP (always visible)
+##   4. Style toggles (melee / ranged / magic) — always visible
+##   5. Rune sub-row (visible only when style == magic)
+##   6. Combat log — visible only during combat
+##
+## State flow:
+##   - Left-click monster → _select_target sets _selected_target, panel
+##     auto-shows, Attack button enabled.
+##   - Click Attack → emits monster_attack_chosen, Player opens combat,
+##     panel switches Attack→Flee, log appears.
+##   - Combat ends → log + Flee hide, target stays selected so the player
+##     can press Attack again. Player can clear target via right-click.
 func _build_combat_window() -> void:
 	_combat_window = PanelContainer.new()
 	_combat_window.add_theme_stylebox_override("panel", _rs(RS_BG, RS_BORDER, 3))
-	# Anchored top-right, sits below the minimap (minimap bottom ≈ 204px from top)
 	_combat_window.anchor_left   = 1.0; _combat_window.anchor_right  = 1.0
 	_combat_window.anchor_top    = 0.0; _combat_window.anchor_bottom = 0.0
 	_combat_window.offset_left   = -292; _combat_window.offset_right  = -6
-	_combat_window.offset_top    = 208;  _combat_window.offset_bottom = 428
-	_combat_window.visible       = false
+	_combat_window.offset_top    = 208;  _combat_window.offset_bottom = 504
+	_combat_window.visible       = true   # default visible — replaces the persistent strip
 	add_child(_combat_window)
 
 	var root := VBoxContainer.new()
 	root.add_theme_constant_override("separation", 6)
 	_combat_window.add_child(root)
 
-	# Title + flee
+	# ── Header: title + collapse ✕ ──
 	var top_row := HBoxContainer.new()
 	root.add_child(top_row)
 	var title := _tab_title("⚔  Combat")
 	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	top_row.add_child(title)
-	var flee_btn := Button.new()
-	flee_btn.text = "Flee"
-	flee_btn.add_theme_stylebox_override("normal", _rs(Color(0.25,0.05,0.05), RS_BORDER, 2))
-	flee_btn.add_theme_color_override("font_color", Color(1,0.4,0.4))
-	flee_btn.add_theme_font_size_override("font_size", 11)
-	flee_btn.pressed.connect(func() -> void: Events.combat_ended.emit())
-	top_row.add_child(flee_btn)
+	var close_btn := Button.new()
+	close_btn.text = "✕"
+	close_btn.custom_minimum_size = Vector2(26, 0)
+	close_btn.add_theme_stylebox_override("normal", _rs(RS_BG, RS_BORDER, 2))
+	close_btn.add_theme_color_override("font_color", RS_TEXT)
+	close_btn.add_theme_font_size_override("font_size", 12)
+	close_btn.tooltip_text = "Hide panel (right-click any monster to reopen)"
+	close_btn.pressed.connect(func() -> void: _combat_window.visible = false)
+	top_row.add_child(close_btn)
 
 	root.add_child(HSeparator.new())
 
-	# Monster HP
-	var m_row := HBoxContainer.new()
-	m_row.add_theme_constant_override("separation", 6)
-	root.add_child(m_row)
-	var m_ico := Label.new()
-	m_ico.text = "☠"
-	m_ico.add_theme_color_override("font_color", Color(0.8,0.8,0.8))
-	m_ico.add_theme_font_size_override("font_size", 14)
-	m_row.add_child(m_ico)
-	var m_vbox := VBoxContainer.new()
-	m_vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	m_vbox.add_theme_constant_override("separation", 1)
-	m_row.add_child(m_vbox)
-	_combat_mon_lbl = Label.new()
-	_combat_mon_lbl.add_theme_color_override("font_color", RS_TEXT)
-	_combat_mon_lbl.add_theme_font_size_override("font_size", 10)
-	m_vbox.add_child(_combat_mon_lbl)
-	_combat_mon_bar = ProgressBar.new()
-	_combat_mon_bar.show_percentage = false
-	_combat_mon_bar.custom_minimum_size = Vector2(0, 8)
-	_combat_mon_bar.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_combat_mon_bar.add_theme_stylebox_override("fill",       _rs(Color(0.7,0.12,0.12), Color(0.95,0.2,0.2), 0))
-	_combat_mon_bar.add_theme_stylebox_override("background", _rs(Color(0.05,0.05,0.05), RS_BORDER.darkened(0.6), 0))
-	m_vbox.add_child(_combat_mon_bar)
+	# ── Target section (hidden when no target) ──
+	_target_section = VBoxContainer.new()
+	_target_section.add_theme_constant_override("separation", 4)
+	root.add_child(_target_section)
+
+	var t_header_row := HBoxContainer.new()
+	t_header_row.add_theme_constant_override("separation", 6)
+	_target_section.add_child(t_header_row)
+	var t_ico := Label.new()
+	t_ico.text = "☠"
+	t_ico.add_theme_color_override("font_color", Color(0.8,0.8,0.8))
+	t_ico.add_theme_font_size_override("font_size", 14)
+	t_header_row.add_child(t_ico)
+	var t_vbox := VBoxContainer.new()
+	t_vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	t_vbox.add_theme_constant_override("separation", 0)
+	t_header_row.add_child(t_vbox)
+	_target_name_lbl = Label.new()
+	_target_name_lbl.add_theme_color_override("font_color", RS_GOLD)
+	_target_name_lbl.add_theme_font_size_override("font_size", 11)
+	t_vbox.add_child(_target_name_lbl)
+	_target_lvl_lbl = Label.new()
+	_target_lvl_lbl.add_theme_color_override("font_color", RS_DIM)
+	_target_lvl_lbl.add_theme_font_size_override("font_size", 9)
+	t_vbox.add_child(_target_lvl_lbl)
+
+	_target_hp_lbl = Label.new()
+	_target_hp_lbl.add_theme_color_override("font_color", RS_TEXT)
+	_target_hp_lbl.add_theme_font_size_override("font_size", 10)
+	_target_section.add_child(_target_hp_lbl)
+	_target_hp_bar = ProgressBar.new()
+	_target_hp_bar.show_percentage = false
+	_target_hp_bar.custom_minimum_size = Vector2(0, 8)
+	_target_hp_bar.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_target_hp_bar.add_theme_stylebox_override("fill",       _rs(Color(0.7,0.12,0.12), Color(0.95,0.2,0.2), 0))
+	_target_hp_bar.add_theme_stylebox_override("background", _rs(Color(0.05,0.05,0.05), RS_BORDER.darkened(0.6), 0))
+	_target_section.add_child(_target_hp_bar)
+
+	# Action button row: Attack (out of combat) → Flee (in combat). Both
+	# share the same slot so the layout doesn't shift when combat starts.
+	var action_row := HBoxContainer.new()
+	action_row.add_theme_constant_override("separation", 4)
+	_target_section.add_child(action_row)
+	_attack_btn = Button.new()
+	_attack_btn.text = "Attack"
+	_attack_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_attack_btn.custom_minimum_size = Vector2(0, 28)
+	_attack_btn.add_theme_stylebox_override("normal",  _rs(Color(0.20,0.08,0.06), RS_GOLD, 2))
+	_attack_btn.add_theme_stylebox_override("hover",   _rs(Color(0.30,0.10,0.08), RS_GOLD, 2))
+	_attack_btn.add_theme_stylebox_override("pressed", _rs(Color(0.15,0.06,0.05), RS_GOLD, 2))
+	_attack_btn.add_theme_color_override("font_color", RS_GOLD)
+	_attack_btn.add_theme_font_size_override("font_size", 12)
+	_attack_btn.pressed.connect(_on_attack_btn_pressed)
+	action_row.add_child(_attack_btn)
+	_flee_btn = Button.new()
+	_flee_btn.text = "Flee"
+	_flee_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_flee_btn.custom_minimum_size = Vector2(0, 28)
+	_flee_btn.add_theme_stylebox_override("normal", _rs(Color(0.25,0.05,0.05), RS_BORDER, 2))
+	_flee_btn.add_theme_color_override("font_color", Color(1,0.4,0.4))
+	_flee_btn.add_theme_font_size_override("font_size", 12)
+	_flee_btn.pressed.connect(func() -> void: Events.combat_ended.emit())
+	_flee_btn.visible = false
+	action_row.add_child(_flee_btn)
+
+	_target_section.add_child(HSeparator.new())
+	_target_section.visible = false   # nothing selected yet
 
 	# Player HP
 	var p_row := HBoxContainer.new()
@@ -2674,20 +2687,75 @@ func _build_combat_window() -> void:
 			GameManager.set_combat_style(sval, rune)
 			_combat_style = sval
 			_refresh_style_btns()
-			_refresh_persist_style_btns()
 			_refresh_persist_rune_row())
 		style_row.add_child(sb)
 	_refresh_style_btns()
 
-	root.add_child(HSeparator.new())
+	# Rune sub-row — replaces the old persistent-strip rune row. Visible
+	# only when style == magic. Same data feed (`_refresh_persist_rune_row`)
+	# so existing handlers don't need to be split.
+	_persist_rune_row = HBoxContainer.new()
+	_persist_rune_row.add_theme_constant_override("separation", 2)
+	root.add_child(_persist_rune_row)
 
-	# Combat log
+	# ── Combat log (visible only during combat) ──
+	_combat_log_box = VBoxContainer.new()
+	_combat_log_box.add_theme_constant_override("separation", 4)
+	root.add_child(_combat_log_box)
+	_combat_log_box.add_child(HSeparator.new())
 	_combat_log = Label.new()
 	_combat_log.add_theme_color_override("font_color", RS_TEXT)
 	_combat_log.add_theme_font_size_override("font_size", 10)
 	_combat_log.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_combat_log.custom_minimum_size = Vector2(0, 40)
-	root.add_child(_combat_log)
+	_combat_log_box.add_child(_combat_log)
+	_combat_log_box.visible = false
+
+	# Initial style + rune state mirrors GameManager (loaded from server on login).
+	_combat_style = GameManager.combat_style
+	_refresh_persist_rune_row()
+	# Listen for any external style change so the in-panel buttons sync.
+	Events.combat_style_changed.connect(_on_combat_style_changed_external)
+	Events.inventory_changed.connect(_refresh_persist_rune_row)
+	Events.xp_gained.connect(_on_xp_gained_for_rune_row)
+	NetworkManager.admin_rank_changed.connect(_on_admin_rank_for_rune_row)
+
+## Attack button pressed inside the unified panel. Same wire as the old
+## monster-click popup's Attack row: emits monster_attack_chosen, Player
+## opens combat instantly without moving.
+func _on_attack_btn_pressed() -> void:
+	if _selected_target == null or not is_instance_valid(_selected_target):
+		return
+	if not (_selected_target.get("is_alive") as bool):
+		_clear_target()
+		return
+	if _in_combat:
+		return   # already engaged with this target
+	Events.monster_attack_chosen.emit(_selected_target)
+
+## Set the panel's selected target and make sure the panel is visible. Does
+## NOT enter combat — that requires the Attack button. If the target dies
+## or becomes invalid the panel auto-clears via _update_combat_ui.
+func _select_target(target: Node) -> void:
+	if target == null or not is_instance_valid(target):
+		_clear_target()
+		return
+	_selected_target = target
+	_target_section.visible = true
+	_attack_btn.visible = not _in_combat
+	_flee_btn.visible = _in_combat
+	_combat_window.visible = true
+	_update_combat_ui()
+
+## Drop the current target and hide the target section. Style toggles stay
+## visible — the panel itself only collapses on the ✕ button or right-click
+## anywhere the player chooses to clear.
+func _clear_target() -> void:
+	_selected_target = null
+	_target_section.visible = false
+	_combat_log_box.visible = false
+	_attack_btn.visible = true
+	_flee_btn.visible = false
 
 func _refresh_style_btns() -> void:
 	for sval: Variant in _style_btns:
@@ -2713,8 +2781,17 @@ func _on_open_combat(monster: Node) -> void:
 	_combat_join_wait = 0.0
 	_out_of_resource_chatted = false
 	_refresh_style_btns()
-	_refresh_persist_style_btns()
 	_refresh_persist_rune_row()
+	# Switch the action button slot: Attack hides, Flee appears. Target
+	# section is auto-shown by _select_target — if combat opened via a
+	# different path (legacy entry point) we ensure it's set here too.
+	_selected_target = monster
+	_target_section.visible = true
+	_attack_btn.visible = false
+	_flee_btn.visible = true
+	_combat_log_box.visible = true
+	_combat_log.text = ""   # fresh log per fight
+	_combat_window.visible = true
 	Events.player_stop_action.emit()
 	if _player == null:
 		_player = get_tree().get_first_node_in_group("player")
@@ -2741,8 +2818,18 @@ func _on_combat_ended() -> void:
 	_combat_server         = false
 	_combat_join_pending   = false
 	_combat_monster        = null
-	_combat_window.visible = false
-	_combat_log_append("Combat ended.")
+	# Panel stays open. Switch back to "browsing" mode: Attack button
+	# restored, Flee hidden, log collapses. The selected target persists
+	# so the player can press Attack to re-engage — common in PvE where
+	# you might pull, flee, recover, re-engage. The target clears on
+	# right-click or when it dies (handled in _update_combat_ui).
+	_combat_log_box.visible = false
+	_flee_btn.visible = false
+	if _selected_target != null and is_instance_valid(_selected_target) \
+			and (_selected_target.get("is_alive") as bool):
+		_attack_btn.visible = true
+	else:
+		_clear_target()
 
 # ── Shared-combat signal handlers ─────────────────────────────────────────────
 func _combat_target_id() -> String:
@@ -2775,21 +2862,79 @@ func _on_mob_full_hud(entity_id: String) -> void:
 		_on_combat_ended()
 
 func _update_combat_ui() -> void:
-	if _combat_monster == null:
-		return
-	var m     := _combat_monster
-	var m_hp  := m.get("current_hp") as int
-	var m_max := m.get("max_hp")     as int
-	var m_lv  := m.get("level")      as int
-	var m_nm  := m.get("display_name") as String
-	_combat_mon_lbl.text      = "%s  (Lv %d)   %d / %d HP" % [m_nm, m_lv, m_hp, m_max]
-	_combat_mon_bar.max_value = m_max
-	_combat_mon_bar.value     = m_hp
+	# Selected target — same renderer for "just clicked, browsing" and
+	# "actively fighting". `_combat_monster` takes priority because it's
+	# the authoritative engaged target; otherwise we paint _selected_target.
+	var t: Node = _combat_monster if _combat_monster != null else _selected_target
+	if t != null and is_instance_valid(t):
+		var m_hp  := t.get("current_hp") as int
+		var m_max := t.get("max_hp")     as int
+		var m_lv  := t.get("level")      as int
+		var m_nm  := t.get("display_name") as String
+		_target_name_lbl.text  = m_nm
+		_target_lvl_lbl.text   = "Level %d" % m_lv
+		_target_hp_lbl.text    = "%d / %d HP" % [m_hp, m_max]
+		_target_hp_bar.max_value = m_max
+		_target_hp_bar.value     = m_hp
+		if not (t.get("is_alive") as bool):
+			# Target died — drop selection but keep panel open with style
+			# toggles + player HP. _on_combat_ended already runs through
+			# the combat path; this catches the browsing-only case.
+			if not _in_combat:
+				_clear_target()
+		else:
+			# Live target out of combat — gate the Attack button on
+			# proximity + walkability. In combat the button is hidden
+			# (Flee takes its slot) so the gate is moot.
+			if not _in_combat and _attack_btn != null:
+				var gate := _can_engage_target(t)
+				var ok: bool = bool(gate.get("ok", false))
+				_attack_btn.disabled = not ok
+				_attack_btn.tooltip_text = "" if ok else str(gate.get("reason", ""))
+				if ok:
+					_attack_btn.add_theme_color_override("font_color", RS_GOLD)
+				else:
+					_attack_btn.add_theme_color_override("font_color", RS_DIM)
+	# Player HP — always painted, regardless of target.
 	var p_hp  := GameManager.current_hp
 	var p_max := GameManager.get_max_hp()
 	_combat_plr_lbl.text      = "You   %d / %d HP" % [p_hp, p_max]
 	_combat_plr_bar.max_value = p_max
 	_combat_plr_bar.value     = p_hp
+
+## Engage gate. Returns {ok: bool, reason: String}:
+##   - ok=false, reason="Too far" — target > ATTACK_INITIATE_RANGE px away
+##   - ok=false, reason="No path" — water/coast tile between player & target
+##   - ok=true,  reason="Attack" — engagement allowed
+##
+## The walkability check is a 32-px line sample. Each sample point is asked
+## `Ground.biome_at_world()`; an "ocean" or "coast" tile along the line
+## means the monster's straight-line chase can't reach the player, so the
+## button stays disabled. Same rule the player's `_tile_is_water` uses.
+func _can_engage_target(target: Node) -> Dictionary:
+	if _player == null:
+		_player = get_tree().get_first_node_in_group("player")
+	if _player == null or not is_instance_valid(_player) \
+			or not (target is Node2D):
+		return {"ok": false, "reason": "No target"}
+	var p_pos: Vector2 = (_player as Node2D).global_position
+	var t_pos: Vector2 = (target as Node2D).global_position
+	var dist := p_pos.distance_to(t_pos)
+	if dist > ATTACK_INITIATE_RANGE:
+		return {"ok": false, "reason": "Too far — get closer (%d / %d tiles)" % [
+			int(dist / 32.0), int(ATTACK_INITIATE_RANGE / 32.0)]}
+	# Walkability sample. Step from player → target every 32 px and ask
+	# the ground node what biome each midpoint is. Any water-class tile
+	# means the monster can't reach.
+	var ground: Node = get_tree().get_first_node_in_group("ground")
+	if ground != null and ground.has_method("biome_at_world"):
+		var steps := maxi(1, int(dist / 32.0))
+		for i: int in range(1, steps):
+			var sample := p_pos.lerp(t_pos, float(i) / float(steps))
+			var biome: String = ground.call("biome_at_world", sample) as String
+			if biome == "ocean" or biome == "coast":
+				return {"ok": false, "reason": "No path — water blocks the route"}
+	return {"ok": true, "reason": "Attack"}
 
 func _combat_log_append(line: String) -> void:
 	var lines := _combat_log.text.split("\n")
@@ -2834,26 +2979,33 @@ func _combat_tick(delta: float) -> void:
 				_combat_atk_timer = 2.4
 				_launch_player_attack(_combat_monster, mon_pos)
 
-	# Monster attack (only deals damage when physically in range)
-	_combat_mon_timer -= delta
-	if _combat_mon_timer <= 0.0:
-		_combat_mon_timer = 2.0
-		var in_range := false
-		if _player != null:
-			var mdist := (_combat_monster as Node2D).global_position.distance_to((_player as Node2D).global_position)
-			in_range = mdist <= 55.0
-		if in_range:
-			var m_atk := _combat_monster.get("attack") as int
-			var raw   := m_atk + randi() % 3
-			var def   := GameManager.get_defense_power()
-			var mdmg  := maxi(1, raw - def)
-			GameManager.take_damage(mdmg)
-			GameManager.add_xp("vitality", 2)
-			_combat_log_append("> %s hits you for %d dmg" % [
-				_combat_monster.get("display_name"), mdmg])
-			_show_damage_number((_player as Node2D).global_position, mdmg, false)
-		else:
-			_combat_log_append("> %s closing in..." % _combat_monster.get("display_name"))
+	# Monster attack — local-only path. In server mode the authoritative
+	# monster_attack broadcast handles damage + sound (see NetworkManager
+	# monster_attack handler); running the local tick on top would double-
+	# apply damage. This matters more under the new combat flow because the
+	# server's aggro chase can pursue across 600+ px, so monster_attack
+	# broadcasts arrive reliably.
+	if not _combat_server:
+		_combat_mon_timer -= delta
+		if _combat_mon_timer <= 0.0:
+			_combat_mon_timer = 2.0
+			var in_range := false
+			if _player != null:
+				var mdist := (_combat_monster as Node2D).global_position.distance_to((_player as Node2D).global_position)
+				in_range = mdist <= 55.0
+			if in_range:
+				var m_atk := _combat_monster.get("attack") as int
+				var raw   := m_atk + randi() % 3
+				var def   := GameManager.get_defense_power()
+				var mdmg  := maxi(1, raw - def)
+				GameManager.take_damage(mdmg)
+				GameManager.add_xp("vitality", 2)
+				Events.monster_attack_landed.emit()
+				_combat_log_append("> %s hits you for %d dmg" % [
+					_combat_monster.get("display_name"), mdmg])
+				_show_damage_number((_player as Node2D).global_position, mdmg, false)
+			else:
+				_combat_log_append("> %s closing in..." % _combat_monster.get("display_name"))
 
 	_update_combat_ui()
 
@@ -2925,6 +3077,7 @@ func _launch_player_attack(mon: Node, mon_pos: Vector2) -> void:
 
 	GameManager.add_xp(xp_skill, xp_amount)
 	GameManager.add_xp("defense", 1)
+	Events.attack_swung.emit(style)
 
 	match style:
 		"ranged", "magic":
@@ -2985,6 +3138,7 @@ func _apply_player_hit(mon: Node, atk: int) -> void:
 		var dmg := (mon as Object).call("take_damage", atk) as int
 		_combat_log_append("> You hit for %d dmg  [%s]" % [dmg, _combat_style])
 		_show_damage_number(mon_pos, dmg, true)
+	Events.attack_landed.emit(_combat_style)
 	_update_combat_ui()
 
 func _award_combat_xp() -> void:
@@ -4926,6 +5080,223 @@ func _on_player_context_menu(username: String, screen_pos: Vector2) -> void:
 		overlay.queue_free()
 		Events.chat_message.emit("[Looking up %s...]" % username)
 		NetworkManager.send_player_lookup(username)))
+
+## Left-click on a monster: select it as the panel target. The popup-menu
+## flow is gone — the Attack button now lives INSIDE the unified combat /
+## target panel ([HUD.gd _build_combat_window]) which auto-opens when a
+## target is set. Clicking on the same monster again is a no-op so a
+## fast double-click doesn't churn the panel state.
+func _on_monster_clicked(monster: Node, _screen_pos: Vector2) -> void:
+	if monster == null or not is_instance_valid(monster):
+		return
+	if _selected_target == monster:
+		_combat_window.visible = true
+		return
+	_select_target(monster)
+
+## Right-click on any actionable node — dispatches to a type-specific
+## option list. The popup pattern mirrors the existing player context
+## menu: a full-screen invisible overlay catches outside clicks to
+## dismiss, the menu panel anchors under the cursor (clamped to viewport).
+func _on_action_menu_requested(node: Node, screen_pos: Vector2) -> void:
+	if node == null or not is_instance_valid(node):
+		return
+	var options := _action_menu_options(node)
+	if options.is_empty():
+		return   # nothing actionable — silent no-op
+
+	var existing := get_node_or_null("ActionMenuOverlay")
+	if existing != null:
+		existing.queue_free()
+	var overlay := Control.new()
+	overlay.name = "ActionMenuOverlay"
+	overlay.anchor_right  = 1.0
+	overlay.anchor_bottom = 1.0
+	overlay.mouse_filter  = Control.MOUSE_FILTER_STOP
+	add_child(overlay)
+	overlay.gui_input.connect(func(ev: InputEvent) -> void:
+		if ev is InputEventMouseButton and (ev as InputEventMouseButton).pressed:
+			overlay.queue_free())
+
+	var panel := PanelContainer.new()
+	panel.add_theme_stylebox_override("panel", _rs(RS_BG, RS_BORDER, 3))
+	var vp := get_viewport().get_visible_rect().size
+	var pw := 150.0
+	# 16 px header + 18 px per option (rough).
+	var ph := 18.0 + float(options.size()) * 22.0 + 12.0
+	var px := minf(screen_pos.x + 4.0, vp.x - pw - 4.0)
+	var py := minf(screen_pos.y + 4.0, vp.y - ph - 4.0)
+	panel.anchor_left = 0.0; panel.anchor_top = 0.0
+	panel.offset_left = px;  panel.offset_right  = px + pw
+	panel.offset_top  = py;  panel.offset_bottom = py + ph
+	panel.mouse_filter = Control.MOUSE_FILTER_STOP
+	overlay.add_child(panel)
+
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 1)
+	panel.add_child(vbox)
+
+	var hdr := Label.new()
+	hdr.text = _action_menu_title(node)
+	hdr.add_theme_color_override("font_color", RS_GOLD)
+	hdr.add_theme_font_size_override("font_size", 10)
+	hdr.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	vbox.add_child(hdr)
+	vbox.add_child(HSeparator.new())
+
+	var row_btn := func(label: String, cb: Callable) -> Button:
+		var b := Button.new()
+		b.text = label
+		b.alignment = HORIZONTAL_ALIGNMENT_LEFT
+		b.add_theme_stylebox_override("normal",  _rs(RS_BG,    Color(0,0,0,0), 0))
+		b.add_theme_stylebox_override("hover",   _rs(RS_BTN_H, RS_BORDER.darkened(0.5), 1))
+		b.add_theme_stylebox_override("pressed", _rs(RS_BTN_A, Color(0,0,0,0), 0))
+		b.add_theme_stylebox_override("focus",   _rs(RS_BG,    Color(0,0,0,0), 0))
+		b.add_theme_color_override("font_color", RS_TEXT)
+		b.add_theme_font_size_override("font_size", 10)
+		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		b.pressed.connect(cb)
+		return b
+
+	for opt: Dictionary in options:
+		var label: String = str(opt.get("label", "?"))
+		var cb: Callable = opt.get("cb", Callable())
+		vbox.add_child(row_btn.call(label, func() -> void:
+			overlay.queue_free()
+			# Proximity gate for gather/interact actions. Action labels in
+			# GATED_ACTION_LABELS require the player to be within
+			# ACTION_PROXIMITY pixels of `node`; otherwise we toast and skip.
+			if GATED_ACTION_LABELS.has(label) \
+					and not _check_action_proximity(node, label):
+				return
+			if cb.is_valid():
+				cb.call()))
+
+## Returns true if the player is within ACTION_PROXIMITY px of `node`.
+## On failure, fires a top-of-screen toast naming the node so the player
+## knows what they're too far from. Used by the right-click action menu.
+func _check_action_proximity(node: Node, _action_label: String) -> bool:
+	if _player == null:
+		_player = get_tree().get_first_node_in_group("player")
+	if _player == null or not (node is Node2D):
+		return false
+	var dist := (_player as Node2D).global_position.distance_to(
+		(node as Node2D).global_position)
+	if dist <= ACTION_PROXIMITY:
+		return true
+	var name_s: String = "that"
+	if node.get("display_name") != null:
+		name_s = str(node.get("display_name"))
+	_show_top_toast("You need to get closer to %s." % name_s,
+		Color(0.95, 0.55, 0.30))
+	return false
+
+## Top-of-screen status toast. Anchored under the minimap-clear zone,
+## centered horizontally. Holds 1 s then fades out over 1 s for a total
+## 2 s lifespan. Replaces any existing top toast so spam doesn't stack.
+func _show_top_toast(text: String, col: Color) -> void:
+	var existing := get_node_or_null("TopToast")
+	if existing != null:
+		existing.queue_free()
+	var lbl := Label.new()
+	lbl.name = "TopToast"
+	lbl.text = text
+	lbl.add_theme_color_override("font_color", col)
+	lbl.add_theme_font_size_override("font_size", 14)
+	lbl.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.85))
+	lbl.add_theme_constant_override("shadow_offset_x", 1)
+	lbl.add_theme_constant_override("shadow_offset_y", 1)
+	lbl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	lbl.anchor_left   = 0.0
+	lbl.anchor_right  = 1.0
+	lbl.offset_top    = 70.0
+	lbl.offset_bottom = 92.0
+	add_child(lbl)
+	var tw := lbl.create_tween()
+	tw.tween_interval(1.0)
+	tw.tween_property(lbl, "modulate:a", 0.0, 1.0)
+	tw.tween_callback(func() -> void: lbl.queue_free())
+
+## Build the action list for `node`. Monsters get Attack/Examine; each
+## interactable type gets its own short list. Unknown types return an
+## "Examine" fallback so the menu is never empty for a node the player
+## could see and right-click. Each entry: { "label": String, "cb": Callable }.
+func _action_menu_options(node: Node) -> Array:
+	if node.is_in_group("monster"):
+		return [
+			{"label": "Attack", "cb": func() -> void:
+				_select_target(node)
+				Events.monster_attack_chosen.emit(node)},
+			{"label": "Examine", "cb": func() -> void:
+				Events.chat_message.emit("> %s — Level %d, %d/%d HP." % [
+					str(node.get("display_name")), int(node.get("level")),
+					int(node.get("current_hp")), int(node.get("max_hp"))])},
+		]
+	var t: String = str(node.get("interactable_type_str")) if node.get("interactable_type_str") != null else ""
+	var name_s: String = str(node.get("display_name")) if node.get("display_name") != null else "this"
+	match t:
+		"tree":
+			return [{"label": "Chop", "cb": func() -> void:
+				Events.player_interacted.emit(node)}]
+		"rock":
+			return [{"label": "Mine", "cb": func() -> void:
+				Events.player_interacted.emit(node)}]
+		"fish":
+			return [{"label": "Fish", "cb": func() -> void:
+				Events.player_interacted.emit(node)}]
+		"herb":
+			return [{"label": "Pick", "cb": func() -> void:
+				Events.player_interacted.emit(node)}]
+		"essence":
+			return [{"label": "Gather", "cb": func() -> void:
+				Events.player_interacted.emit(node)}]
+		"forge":
+			return [{"label": "Smith", "cb": func() -> void:
+				Events.open_forge.emit()}]
+		"fire":
+			return [{"label": "Cook", "cb": func() -> void:
+				Events.open_cooking.emit()}]
+		"bank":
+			return [{"label": "Use Bank", "cb": func() -> void:
+				Events.open_bank.emit()}]
+		"crafting":
+			return [{"label": "Craft", "cb": func() -> void:
+				Events.open_crafting.emit()}]
+		"construction":
+			return [{"label": "Build", "cb": func() -> void:
+				Events.open_construction.emit()}]
+		"runestone":
+			return [
+				{"label": "Study",      "cb": func() -> void: Events.player_interacted.emit(node)},
+				{"label": "Runesmith",  "cb": func() -> void: Events.open_runesmithing.emit()},
+			]
+		"archery":
+			return [{"label": "Train", "cb": func() -> void:
+				Events.player_interacted.emit(node)}]
+		"auction_house":
+			return [{"label": "Browse", "cb": func() -> void:
+				Events.open_auction_house.emit()}]
+		"door", "building":
+			return [{"label": "Enter", "cb": func() -> void:
+				Events.player_interacted.emit(node)}]
+		"banner":
+			return [{"label": "Raid / Reinforce", "cb": func() -> void:
+				Events.player_interacted.emit(node)}]
+		"stronghold", "outpost":
+			return [{"label": "Inspect", "cb": func() -> void:
+				Events.player_interacted.emit(node)}]
+		"npc":
+			return [{"label": "Talk", "cb": func() -> void:
+				Events.player_interacted.emit(node)}]
+	# Unknown interactable — still offer Examine so right-click is never silent.
+	return [{"label": "Examine", "cb": func() -> void:
+		Events.chat_message.emit("> You see %s." % name_s)}]
+
+func _action_menu_title(node: Node) -> String:
+	if node.is_in_group("monster"):
+		return "%s (Lv %d)" % [str(node.get("display_name")), int(node.get("level"))]
+	var nm: String = str(node.get("display_name")) if node.get("display_name") != null else "?"
+	return nm
 
 func _on_player_lookup_result(data: Dictionary) -> void:
 	var username: String = str(data.get("username", "?"))

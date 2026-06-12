@@ -228,9 +228,17 @@ func get_skill_xp(skill: String) -> int:
 	return player_skill_xp.get(skill, 0)
 
 func add_xp(skill: String, amount: int) -> void:
-	if player_skill_xp.has(skill):
-		player_skill_xp[skill] += amount
-		Events.xp_gained.emit(skill, amount)
+	if not player_skill_xp.has(skill):
+		return
+	var lv_before := get_skill_level(skill)
+	player_skill_xp[skill] += amount
+	Events.xp_gained.emit(skill, amount)
+	var lv_after := get_skill_level(skill)
+	# One emit per integer level crossed — a big XP grant that vaults
+	# multiple levels fires once at the highest (the player only hears
+	# one fanfare regardless).
+	if lv_after > lv_before:
+		Events.level_up.emit(skill, lv_after)
 
 func get_level_progress(skill: String) -> float:
 	var xp := player_skill_xp.get(skill, 0) as int
@@ -460,10 +468,20 @@ func accept_quest(quest_id: String) -> void:
 func apply_quest_state(payload: Dictionary) -> void:
 	var a: Variant = payload.get("active", [])
 	server_active_quests = a if a is Array else []
+	# Compare old → new to detect freshly-completed quests so the audio
+	# layer can chime once per completion. Repeated boss-quest turn-ins
+	# bump completion_counts but the id is already in the set, so this
+	# emits once per unique completion only — we layer the boss-repeat
+	# chime off completion_counts in a future pass if desired.
+	var prev_completed: Array = server_completed_ids.duplicate()
 	var c: Variant = payload.get("completed_ids", [])
 	server_completed_ids = c if c is Array else []
 	var k: Variant = payload.get("completion_counts", {})
 	server_completion_counts = k if k is Dictionary else {}
+	for qid: Variant in server_completed_ids:
+		var qs := String(qid)
+		if not (qs in prev_completed):
+			Events.quest_completed.emit(qs)
 	Events.quest_state_changed.emit()
 
 ## Returns the active row for `quest_id` or {} if not active.

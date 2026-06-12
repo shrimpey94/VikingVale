@@ -22,6 +22,7 @@ GameManager="*res://scripts/autoloads/GameManager.gd"
 ThrallManager="*res://scripts/autoloads/ThrallManager.gd"
 NetworkManager="*res://scripts/autoloads/NetworkManager.gd"
 AudioManager="*res://scripts/autoloads/AudioManager.gd"
+NorseMusic="*res://scripts/autoloads/audio/NorseMusic.gd"
 
 [layer_names]
 
