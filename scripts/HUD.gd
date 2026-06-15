@@ -3070,6 +3070,13 @@ func _launch_player_attack(mon: Node, mon_pos: Vector2) -> void:
 		atk = GameManager.get_attack_power("melee")
 		xp_skill = "melee"
 
+	# PlayerMods damage multiplier — backstory perks / pet auras add up
+	# here. 1.0 when nothing is registered, so no behaviour change for
+	# vanilla characters. Floor at 1 so a buff never zeros a hit.
+	var dmg_mult: float = PlayerMods.dmg_mult(style)
+	if dmg_mult != 1.0:
+		atk = maxi(1, int(round(float(atk) * dmg_mult)))
+
 	# Consume the rune AFTER all gates pass (so a level-gated cast doesn't
 	# burn the rune as a side-effect).
 	if rune_to_consume != "":
@@ -3215,10 +3222,12 @@ func _build_dmg_layer() -> void:
 func _show_damage_vignette() -> void:
 	if _dmg_layer == null:
 		_build_dmg_layer()
-	var wrap := Control.new()
-	wrap.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	wrap.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_dmg_layer.add_child(wrap)
+	# `wrapper` rather than `wrap` — strict mode flags `wrap` as a shadow
+	# of @GlobalScope.wrap() (a math helper).
+	var wrapper := Control.new()
+	wrapper.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	wrapper.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_dmg_layer.add_child(wrapper)
 	var thickness := 80.0
 	var col := Color(0.95, 0.10, 0.10, 0.55)
 	# Top bar
@@ -3226,33 +3235,33 @@ func _show_damage_vignette() -> void:
 	top.color = col
 	top.anchor_left = 0.0; top.anchor_right = 1.0
 	top.offset_bottom = thickness
-	wrap.add_child(top)
+	wrapper.add_child(top)
 	# Bottom bar
 	var bot := ColorRect.new()
 	bot.color = col
 	bot.anchor_left = 0.0; bot.anchor_right = 1.0
 	bot.anchor_top  = 1.0; bot.anchor_bottom = 1.0
 	bot.offset_top  = -thickness
-	wrap.add_child(bot)
+	wrapper.add_child(bot)
 	# Left bar
 	var lft := ColorRect.new()
 	lft.color = col
 	lft.anchor_top = 0.0; lft.anchor_bottom = 1.0
 	lft.offset_right = thickness
-	wrap.add_child(lft)
+	wrapper.add_child(lft)
 	# Right bar
 	var rgt := ColorRect.new()
 	rgt.color = col
 	rgt.anchor_left  = 1.0; rgt.anchor_right = 1.0
 	rgt.anchor_top   = 0.0; rgt.anchor_bottom = 1.0
 	rgt.offset_left  = -thickness
-	wrap.add_child(rgt)
+	wrapper.add_child(rgt)
 	# Single tween on the wrapping Control's modulate handles all four bars
 	# at once. 0.2 s fade per spec.
-	var tw := wrap.create_tween()
-	tw.tween_property(wrap, "modulate:a", 0.0, 0.2) \
+	var tw := wrapper.create_tween()
+	tw.tween_property(wrapper, "modulate:a", 0.0, 0.2) \
 		.set_ease(Tween.EASE_IN).set_trans(Tween.TRANS_QUAD)
-	tw.chain().tween_callback(func() -> void: wrap.queue_free())
+	tw.chain().tween_callback(func() -> void: wrapper.queue_free())
 
 func _on_player_died() -> void:
 	var flash := ColorRect.new()
@@ -5285,6 +5294,20 @@ func _action_menu_options(node: Node) -> Array:
 		"stronghold", "outpost":
 			return [{"label": "Inspect", "cb": func() -> void:
 				Events.player_interacted.emit(node)}]
+		"seal_statue":
+			# The seal's action depends on its current state, which is
+			# stored on the entity's meta. 'charged' → Awaken (gated
+			# server-side on tokens + warband eligibility). 'breaking'
+			# → Attack (chips integrity until shatter).
+			var st: String = str(node.get_meta("seal_state", "charged"))
+			if st == "breaking":
+				return [{"label": "Attack the Seal", "cb": func() -> void:
+					NetworkManager.send_seal_attack(8)}]
+			return [{"label": "Awaken the Seal", "cb": func() -> void:
+				NetworkManager.send_seal_awaken()}]
+		"world_eater":
+			return [{"label": "Witness", "cb": func() -> void:
+				Events.chat_message.emit("> The Doom walks. Its eyes turn elsewhere.")}]
 		"npc":
 			return [{"label": "Talk", "cb": func() -> void:
 				Events.player_interacted.emit(node)}]

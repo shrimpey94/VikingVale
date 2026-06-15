@@ -15,6 +15,20 @@ signal login_fail(reason: String)
 signal register_ok()
 signal register_fail(reason: String)
 signal kicked(reason: String)
+# Password recovery (Phase C handlers)
+signal request_password_reset_ok(message: String)
+signal verify_password_reset_token_result(ok: bool)
+signal complete_password_reset_ok(username: String)
+signal complete_password_reset_fail(reason: String)
+# Account self-service (Account section in SettingsPanel)
+signal account_info(data: Dictionary)
+signal change_email_ok(email: String)
+signal change_email_fail(reason: String)
+signal change_password_ok()
+signal change_password_fail(reason: String)
+# Backstory perk
+signal backstory_set(backstory: String)
+signal backstory_fail(reason: String)
 
 # ── State ──────────────────────────────────────────────────────────────────────
 enum NetState { OFFLINE, CONNECTING, CONNECTED, LOGGED_IN }
@@ -112,8 +126,67 @@ func connect_to_server(url: String) -> void:
 func send_login(username: String, password: String) -> void:
 	_send({"type": "login", "username": username, "password": password})
 
-func send_register(username: String, password: String) -> void:
-	_send({"type": "register", "username": username, "password": password})
+func send_register(username: String, password: String, email: String = "") -> void:
+	_send({"type": "register", "username": username, "password": password, "email": email})
+
+# Account self-service (Account section in SettingsPanel)
+func send_change_email(current_password: String, new_email: String) -> void:
+	if state != NetState.LOGGED_IN:
+		return
+	_send({"type": "change_email", "current_password": current_password, "email": new_email})
+
+func send_change_password(current_password: String, new_password: String) -> void:
+	if state != NetState.LOGGED_IN:
+		return
+	_send({"type": "change_password",
+		"current_password": current_password, "new_password": new_password})
+
+func send_get_account_info() -> void:
+	if state != NetState.LOGGED_IN:
+		return
+	_send({"type": "get_account_info"})
+
+# Character backstory perk (Backstory.gd). One-shot pick — server rejects
+# a second set. UI picker lives in BackstorySelectScreen.gd, opened from
+# CharacterCreation when the login payload reports backstory == "".
+func send_set_backstory(backstory: String) -> void:
+	if state != NetState.LOGGED_IN:
+		return
+	_send({"type": "set_backstory", "backstory": backstory})
+
+# Pet system — PetManager persists the type so re-login restores it.
+func send_set_pet_type(pet_type: String) -> void:
+	if state != NetState.LOGGED_IN:
+		return
+	_send({"type": "set_pet_type", "pet_type": pet_type})
+
+# Seal of Kings — endgame event. seal_awaken asks the server to flip the
+# statue to 'breaking' (requires all 5 tokens + not in ruling warband);
+# seal_attack deals damage to a breaking statue. Both fail silently if
+# requirements aren't met (server posts a chat message instead).
+func send_seal_awaken() -> void:
+	if state != NetState.LOGGED_IN:
+		return
+	_send({"type": "seal_awaken"})
+
+func send_seal_attack(amount: int = 5) -> void:
+	if state != NetState.LOGGED_IN:
+		return
+	_send({"type": "seal_attack", "amount": amount})
+
+# Password recovery — three send methods matching the server handlers in
+# server.py. The reset screen flow is: request → token email → user pastes
+# token → verify (UX gate) → complete (commit new password).
+func send_request_password_reset(username: String, email: String) -> void:
+	_send({"type": "request_password_reset",
+		"username": username, "email": email})
+
+func send_verify_password_reset_token(token: String) -> void:
+	_send({"type": "verify_password_reset_token", "token": token})
+
+func send_complete_password_reset(token: String, new_password: String) -> void:
+	_send({"type": "complete_password_reset",
+		"token": token, "new_password": new_password})
 
 func send_set_appearance(appearance: Dictionary, equipment: Dictionary = {}) -> void:
 	if state == NetState.LOGGED_IN:
@@ -317,6 +390,32 @@ func send_admin_list_players() -> void:
 		return
 	_send({"type": "admin_list_players"})
 
+# Admin Accounts tab (Phase E)
+func send_admin_list_accounts(query: String = "") -> void:
+	if state != NetState.LOGGED_IN:
+		return
+	_send({"type": "admin_list_accounts", "query": query})
+
+func send_admin_reset_password(username: String) -> void:
+	if state != NetState.LOGGED_IN:
+		return
+	_send({"type": "admin_reset_password", "username": username})
+
+func send_admin_unlock_account(username: String) -> void:
+	if state != NetState.LOGGED_IN:
+		return
+	_send({"type": "admin_unlock_account", "username": username})
+
+func send_admin_verify_email(username: String) -> void:
+	if state != NetState.LOGGED_IN:
+		return
+	_send({"type": "admin_verify_email", "username": username})
+
+func send_admin_upload_terrain(bitmap_b64: String) -> void:
+	if state != NetState.LOGGED_IN:
+		return
+	_send({"type": "admin_upload_terrain", "bitmap_b64": bitmap_b64})
+
 func send_admin_restore_last_loss(target: String) -> void:
 	if state != NetState.LOGGED_IN:
 		return
@@ -382,6 +481,33 @@ func send_admin_tile_set(tx: int, ty: int, biome: String) -> void:
 func send_admin_tile_clear(tx: int, ty: int) -> void:
 	if state == NetState.LOGGED_IN:
 		_send({"type": "admin_tile_clear", "tx": tx, "ty": ty})
+
+# Tile editor v2 — brush sizes >1×1 emit a single bulk message with the
+# whole stamp; flood fill is one (tx, ty, biome) seed that the server BFS-
+# fills. `tiles` is Array[Dictionary{"tx": int, "ty": int, "biome": String}]
+# — pass biome="" or omit to clear an override at that tile.
+func send_admin_tile_set_bulk(tiles: Array) -> void:
+	if state == NetState.LOGGED_IN:
+		_send({"type": "admin_tile_set_bulk", "tiles": tiles})
+
+func send_admin_tile_flood_fill(tx: int, ty: int, biome: String) -> void:
+	if state == NetState.LOGGED_IN:
+		_send({"type": "admin_tile_flood_fill",
+			"tx": tx, "ty": ty, "biome": biome})
+
+# Per-tile color tint. `h` + `v` are -100..100 mapping to ±20% hue + brightness
+# in the shader. `tiles` is the stamp footprint.
+func send_admin_tile_tint(tiles: Array, h: int, v: int) -> void:
+	if state == NetState.LOGGED_IN:
+		_send({"type": "admin_tile_tint",
+			"tiles": tiles, "h": h, "v": v})
+
+# Per-tile passability flag. passable=false → blocks monster movement
+# and is drawn with a red overlay while the admin is in Passability mode.
+func send_admin_tile_passability(tiles: Array, passable: bool) -> void:
+	if state == NetState.LOGGED_IN:
+		_send({"type": "admin_tile_passability",
+			"tiles": tiles, "passable": passable})
 
 ## Tells the server to flush its in-memory tile_overrides to tile_overrides.json
 ## right now (it normally autosaves every 30s when dirty). Wired to the admin
@@ -620,6 +746,43 @@ func _handle(msg: Dictionary) -> void:
 
 		"register_fail":
 			register_fail.emit(str(msg.get("reason", "Register failed.")))
+
+		"request_password_reset_ok":
+			request_password_reset_ok.emit(str(msg.get("message", "")))
+
+		"verify_password_reset_token_result":
+			verify_password_reset_token_result.emit(bool(msg.get("ok", false)))
+
+		"complete_password_reset_ok":
+			complete_password_reset_ok.emit(str(msg.get("username", "")))
+
+		"complete_password_reset_fail":
+			complete_password_reset_fail.emit(str(msg.get("reason", "Reset failed.")))
+
+		"account_info":
+			account_info.emit({
+				"username": str(msg.get("username", "")),
+				"email": str(msg.get("email", "")),
+				"email_verified": bool(msg.get("email_verified", false)),
+				"last_login_at": float(msg.get("last_login_at", 0.0)),
+			})
+
+		"change_email_ok":
+			change_email_ok.emit(str(msg.get("email", "")))
+
+		"change_email_fail":
+			change_email_fail.emit(str(msg.get("reason", "Email change failed.")))
+
+		"change_password_ok":
+			change_password_ok.emit()
+
+		"change_password_fail":
+			change_password_fail.emit(str(msg.get("reason", "Password change failed.")))
+
+		"set_backstory_ok":
+			backstory_set.emit(str(msg.get("backstory", "")))
+		"set_backstory_fail":
+			backstory_fail.emit(str(msg.get("reason", "Backstory pick failed.")))
 
 		"kicked":
 			state = NetState.CONNECTED
@@ -899,6 +1062,23 @@ func _handle(msg: Dictionary) -> void:
 		"tile_clear":
 			Events.tile_override_cleared.emit(int(msg.get("tx", 0)), int(msg.get("ty", 0)))
 
+		"tile_set_bulk":
+			# Broadcast for brush stamps + flood fill. Each entry has
+			# tx/ty/biome (biome can be null to mean "clear").
+			var bulk_raw: Variant = msg.get("tiles", [])
+			if bulk_raw is Array:
+				Events.tile_overrides_bulk_received.emit(bulk_raw as Array)
+
+		"tile_tint_bulk":
+			var tint_raw: Variant = msg.get("tiles", [])
+			if tint_raw is Array:
+				Events.tile_tints_bulk_received.emit(tint_raw as Array)
+
+		"tile_passability_bulk":
+			var pass_raw: Variant = msg.get("tiles", [])
+			if pass_raw is Array:
+				Events.tile_passability_bulk_received.emit(pass_raw as Array)
+
 		"entity_edits":
 			Events.entity_edits_received.emit(msg.get("edits", []) as Array)
 
@@ -935,6 +1115,15 @@ func _handle(msg: Dictionary) -> void:
 				for n: Variant in (raw as Array):
 					names.append(str(n))
 			Events.admin_player_list_received.emit(names)
+
+		"admin_account_list":
+			var araw: Variant = msg.get("accounts", [])
+			var accounts: Array = []
+			if araw is Array:
+				for r: Variant in (araw as Array):
+					if r is Dictionary:
+						accounts.append(r as Dictionary)
+			Events.admin_account_list_received.emit(accounts)
 
 		"admin_inventory_view":
 			var iraw: Variant = msg.get("inventory", [])

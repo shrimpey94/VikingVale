@@ -2,8 +2,10 @@ extends Node
 
 ## Global player state. Persists across scenes.
 
-const GearDB  = preload("res://scripts/Equipment.gd")
-const Fishing = preload("res://scripts/Fishing.gd")
+const GearDB    = preload("res://scripts/Equipment.gd")
+const Fishing   = preload("res://scripts/Fishing.gd")
+# Backstory uses `class_name Backstory` so it's globally available — no
+# preload const needed (would shadow the class_name symbol under strict mode).
 
 var player_skill_xp: Dictionary = {
 	"woodcutting":  0,
@@ -107,6 +109,11 @@ var equipment: Dictionary = {}
 ## by HUD._launch_player_attack. Survives logout via the appearance JSON blob.
 ## Values: "melee" / "ranged" / "magic".
 var combat_style: String = "melee"
+## Backstory perk id ("viking" / "fisher" / "craftsman" / "mage" / "archer"
+## or empty). Set on login from the server payload; re-applies its
+## PlayerMods on every login. Selecting at character creation is a
+## one-shot — see send_set_backstory in NetworkManager.
+var backstory: String = ""
 ## When combat_style == "magic", the rune id this player is currently casting.
 ## Each cast consumes 1 of this item from inventory. Empty string until the
 ## player picks a rune in the magic sub-row. Persists with appearance.
@@ -230,9 +237,16 @@ func get_skill_xp(skill: String) -> int:
 func add_xp(skill: String, amount: int) -> void:
 	if not player_skill_xp.has(skill):
 		return
+	# Apply PlayerMods multiplier so backstory perks / pet auras / future
+	# buffs add up consistently across every XP-grant call site. Floor at
+	# +1 if any positive multiplier — never make a positive grant zero.
+	var mult: float = PlayerMods.xp_mult(skill)
+	var final_amount: int = amount
+	if mult != 1.0 and amount > 0:
+		final_amount = maxi(1, int(round(float(amount) * mult)))
 	var lv_before := get_skill_level(skill)
-	player_skill_xp[skill] += amount
-	Events.xp_gained.emit(skill, amount)
+	player_skill_xp[skill] += final_amount
+	Events.xp_gained.emit(skill, final_amount)
 	var lv_after := get_skill_level(skill)
 	# One emit per integer level crossed — a big XP grant that vaults
 	# multiple levels fires once at the highest (the player only hears
@@ -645,6 +659,19 @@ func populate_from_server_data(data: Dictionary) -> void:
 	var qs: Variant = data.get("quest_state", {})
 	if qs is Dictionary:
 		apply_quest_state(qs as Dictionary)
+
+	# Backstory perk — apply its PlayerMods on every login. Empty string
+	# means "not yet picked" (new account / legacy account), which
+	# Backstory.apply treats as a no-op. PlayerMods is cleared first so a
+	# logout-then-login swap to a different account doesn't leak mods.
+	backstory = str(data.get("backstory", ""))
+	PlayerMods.remove_source("backstory")
+	if backstory != "":
+		Backstory.apply(backstory, PlayerMods)
+
+	# Pet system — restore the saved pet type but DON'T auto-summon. The
+	# live Pet node is RAM-only by design; player taps Summon when ready.
+	PetManager.apply_login_pet(str(data.get("pet_type", "")))
 
 	# Restore HP
 	current_hp = get_max_hp()

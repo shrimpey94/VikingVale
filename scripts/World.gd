@@ -235,16 +235,40 @@ func _ready() -> void:
 	Events.tile_overrides_received.connect(_on_tile_overrides_received)
 	Events.tile_override_set.connect(_on_tile_override_set)
 	Events.tile_override_cleared.connect(_on_tile_override_cleared)
+	Events.tile_overrides_bulk_received.connect(_on_tile_overrides_bulk_received)
+	Events.tile_tints_bulk_received.connect(_on_tile_tints_bulk_received)
+	Events.tile_passability_bulk_received.connect(_on_tile_passability_bulk_received)
 	# Admin edits (delete/move) to pre-existing entities
 	Events.entity_edits_received.connect(_on_entity_edits_received)
 	Events.entity_edit_applied.connect(_on_entity_edit_applied)
 	# The admin toolbox is created on login (world.tscn loads before login, so
 	# my_username is still empty here). Handles re-login too via the signal.
 	NetworkManager.login_ok.connect(_on_login_spawn_admin)
+	NetworkManager.login_ok.connect(_on_login_check_backstory)
 	NetworkManager.admin_rank_changed.connect(_on_admin_rank_changed)
 	_spawn_admin_panel_if_admin()
 	# Deferred so Ground._ready() and Player._ready() finish first
 	Events.player_respawned.emit.call_deferred(GameManager.RESPAWN_POS)
+
+## Pops the backstory picker the first time a character logs in without a
+## chosen backstory. Reads from `player_data` directly so this works
+## regardless of whether GameManager.populate_from_server_data has run
+## yet (signal-ordering between login_ok subscribers is fragile). Server
+## enforces single-set, so once the player picks the column is non-empty
+## forever and this skips. SettingsPanel exposes a manual "Choose
+## backstory" button as a fallback in case the auto-pop ever fails.
+func _on_login_check_backstory(player_data: Dictionary) -> void:
+	if str(player_data.get("backstory", "")) != "":
+		return
+	var existing := get_node_or_null("BackstorySelectScreen")
+	if existing != null:
+		return
+	var script := load("res://scripts/BackstorySelectScreen.gd")
+	if script == null:
+		return
+	var screen: Node = script.new()
+	screen.name = "BackstorySelectScreen"
+	add_child(screen)
 
 # ── Admin toolbox ──────────────────────────────────────────────────────────────
 var _admin_panel: Node = null
@@ -287,6 +311,58 @@ func _on_tile_override_cleared(tx: int, ty: int) -> void:
 	var g := get_node_or_null("Ground")
 	if g != null:
 		g.call("clear_tile_override", tx, ty)
+
+func _on_tile_overrides_bulk_received(entries: Array) -> void:
+	var g := get_node_or_null("Ground")
+	if g != null:
+		g.call("apply_tile_overrides_bulk", entries)
+
+func _on_tile_tints_bulk_received(entries: Array) -> void:
+	var g := get_node_or_null("Ground")
+	if g != null:
+		g.call("apply_tile_tints_bulk", entries)
+
+func _on_tile_passability_bulk_received(entries: Array) -> void:
+	var g := get_node_or_null("Ground")
+	if g != null:
+		g.call("apply_tile_passability_bulk", entries)
+	# Repaint the red overlay if it's visible (admin in PASSABILITY mode).
+	if _pass_overlay != null:
+		_pass_overlay.queue_redraw()
+
+# ── Passability red overlay (admin edit mode only) ─────────────────────────
+## Drawn as a child of World so it sits under HUD but above Ground. Walks
+## Ground.impassable_tile_indices and stamps a semi-transparent red square
+## per blocked tile. Visibility is toggled by AdminPanel via
+## set_passability_overlay_visible.
+var _pass_overlay: Node2D = null
+
+func set_passability_overlay_visible(vis: bool) -> void:
+	if vis and _pass_overlay == null:
+		_pass_overlay = Node2D.new()
+		_pass_overlay.name = "PassabilityOverlay"
+		_pass_overlay.z_index = 100   # over ground, under HUD
+		_pass_overlay.draw.connect(_draw_pass_overlay)
+		add_child(_pass_overlay)
+	if _pass_overlay != null:
+		_pass_overlay.visible = vis
+		_pass_overlay.queue_redraw()
+
+func _draw_pass_overlay() -> void:
+	var g := get_node_or_null("Ground")
+	if g == null or not g.has_method("impassable_tile_indices"):
+		return
+	const COLS_LOCAL := 300
+	const TILE_LOCAL := 32.0
+	var col := Color(0.95, 0.20, 0.20, 0.35)
+	var indices: Array = g.call("impassable_tile_indices") as Array
+	for v: Variant in indices:
+		var idx: int = int(v)
+		var tx := idx % COLS_LOCAL
+		@warning_ignore("integer_division") var ty := idx / COLS_LOCAL
+		var pos := Vector2(float(tx) * TILE_LOCAL, float(ty) * TILE_LOCAL)
+		_pass_overlay.draw_rect(Rect2(pos, Vector2(TILE_LOCAL, TILE_LOCAL)),
+			col, true)
 
 # ── Admin-placed entities ──────────────────────────────────────────────────────
 func _on_world_entities_received(entities: Array) -> void:
@@ -393,6 +469,42 @@ func _spawn_admin_entity(entity: Dictionary) -> void:
 			ws_node.set_meta("warband_id", str(data.get("warband_id", "")))
 			_admin_registry[id] = ws_node
 			c.add_child(ws_node)
+		"seal_statue":
+			# Seal of Kings — clickable. Phase 1 just renders a tall
+			# golden marker via the existing Interactable. The action
+			# menu shows "Awaken" when applicable; the click handler
+			# routes to seal_awaken or seal_attack based on data.state.
+			var seal_node: Node2D = _Interactable.instantiate()
+			seal_node.position              = pos
+			seal_node.interactable_type_str = "seal_statue"
+			seal_node.display_name          = "Seal of Kings"
+			seal_node.required_skill        = ""
+			seal_node.required_level        = 1
+			seal_node.action_label          = "Awaken"
+			seal_node.color                 = Color(0.95, 0.78, 0.18)
+			seal_node.entity_id             = id
+			seal_node.set_meta("seal_state", str(data.get("state", "charged")))
+			seal_node.set_meta("integrity", int(data.get("integrity", 100)))
+			_admin_registry[id] = seal_node
+			c.add_child(seal_node)
+		"world_eater":
+			# The Doom — slow, massive entity. Renders as a deep-purple
+			# blob via Interactable for v1. Phase 2 (vulnerable boss
+			# combat) will swap this for a Monster instance and reuse
+			# the standard combat pipeline; for the foundation pass we
+			# just need the visual on the map.
+			var we_node: Node2D = _Interactable.instantiate()
+			we_node.position              = pos
+			we_node.interactable_type_str = "world_eater"
+			we_node.display_name          = "The World-Eater"
+			we_node.required_skill        = ""
+			we_node.required_level        = 1
+			we_node.action_label          = "Witness"
+			we_node.color                 = Color(0.35, 0.05, 0.45)
+			we_node.entity_id             = id
+			we_node.set_meta("phase", int(data.get("phase", 1)))
+			_admin_registry[id] = we_node
+			c.add_child(we_node)
 	# Tag so the editor's unified click-search finds admin entities too (their
 	# a: id routes back to the admin placement handlers on delete/move).
 	if _admin_registry.has(id):

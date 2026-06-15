@@ -18,6 +18,10 @@ shader_type canvas_item;
 
 uniform sampler2D atlas        : filter_nearest, source_color;
 uniform sampler2D biome_lookup : filter_nearest;
+// Per-tile color tint. RG8 texture, both channels centered on 0.5
+// (neutral grey 128). R = hue shift (warm vs cool), G = brightness
+// shift. Both map to ±20% effect at the channel extremes.
+uniform sampler2D tint_lookup  : filter_nearest;
 uniform vec2  world_size_tiles = vec2(300.0, 300.0);
 uniform float tile_px          = 32.0;
 uniform float atlas_rows       = 16.0;
@@ -301,6 +305,28 @@ void fragment() {
 	fp += vec2(dot(fp, fp + 23.1));
 	float g2 = (fract(fp.x * fp.y) - 0.5) * 0.028;
 	col.rgb = clamp(col.rgb + g2, 0.0, 1.0);
+
+	// ── Per-tile admin tint ─────────────────────────────────────────────────
+	// Sample the tint lookup at this tile's UV. R is centered at 0.5 with a
+	// ±0.5 range meaning ±20% warm/cool shift; G is similarly centered for
+	// brightness. Neutral grey (0.5, 0.5) is the default and produces no
+	// effect — every tile is grey at startup until an admin paints.
+	vec2 tile_uv = (vec2(tile) + 0.5) / world_size_tiles;
+	vec2 tint    = texture(tint_lookup, tile_uv).rg;
+	float warm   = (tint.r - 0.5) * 0.4;    // ±0.2
+	float bright = (tint.g - 0.5) * 0.4;    // ±0.2
+	if (abs(warm) > 0.001 || abs(bright) > 0.001) {
+		// Warm/cool channel shift — cheap approximation of a hue rotation.
+		// Positive `warm` pushes the image toward orange (R up, B down);
+		// negative pushes toward teal. Keeps perceived brightness roughly
+		// constant by counter-shifting G slightly.
+		col.r *= 1.0 + warm * 0.30;
+		col.g *= 1.0 + warm * 0.05;
+		col.b *= 1.0 - warm * 0.30;
+		// Multiplicative brightness shift.
+		col.rgb *= 1.0 + bright;
+		col.rgb = clamp(col.rgb, 0.0, 1.0);
+	}
 
 	COLOR = col;
 }

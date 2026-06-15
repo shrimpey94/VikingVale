@@ -20,6 +20,17 @@ var _biome_cache: PackedByteArray  # biome IDs 0-13
 # with neighbor-aware blending without re-walking the cache per fragment.
 var _biome_lookup_img: Image       = null
 var _biome_lookup_tex: ImageTexture = null
+# Tile editor v2 — per-tile color tint (R=hue shift, G=brightness) packed
+# 0..255 where 128 is neutral. Sampled by terrain_blend.gdshader to apply
+# ±20% hue + brightness multipliers per tile. Defaults to neutral grey
+# (128, 128) until an admin paints.
+var _tint_lookup_img: Image       = null
+var _tint_lookup_tex: ImageTexture = null
+# Per-tile in-memory caches the editor reads back when assembling brush
+# stamps + drawing the passability overlay. Both default to "no override"
+# until the server pushes paint events.
+var _tile_tints:        Dictionary = {}    # idx → {"h": int, "v": int}
+var _impassable_tiles:  Dictionary = {}    # idx → true   (only stored when blocked)
 
 # Biome atlas — one 32×32 cell per biome id (0..15), stacked vertically into a
 # 32×(16*32) texture. Each cell is a single representative bake of that biome's
@@ -210,6 +221,12 @@ func _build_biome_lookup_tex() -> void:
 			var bid: int = _biome_cache[ty * COLS + tx]
 			_biome_lookup_img.set_pixel(tx, ty, Color8(bid, 0, 0, 255))
 	_biome_lookup_tex = ImageTexture.create_from_image(_biome_lookup_img)
+	# Tint lookup — RG8, neutral grey (128, 128, 0) until painted. The
+	# shader maps R=128 to "no hue shift" and G=128 to "no brightness
+	# shift", with ±127 → ±20% in both axes.
+	_tint_lookup_img = Image.create(COLS, ROWS, false, Image.FORMAT_RG8)
+	_tint_lookup_img.fill(Color8(128, 128, 0, 255))
+	_tint_lookup_tex = ImageTexture.create_from_image(_tint_lookup_img)
 
 ## Render each biome's draw output into a single representative 32×32 cell, all
 ## stacked into a 32 × (BIOME_COUNT*32) atlas. Uses a one-shot SubViewport and
@@ -244,6 +261,7 @@ func _activate_terrain_shader() -> void:
 	mat.shader = load("res://shaders/terrain_blend.gdshader") as Shader
 	mat.set_shader_parameter("atlas",            _biome_atlas_tex)
 	mat.set_shader_parameter("biome_lookup",     _biome_lookup_tex)
+	mat.set_shader_parameter("tint_lookup",      _tint_lookup_tex)
 	mat.set_shader_parameter("world_size_tiles", Vector2(float(COLS), float(ROWS)))
 	mat.set_shader_parameter("tile_px",          float(TILE))
 	mat.set_shader_parameter("atlas_rows",       float(BIOME_COUNT))
@@ -330,30 +348,158 @@ func clear_tile_override(tx: int, ty: int) -> void:
 ## this as data ingestion, not a user action.
 func apply_tile_overrides(overrides: Array) -> void:
 	_overrides.clear()
-	# Reset the lookup image to the procedural baseline before re-applying overrides.
+	_tile_tints.clear()
+	_impassable_tiles.clear()
+	# Reset both lookup textures to the procedural baseline + neutral tint.
 	if _biome_lookup_img != null:
 		for ty in range(ROWS):
 			for tx in range(COLS):
 				var bid: int = _biome_cache[ty * COLS + tx]
 				_biome_lookup_img.set_pixel(tx, ty, Color8(bid, 0, 0, 255))
+	if _tint_lookup_img != null:
+		_tint_lookup_img.fill(Color8(128, 128, 0, 255))
 	for o: Variant in overrides:
 		if o is Dictionary:
 			var d: Dictionary = o
 			var tx := int(d.get("tx", -1))
 			var ty := int(d.get("ty", -1))
-			if tx >= 0 and tx < COLS and ty >= 0 and ty < ROWS:
-				var nb_id := biome_name_to_id(str(d.get("biome", "plains")))
-				_overrides[ty * COLS + tx] = nb_id
+			if tx < 0 or tx >= COLS or ty < 0 or ty >= ROWS:
+				continue
+			var idx: int = ty * COLS + tx
+			var biome_name: String = str(d.get("biome", ""))
+			if biome_name != "":
+				var nb_id := biome_name_to_id(biome_name)
+				_overrides[idx] = nb_id
 				if _biome_lookup_img != null:
 					_biome_lookup_img.set_pixel(tx, ty, Color8(nb_id, 0, 0, 255))
+			var h := int(d.get("tint_h", 0))
+			var v := int(d.get("tint_v", 0))
+			if h != 0 or v != 0:
+				_tile_tints[idx] = {"h": h, "v": v}
+				if _tint_lookup_img != null:
+					_tint_lookup_img.set_pixel(tx, ty, _tint_to_color(h, v))
+			if not bool(d.get("passable", true)):
+				_impassable_tiles[idx] = true
 	if _biome_lookup_tex != null and _biome_lookup_img != null:
 		_biome_lookup_tex.update(_biome_lookup_img)
+	if _tint_lookup_tex != null and _tint_lookup_img != null:
+		_tint_lookup_tex.update(_tint_lookup_img)
 	_rebuild_impassable_collision()
 	queue_redraw()
 	# Auto-refresh the minimap so it reflects the server's saved overrides
 	# right after the login burst, without the admin needing to click Save Map.
-	# The Save Map button still emits this signal manually on demand.
 	Events.minimap_refresh.emit()
+
+
+## Pack the editor's int-100..100 hue/brightness shift into the RG8 lookup
+## color. 128 is neutral; ±100 map to roughly ±100 byte offsets so the
+## shader sees the full ±0.78 normalized range and applies ±20% effect.
+func _tint_to_color(h: int, v: int) -> Color:
+	var hh: int = clampi(128 + h, 0, 255)
+	var vv: int = clampi(128 + v, 0, 255)
+	return Color8(hh, vv, 0, 255)
+
+
+## Apply a bulk batch from the tile_set_bulk broadcast. Each entry is
+## {tx, ty, biome} where biome can be empty/null to clear the override.
+func apply_tile_overrides_bulk(entries: Array) -> void:
+	if _biome_lookup_img == null or _biome_lookup_tex == null:
+		return
+	var touched_collision := false
+	for o: Variant in entries:
+		if not (o is Dictionary):
+			continue
+		var d: Dictionary = o
+		var tx := int(d.get("tx", -1))
+		var ty := int(d.get("ty", -1))
+		if tx < 0 or tx >= COLS or ty < 0 or ty >= ROWS:
+			continue
+		var idx := ty * COLS + tx
+		var was_imp := _is_impassable_bid(_bid_at(tx, ty))
+		var b_val: Variant = d.get("biome", null)
+		if b_val == null or str(b_val) == "":
+			_overrides.erase(idx)
+			_biome_lookup_img.set_pixel(tx, ty,
+				Color8(_biome_cache[idx], 0, 0, 255))
+		else:
+			var nb_id := biome_name_to_id(str(b_val))
+			if nb_id == _biome_cache[idx]:
+				_overrides.erase(idx)
+			else:
+				_overrides[idx] = nb_id
+			_biome_lookup_img.set_pixel(tx, ty, Color8(nb_id, 0, 0, 255))
+		if was_imp != _is_impassable_bid(_bid_at(tx, ty)):
+			touched_collision = true
+	_biome_lookup_tex.update(_biome_lookup_img)
+	if touched_collision:
+		_rebuild_impassable_collision()
+	queue_redraw()
+	tile_changed.emit(-1, -1, -1)
+
+
+## Apply bulk tint paint. Entries: {tx, ty, h, v} with h/v in -100..100.
+## Both 0 clears the tint.
+func apply_tile_tints_bulk(entries: Array) -> void:
+	if _tint_lookup_img == null or _tint_lookup_tex == null:
+		return
+	for o: Variant in entries:
+		if not (o is Dictionary):
+			continue
+		var d: Dictionary = o
+		var tx := int(d.get("tx", -1))
+		var ty := int(d.get("ty", -1))
+		if tx < 0 or tx >= COLS or ty < 0 or ty >= ROWS:
+			continue
+		var idx := ty * COLS + tx
+		var h := int(d.get("h", 0))
+		var v := int(d.get("v", 0))
+		if h == 0 and v == 0:
+			_tile_tints.erase(idx)
+			_tint_lookup_img.set_pixel(tx, ty, Color8(128, 128, 0, 255))
+		else:
+			_tile_tints[idx] = {"h": h, "v": v}
+			_tint_lookup_img.set_pixel(tx, ty, _tint_to_color(h, v))
+	_tint_lookup_tex.update(_tint_lookup_img)
+	queue_redraw()
+
+
+## Apply bulk passability paint. Entries: {tx, ty, passable: bool}.
+## Updates the in-memory dict + nudges the impassable collision rebuild.
+func apply_tile_passability_bulk(entries: Array) -> void:
+	var touched := false
+	for o: Variant in entries:
+		if not (o is Dictionary):
+			continue
+		var d: Dictionary = o
+		var tx := int(d.get("tx", -1))
+		var ty := int(d.get("ty", -1))
+		if tx < 0 or tx >= COLS or ty < 0 or ty >= ROWS:
+			continue
+		var idx := ty * COLS + tx
+		var passable := bool(d.get("passable", true))
+		if passable:
+			if _impassable_tiles.erase(idx):
+				touched = true
+		else:
+			if not _impassable_tiles.has(idx):
+				_impassable_tiles[idx] = true
+				touched = true
+	if touched:
+		_rebuild_impassable_collision()
+	# Always emit so the world overlay redraws if the editor is open.
+	tile_changed.emit(-1, -1, -1)
+
+
+## Exposed for the passability overlay so it can draw a red square per
+## blocked tile during edit mode.
+func is_tile_impassable(tx: int, ty: int) -> bool:
+	if tx < 0 or tx >= COLS or ty < 0 or ty >= ROWS:
+		return false
+	return _impassable_tiles.has(ty * COLS + tx)
+
+
+func impassable_tile_indices() -> Array:
+	return _impassable_tiles.keys()
 
 func _biome_at(tx: int, ty: int) -> String:
 	if tx < 0 or tx >= COLS or ty < 0 or ty >= ROWS:

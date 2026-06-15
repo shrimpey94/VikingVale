@@ -20,12 +20,23 @@ import time
 from pathlib import Path
 
 import profanity
+import mail
+import terrain
 
 try:
     from websockets.asyncio.server import serve
     import websockets
 except ImportError:
     raise SystemExit("Missing dependency — run: pip install websockets")
+
+# Load server/.env if python-dotenv is installed. Used for SMTP creds +
+# PUBLIC_BASE_URL (see mail.py + .env.example). dotenv is optional; the
+# server still boots without it — mail.send_email just no-ops.
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).parent / ".env")
+except ImportError:
+    pass
 
 PORT     = 8765
 DB_PATH  = Path(__file__).parent / "game_server.db"
@@ -1131,11 +1142,116 @@ def _migrate_v11(conn) -> None:
     """)
 
 
+def _migrate_v13(conn) -> None:
+    """Backstory perk id + saved pet type on `players`. Both are short
+    strings; backstory is one-shot (set at creation), pet_type is freely
+    changeable. The mods themselves and the live pet entity live entirely
+    client-side via Backstory.apply()/PetManager.summon()."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(players)")}
+    if "backstory" not in cols:
+        conn.execute(
+            "ALTER TABLE players ADD COLUMN backstory TEXT NOT NULL DEFAULT ''")
+    if "pet_type" not in cols:
+        conn.execute(
+            "ALTER TABLE players ADD COLUMN pet_type TEXT NOT NULL DEFAULT ''")
+
+
+def _migrate_v14(conn) -> None:
+    """Seal of Kings + World-Eater state.
+
+    Single-row config table holds the global event status. The statue
+    itself lives in `world_entities` (kind='seal_statue'), the
+    World-Eater in `world_entities` (kind='world_eater'). This config
+    row tracks the lifecycle metadata that doesn't fit on either.
+
+    States:
+      'dormant'  — no ruling warband; statue invisible/inert
+      'charged'  — a warband holds all 5 pledges; statue exists, attackable
+      'breaking' — challenger awakened the seal; raid in progress
+      'walking'  — World-Eater is in Phase 1 (invulnerable sundering walk)
+      'boss'     — World-Eater is in Phase 2 (vulnerable, anyone can attack)
+    """
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS seal_state (
+            id              INTEGER PRIMARY KEY CHECK (id = 1),
+            state           TEXT    NOT NULL DEFAULT 'dormant',
+            ruling_warband  TEXT    NOT NULL DEFAULT '',
+            doomed_warband  TEXT    NOT NULL DEFAULT '',
+            awakened_by     TEXT    NOT NULL DEFAULT '',
+            awakened_at     REAL    NOT NULL DEFAULT 0,
+            world_eater_id  TEXT    NOT NULL DEFAULT ''
+        )
+    """)
+    conn.execute(
+        "INSERT OR IGNORE INTO seal_state (id, state) VALUES (1, 'dormant')")
+
+
+def _migrate_v12(conn) -> None:
+    """Account recovery + brute-force protection columns on `players`.
+
+    Adds an optional `email` (recovery routing — username stays the login
+    identity), the email verification flag, password-reset token + expiry,
+    failed-login counter, lockout timestamp, and last-login audit fields.
+    All defaults are chosen so existing rows remain valid without any
+    data backfill: empty email, unverified, no token, zero failures, no
+    lockout, zero timestamps.
+
+    SQLite limitation: ADD COLUMN ... DEFAULT can only be a literal, so
+    each is added one at a time. Partial-unique index on non-empty emails
+    so the optional column can still be looked up cheaply.
+    """
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(players)")}
+    add = [
+        ("email",                  "TEXT NOT NULL DEFAULT ''"),
+        ("email_verified",         "INTEGER NOT NULL DEFAULT 0"),
+        ("password_reset_token",   "TEXT NOT NULL DEFAULT ''"),
+        ("password_reset_expires", "REAL NOT NULL DEFAULT 0"),
+        ("failed_login_count",     "INTEGER NOT NULL DEFAULT 0"),
+        ("locked_until",           "REAL NOT NULL DEFAULT 0"),
+        ("last_login_at",          "REAL NOT NULL DEFAULT 0"),
+        ("last_login_ip",          "TEXT NOT NULL DEFAULT ''"),
+    ]
+    for name, ddl in add:
+        if name not in cols:
+            conn.execute(f"ALTER TABLE players ADD COLUMN {name} {ddl}")
+    # Partial index on non-empty emails — cheap lookup for password-reset
+    # routing without forcing uniqueness across the empty-string default.
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_players_email
+            ON players(email) WHERE email != ''
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_players_reset_token
+            ON players(password_reset_token) WHERE password_reset_token != ''
+    """)
+
+
 _MIGRATIONS = [
     _migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4,
     _migrate_v5, _migrate_v6, _migrate_v7, _migrate_v8,
-    _migrate_v9, _migrate_v10, _migrate_v11,
+    _migrate_v9, _migrate_v10, _migrate_v11, _migrate_v12, _migrate_v13,
+    _migrate_v14, _migrate_v15,
 ]
+
+
+def _migrate_v15(conn) -> None:
+    """Tile editor extras: per-tile color tint (hue + brightness) and
+    per-tile passability flag. All default to neutral (no tint, passable)
+    so existing rows remain valid without backfill.
+
+    tint_h / tint_v are int8-ish — stored as INTEGER in [-100, 100] which
+    the shader maps to ±20% shifts. passable is 1 = walkable, 0 = blocked.
+    """
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(tile_overrides)")}
+    if "tint_h" not in cols:
+        conn.execute(
+            "ALTER TABLE tile_overrides ADD COLUMN tint_h INTEGER NOT NULL DEFAULT 0")
+    if "tint_v" not in cols:
+        conn.execute(
+            "ALTER TABLE tile_overrides ADD COLUMN tint_v INTEGER NOT NULL DEFAULT 0")
+    if "passable" not in cols:
+        conn.execute(
+            "ALTER TABLE tile_overrides ADD COLUMN passable INTEGER NOT NULL DEFAULT 1")
 
 
 def _hash(password: str, salt: str) -> str:
@@ -1644,9 +1760,29 @@ async def _idle_simulation(player_id: str, username: str,
 
 # ── Handlers ───────────────────────────────────────────────────────────────────
 
+def _looks_like_email(s: str) -> bool:
+    """Cheap email validator — checks shape only, not deliverability.
+    `local@domain.tld` with no spaces, single @, dot in domain, both parts
+    non-empty. SMTP will catch the rest. Good enough for signup gating."""
+    if not s or " " in s or "@" not in s:
+        return False
+    if s.count("@") != 1:
+        return False
+    local, _, domain = s.partition("@")
+    if not local or not domain or "." not in domain:
+        return False
+    if domain.startswith(".") or domain.endswith("."):
+        return False
+    return True
+
+
 async def _handle_register(ws, msg: dict) -> None:
     username = str(msg.get("username", "")).strip()
     password = str(msg.get("password", ""))
+    # Email is optional at signup but if provided it must be well-formed
+    # and unique. Empty is fine — the player can add an email later via
+    # the Account section in SettingsPanel.
+    email = str(msg.get("email", "")).strip().lower()
     if len(username) < 3 or len(username) > 20:
         await _send(ws, {"type": "register_fail", "reason": "Username must be 3–20 characters."})
         return
@@ -1659,9 +1795,18 @@ async def _handle_register(ws, msg: dict) -> None:
     if len(password) < 4:
         await _send(ws, {"type": "register_fail", "reason": "Password must be at least 4 characters."})
         return
+    if email and not _looks_like_email(email):
+        await _send(ws, {"type": "register_fail", "reason": "Email doesn't look right."})
+        return
     with _db() as conn:
         if conn.execute("SELECT 1 FROM players WHERE username=?", (username,)).fetchone():
             await _send(ws, {"type": "register_fail", "reason": "Username already taken."})
+            return
+        if email and conn.execute(
+                "SELECT 1 FROM players WHERE LOWER(email)=? AND email != ''",
+                (email,)).fetchone():
+            await _send(ws, {"type": "register_fail",
+                "reason": "An account with that email already exists."})
             return
         salt = secrets.token_hex(16)
         pid  = secrets.token_hex(16)
@@ -1671,25 +1816,327 @@ async def _handle_register(ws, msg: dict) -> None:
         # every NEW account lands at Bjorn's Landing regardless of whether
         # the operator started from a fresh DB or migrated an old one.
         conn.execute(
-            "INSERT INTO players (id,username,password_hash,salt,x,y,skill_xp,created_at,last_seen) "
-            "VALUES (?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO players (id,username,password_hash,salt,x,y,skill_xp,email,created_at,last_seen) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
             (pid, username, _hash(password, salt), salt,
              7823.0, 4488.0,
-             json.dumps(DEFAULT_SKILL_XP), time.time(), time.time())
+             json.dumps(DEFAULT_SKILL_XP), email, time.time(), time.time())
         )
         conn.commit()
     await _send(ws, {"type": "register_ok", "username": username})
-    print(f"[register] {username}")
+    print(f"[register] {username} email={email!r}")
+
+
+# ── Password recovery (Phase C) ───────────────────────────────────────────
+#
+# Three handlers form the reset flow:
+#   request_password_reset       → issue token + email (anti-enumeration)
+#   verify_password_reset_token  → client pre-flight before showing the
+#                                  new-password screen
+#   complete_password_reset      → consume token, hash new password
+#
+# Tokens are 32-byte hex (64 chars). Single-use: cleared on completion.
+# Expiry: 60 minutes. Anti-enumeration: request always returns success even
+# if the user doesn't exist OR has no email on file — never reveals which.
+
+PASSWORD_RESET_TTL_SECONDS = 60 * 60  # 1 hour
+PASSWORD_RESET_TTL_MINUTES = PASSWORD_RESET_TTL_SECONDS // 60
+
+
+async def _handle_request_password_reset(ws, msg: dict) -> None:
+    # Accept EITHER username or email so the user can type whichever they
+    # remember. We look up by both fields when both are provided to keep
+    # the flow forgiving.
+    username = str(msg.get("username", "")).strip()
+    email = str(msg.get("email", "")).strip().lower()
+    now = time.time()
+    row = None
+    with _db() as conn:
+        if username:
+            row = conn.execute(
+                "SELECT id, username, email FROM players WHERE username=?",
+                (username,)).fetchone()
+        if row is None and email:
+            row = conn.execute(
+                "SELECT id, username, email FROM players "
+                "WHERE LOWER(email)=? AND email != ''",
+                (email,)).fetchone()
+        # Issue a token + send email ONLY when we have a row with a
+        # non-empty email. In every other case (no row found / row has
+        # no email), we silently drop and return success anyway. This
+        # is the anti-enumeration property: an attacker can't tell from
+        # the response whether the account exists.
+        if row and row["email"]:
+            token = secrets.token_hex(32)
+            expires = now + PASSWORD_RESET_TTL_SECONDS
+            conn.execute(
+                "UPDATE players SET password_reset_token=?, "
+                "password_reset_expires=? WHERE id=?",
+                (token, expires, row["id"]))
+            conn.commit()
+            # Build + send the email outside the DB transaction.
+            text_body, html_body = mail.build_reset_email(
+                str(row["username"]), token, PASSWORD_RESET_TTL_MINUTES)
+            mail.send_email(
+                str(row["email"]),
+                mail.SUBJECT_PASSWORD_RESET,
+                text_body, html_body)
+            print(f"[reset] token issued for {row['username']!r} "
+                  f"(email={row['email']!r}, expires in "
+                  f"{PASSWORD_RESET_TTL_MINUTES} min)")
+    # Anti-enumeration generic reply.
+    await _send(ws, {
+        "type": "request_password_reset_ok",
+        "message": "If an account exists for that name or email, a reset "
+                   "link has been sent.",
+    })
+
+
+async def _handle_verify_password_reset_token(ws, msg: dict) -> None:
+    token = str(msg.get("token", "")).strip()
+    if not token or len(token) != 64:
+        await _send(ws, {"type": "verify_password_reset_token_result",
+                         "ok": False})
+        return
+    now = time.time()
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT id, password_reset_expires FROM players "
+            "WHERE password_reset_token=? AND password_reset_token != ''",
+            (token,)).fetchone()
+    ok = bool(row and float(row["password_reset_expires"] or 0) > now)
+    await _send(ws, {"type": "verify_password_reset_token_result", "ok": ok})
+
+
+async def _handle_complete_password_reset(ws, msg: dict) -> None:
+    token = str(msg.get("token", "")).strip()
+    new_password = str(msg.get("new_password", ""))
+    if not token or len(token) != 64:
+        await _send(ws, {"type": "complete_password_reset_fail",
+                         "reason": "Invalid token."})
+        return
+    if len(new_password) < 4:
+        await _send(ws, {"type": "complete_password_reset_fail",
+                         "reason": "Password must be at least 4 characters."})
+        return
+    now = time.time()
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT id, username, email, password_reset_expires "
+            "FROM players WHERE password_reset_token=? "
+            "AND password_reset_token != ''", (token,)).fetchone()
+        if not row or float(row["password_reset_expires"] or 0) <= now:
+            await _send(ws, {"type": "complete_password_reset_fail",
+                             "reason": "Token is invalid or has expired."})
+            return
+        # Re-roll the salt on every password change. Hashing key never
+        # gets reused even if the same string is chosen.
+        salt = secrets.token_hex(16)
+        conn.execute(
+            "UPDATE players SET password_hash=?, salt=?, "
+            "password_reset_token='', password_reset_expires=0, "
+            "failed_login_count=0, locked_until=0 WHERE id=?",
+            (_hash(new_password, salt), salt, row["id"]))
+        conn.commit()
+    print(f"[reset] password changed for {row['username']!r}")
+    # Confirmation email is best-effort — even if it fails the password
+    # change has already committed.
+    if row["email"]:
+        text_body, html_body = mail.build_password_changed_email(
+            str(row["username"]))
+        mail.send_email(str(row["email"]),
+            mail.SUBJECT_PASSWORD_CHANGED, text_body, html_body)
+    await _send(ws, {"type": "complete_password_reset_ok",
+                     "username": row["username"]})
+
+
+async def _handle_change_email(ws, session, msg: dict) -> None:
+    """Player self-service: set or change own email. Treats empty string as
+    'remove email'. Requires current password as a soft verification step
+    so a stolen session can't silently hijack the recovery channel."""
+    if session is None:
+        return
+    current_password = str(msg.get("current_password", ""))
+    new_email = str(msg.get("email", "")).strip().lower()
+    if new_email and not _looks_like_email(new_email):
+        await _send(ws, {"type": "change_email_fail",
+            "reason": "Email doesn't look right."})
+        return
+    with _db() as conn:
+        row = conn.execute("SELECT * FROM players WHERE id=?",
+            (session["id"],)).fetchone()
+        if not row or _hash(current_password, row["salt"]) != row["password_hash"]:
+            await _send(ws, {"type": "change_email_fail",
+                "reason": "Current password is wrong."})
+            return
+        if new_email and conn.execute(
+                "SELECT 1 FROM players WHERE LOWER(email)=? AND id != ? "
+                "AND email != ''",
+                (new_email, session["id"])).fetchone():
+            await _send(ws, {"type": "change_email_fail",
+                "reason": "Another account already uses that email."})
+            return
+        # Changing the email re-arms the verified flag — the new address
+        # has to prove itself again. Empty string clears verified too.
+        conn.execute(
+            "UPDATE players SET email=?, email_verified=0 WHERE id=?",
+            (new_email, session["id"]))
+        conn.commit()
+    print(f"[account] {session['username']} email -> {new_email!r}")
+    await _send(ws, {"type": "change_email_ok", "email": new_email})
+
+
+async def _handle_change_password(ws, session, msg: dict) -> None:
+    """Player self-service: rotate password. Requires current password."""
+    if session is None:
+        return
+    current_password = str(msg.get("current_password", ""))
+    new_password = str(msg.get("new_password", ""))
+    if len(new_password) < 4:
+        await _send(ws, {"type": "change_password_fail",
+            "reason": "New password must be at least 4 characters."})
+        return
+    with _db() as conn:
+        row = conn.execute("SELECT * FROM players WHERE id=?",
+            (session["id"],)).fetchone()
+        if not row or _hash(current_password, row["salt"]) != row["password_hash"]:
+            await _send(ws, {"type": "change_password_fail",
+                "reason": "Current password is wrong."})
+            return
+        new_salt = secrets.token_hex(16)
+        conn.execute(
+            "UPDATE players SET password_hash=?, salt=?, "
+            "failed_login_count=0, locked_until=0 WHERE id=?",
+            (_hash(new_password, new_salt), new_salt, session["id"]))
+        conn.commit()
+    print(f"[account] {session['username']} rotated password")
+    # Best-effort confirmation email if the user has one on file.
+    if row["email"]:
+        text_body, html_body = mail.build_password_changed_email(
+            str(row["username"]))
+        mail.send_email(str(row["email"]),
+            mail.SUBJECT_PASSWORD_CHANGED, text_body, html_body)
+    await _send(ws, {"type": "change_password_ok"})
+
+
+async def _handle_set_backstory(ws, session, msg: dict) -> None:
+    """One-shot character-creation pick. Server enforces a single set:
+    a backstory can only be chosen while the column is empty (newly-made
+    character). After that, the choice is permanent — admins can clear
+    it manually via SQLite if anyone needs a do-over."""
+    if session is None:
+        return
+    bs = str(msg.get("backstory", "")).strip().lower()
+    valid = {"viking", "fisher", "craftsman", "mage", "archer"}
+    if bs not in valid:
+        await _send(ws, {"type": "set_backstory_fail",
+            "reason": "Unknown backstory."})
+        return
+    with _db() as conn:
+        row = conn.execute("SELECT backstory FROM players WHERE id=?",
+            (session["id"],)).fetchone()
+        if not row:
+            return
+        if str(row["backstory"] or "") != "":
+            await _send(ws, {"type": "set_backstory_fail",
+                "reason": "Backstory already chosen."})
+            return
+        conn.execute("UPDATE players SET backstory=? WHERE id=?",
+            (bs, session["id"]))
+        conn.commit()
+    print(f"[backstory] {session['username']} -> {bs!r}")
+    await _send(ws, {"type": "set_backstory_ok", "backstory": bs})
+
+
+async def _handle_set_pet_type(ws, session, msg: dict) -> None:
+    """Player picks (or changes) their pet. RAM-only entity lives on the
+    client — server only persists the chosen type so re-login restores it.
+    Empty string = no pet."""
+    if session is None:
+        return
+    pt = str(msg.get("pet_type", "")).strip().lower()
+    valid = {"", "wolf_pup", "raven", "fox", "drake", "boarlet"}
+    if pt not in valid:
+        return
+    with _db() as conn:
+        conn.execute("UPDATE players SET pet_type=? WHERE id=?",
+            (pt, session["id"]))
+        conn.commit()
+    await _send(ws, {"type": "set_pet_type_ok", "pet_type": pt})
+
+
+async def _handle_get_account_info(ws, session, _msg: dict) -> None:
+    """Returns current account snapshot for the Account section UI."""
+    if session is None:
+        return
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT email, email_verified, last_login_at FROM players WHERE id=?",
+            (session["id"],)).fetchone()
+    if not row:
+        return
+    await _send(ws, {
+        "type": "account_info",
+        "username": session["username"],
+        "email": str(row["email"] or ""),
+        "email_verified": bool(int(row["email_verified"] or 0)),
+        "last_login_at": float(row["last_login_at"] or 0),
+    })
 
 
 async def _handle_login(ws, msg: dict) -> None:
     username = str(msg.get("username", "")).strip()
     password = str(msg.get("password", ""))
+    # Best-effort client IP — websockets exposes it via the underlying
+    # connection if available. Used for audit logging only.
+    client_ip = ""
+    try:
+        peer = getattr(ws, "remote_address", None)
+        if peer and isinstance(peer, tuple) and len(peer) > 0:
+            client_ip = str(peer[0])
+    except Exception:
+        client_ip = ""
+    now = time.time()
     with _db() as conn:
         row = conn.execute("SELECT * FROM players WHERE username=?", (username,)).fetchone()
-    if not row or _hash(password, row["salt"]) != row["password_hash"]:
-        await _send(ws, {"type": "login_fail", "reason": "Invalid username or password."})
-        return
+        # Lockout gate — runs BEFORE the password check so a locked
+        # account can't be probed during the lockout window. Generic
+        # reason text preserves the existing "don't leak which field is
+        # wrong" stance even when locked.
+        if row and float(row["locked_until"] or 0) > now:
+            await _send(ws, {"type": "login_fail",
+                "reason": "Too many failed attempts. Try again later."})
+            return
+        if not row or _hash(password, row["salt"]) != row["password_hash"]:
+            # Increment failed counter on the specific row when one was
+            # found. We don't punish typos before lockout; 10 strikes in
+            # a row = 15 minute cool-down, then counter resets on next
+            # success. No counter is created for non-existent usernames
+            # (anti-enumeration: lookup behavior matches existing-user
+            # bad-password from the outside).
+            if row:
+                new_count = int(row["failed_login_count"] or 0) + 1
+                if new_count >= 10:
+                    conn.execute(
+                        "UPDATE players SET failed_login_count=0, "
+                        "locked_until=? WHERE id=?",
+                        (now + 900.0, row["id"]))
+                    print(f"[login] LOCKED {username} for 15 min "
+                          f"(10 failed attempts)")
+                else:
+                    conn.execute(
+                        "UPDATE players SET failed_login_count=? WHERE id=?",
+                        (new_count, row["id"]))
+                conn.commit()
+            await _send(ws, {"type": "login_fail",
+                "reason": "Invalid username or password."})
+            return
+        # Success — reset counters + stamp audit fields.
+        conn.execute(
+            "UPDATE players SET failed_login_count=0, locked_until=0, "
+            "last_login_at=?, last_login_ip=? WHERE id=?",
+            (now, client_ip, row["id"]))
+        conn.commit()
 
     player_id = row["id"]
 
@@ -1761,6 +2208,13 @@ async def _handle_login(ws, msg: dict) -> None:
         # Full quest snapshot — active rows + completed_ids + completion counts.
         # Client never assumes quest state; this is the only source on login.
         "quest_state":  _quest_state_snapshot_safe(player_id),
+        # Backstory perk id (Backstory.gd). Empty string = not chosen yet
+        # (e.g. legacy accounts), client opens the picker on first login
+        # after the column exists.
+        "backstory":    str(row["backstory"] or "") if "backstory" in row.keys() else "",
+        # Saved pet type (Pet.gd via PetManager). Empty string = no pet
+        # picked yet; client opens the picker or just shows "no pet".
+        "pet_type":     str(row["pet_type"] or "") if "pet_type" in row.keys() else "",
     }
 
     await _send(ws, {"type": "login_ok", "player_data": player_data})
@@ -3050,6 +3504,149 @@ async def _handle_admin_list_players(ws, session: dict, _msg: dict) -> None:
     await _send(ws, {"type": "admin_player_list", "players": names})
 
 
+# ── Admin Accounts tab (Phase E) ──────────────────────────────────────────
+#
+# Four read+write handlers for the admin UI's account-management surface.
+# All require _is_admin (owner OR admin role). Audit logging via the
+# existing _admin_confirm pattern + server-side print.
+
+async def _handle_admin_list_accounts(ws, session: dict, msg: dict) -> None:
+    if not _is_admin(session):
+        return
+    query = str(msg.get("query", "")).strip().lower()
+    rows = []
+    with _db() as conn:
+        if query:
+            cursor = conn.execute(
+                "SELECT id, username, email, email_verified, "
+                "last_login_at, last_login_ip, locked_until, "
+                "failed_login_count, created_at "
+                "FROM players "
+                "WHERE LOWER(username) LIKE ? OR LOWER(email) LIKE ? "
+                "ORDER BY username LIMIT 100",
+                (f"%{query}%", f"%{query}%"))
+        else:
+            cursor = conn.execute(
+                "SELECT id, username, email, email_verified, "
+                "last_login_at, last_login_ip, locked_until, "
+                "failed_login_count, created_at "
+                "FROM players ORDER BY last_login_at DESC LIMIT 100")
+        for r in cursor.fetchall():
+            rows.append({
+                "id": str(r["id"]),
+                "username": str(r["username"]),
+                "email": str(r["email"] or ""),
+                "email_verified": bool(int(r["email_verified"] or 0)),
+                "last_login_at": float(r["last_login_at"] or 0),
+                "last_login_ip": str(r["last_login_ip"] or ""),
+                "locked_until": float(r["locked_until"] or 0),
+                "failed_login_count": int(r["failed_login_count"] or 0),
+                "created_at": float(r["created_at"] or 0),
+            })
+    await _send(ws, {"type": "admin_account_list", "accounts": rows})
+
+
+async def _handle_admin_reset_password(ws, session: dict, msg: dict) -> None:
+    """Admin-initiated reset: issues a fresh token + sends the reset email.
+    Same flow as the user-facing request, but always succeeds (no anti-
+    enumeration since the admin is authenticated)."""
+    if not _is_admin(session):
+        return
+    target = str(msg.get("username", "")).strip()
+    if not target:
+        await _admin_confirm(ws, "Usage: username required.")
+        return
+    now = time.time()
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT id, username, email FROM players WHERE username=?",
+            (target,)).fetchone()
+        if not row:
+            await _admin_confirm(ws, f"No account named {target!r}.")
+            return
+        if not row["email"]:
+            await _admin_confirm(ws,
+                f"{target!r} has no email on file — cannot send reset.")
+            return
+        token = secrets.token_hex(32)
+        conn.execute(
+            "UPDATE players SET password_reset_token=?, "
+            "password_reset_expires=? WHERE id=?",
+            (token, now + PASSWORD_RESET_TTL_SECONDS, row["id"]))
+        conn.commit()
+    text_body, html_body = mail.build_reset_email(
+        str(row["username"]), token, PASSWORD_RESET_TTL_MINUTES)
+    sent = mail.send_email(str(row["email"]),
+        mail.SUBJECT_PASSWORD_RESET, text_body, html_body)
+    status = "sent" if sent else "issued (email send failed — check server logs)"
+    print(f"[admin] {session['username']} reset password for {target!r} "
+          f"({status})")
+    await _admin_confirm(ws, f"Reset {status} for {target!r}.")
+
+
+async def _handle_admin_unlock_account(ws, session: dict, msg: dict) -> None:
+    if not _is_admin(session):
+        return
+    target = str(msg.get("username", "")).strip()
+    if not target:
+        await _admin_confirm(ws, "Usage: username required.")
+        return
+    with _db() as conn:
+        cursor = conn.execute(
+            "UPDATE players SET locked_until=0, failed_login_count=0 "
+            "WHERE username=?", (target,))
+        conn.commit()
+    if cursor.rowcount == 0:
+        await _admin_confirm(ws, f"No account named {target!r}.")
+        return
+    print(f"[admin] {session['username']} unlocked {target!r}")
+    await _admin_confirm(ws, f"{target!r} unlocked.")
+
+
+async def _handle_admin_upload_terrain(ws, session: dict, msg: dict) -> None:
+    """Owner-only — accept a base64-encoded passability bitmap from the
+    admin client and persist it to server/terrain.bin. The client builds
+    it by iterating Ground.biome_at_world over every tile in the 300×300
+    world grid; the bake is a one-time job whenever biome generation
+    changes. Format: 1 bit per tile, MSB-first row-major, bit=1 passable."""
+    if not _is_owner(session):
+        await _admin_confirm(ws, "Terrain upload is owner-only.")
+        return
+    import base64
+    try:
+        raw = base64.b64decode(str(msg.get("bitmap_b64", "")))
+    except Exception as ex:
+        await _admin_confirm(ws, f"Bad bitmap encoding: {ex}")
+        return
+    if terrain.save_bitmap(raw):
+        await _admin_confirm(ws,
+            f"Terrain bitmap saved ({len(raw)} bytes) and active.")
+    else:
+        await _admin_confirm(ws,
+            "Terrain save failed — size mismatch or I/O error. "
+            "Check server log.")
+
+
+async def _handle_admin_verify_email(ws, session: dict, msg: dict) -> None:
+    if not _is_admin(session):
+        return
+    target = str(msg.get("username", "")).strip()
+    if not target:
+        await _admin_confirm(ws, "Usage: username required.")
+        return
+    with _db() as conn:
+        cursor = conn.execute(
+            "UPDATE players SET email_verified=1 WHERE username=?",
+            (target,))
+        conn.commit()
+    if cursor.rowcount == 0:
+        await _admin_confirm(ws, f"No account named {target!r}.")
+        return
+    print(f"[admin] {session['username']} manually verified email for "
+          f"{target!r}")
+    await _admin_confirm(ws, f"{target!r} email marked verified.")
+
+
 async def _handle_admin_restore_last_loss(ws, session: dict, msg: dict) -> None:
     if not _is_admin(session):
         return
@@ -3103,31 +3700,67 @@ def _tile_key(tx: int, ty: int) -> str:
     return f"{tx},{ty}"
 
 
+## Tile editor v2 extras — per-tile color tint + passability flag, both
+## defaulting to neutral. Stored as separate in-memory dicts so the
+## existing tile_overrides:str string contract stays back-compat for
+## anything that only cares about biome (gameplay code, biome_at_world).
+tile_tints:       dict = {}   # (tx,ty) key → {"h": int, "v": int}   ±100 each
+tile_passability: dict = {}   # (tx,ty) key → False                   True is default
+
+
 def _tile_overrides_to_list() -> list:
-    """Wire / login bulk format — list of {tx, ty, biome} dicts."""
+    """Wire / login bulk format — list of {tx, ty, biome, tint_h, tint_v,
+    passable} dicts. Defaults are baked in so older clients can still
+    read just the biome field."""
     out = []
-    for key, biome in tile_overrides.items():
+    keys = set(tile_overrides.keys()) | set(tile_tints.keys()) \
+         | set(tile_passability.keys())
+    for key in keys:
         try:
             tx_str, ty_str = key.split(",", 1)
-            out.append({"tx": int(tx_str), "ty": int(ty_str), "biome": biome})
+            tx, ty = int(tx_str), int(ty_str)
         except (ValueError, AttributeError):
             continue
+        tint = tile_tints.get(key, {})
+        entry = {
+            "tx": tx, "ty": ty,
+            "biome": tile_overrides.get(key, ""),
+            "tint_h": int(tint.get("h", 0)),
+            "tint_v": int(tint.get("v", 0)),
+            "passable": bool(tile_passability.get(key, True)),
+        }
+        out.append(entry)
     return out
 
 
 def _load_tile_overrides_from_disk() -> None:
-    """Populate the in-memory `tile_overrides` dict from the SQLite table.
-    Post-consolidation the table is the single source of truth — the legacy
-    JSON file is migrated and renamed to .bak by migration v2 on first boot."""
-    global tile_overrides, tile_overrides_dirty
+    """Populate in-memory tile dicts from the SQLite table. Post-consolidation
+    the table is the single source of truth — the legacy JSON file is
+    migrated and renamed to .bak by migration v2 on first boot."""
+    global tile_overrides, tile_overrides_dirty, tile_tints, tile_passability
     try:
         with _db() as conn:
             rows = conn.execute(
-                "SELECT tx, ty, biome FROM tile_overrides").fetchall()
+                "SELECT tx, ty, biome, tint_h, tint_v, passable "
+                "FROM tile_overrides").fetchall()
+        tile_tints.clear()
+        tile_passability.clear()
         for r in rows:
-            tile_overrides[_tile_key(int(r["tx"]), int(r["ty"]))] = r["biome"]
+            key = _tile_key(int(r["tx"]), int(r["ty"]))
+            biome_val = str(r["biome"] or "")
+            if biome_val:
+                tile_overrides[key] = biome_val
+            h = int(r["tint_h"] or 0)
+            v = int(r["tint_v"] or 0)
+            if h != 0 or v != 0:
+                tile_tints[key] = {"h": h, "v": v}
+            p = bool(int(r["passable"] if r["passable"] is not None else 1))
+            if not p:
+                tile_passability[key] = False
         tile_overrides_dirty = False
-        print(f"[tile_overrides] loaded {len(tile_overrides)} tiles from SQLite")
+        print(f"[tile_overrides] loaded {len(tile_overrides)} biomes, "
+              f"{len(tile_tints)} tints, "
+              f"{len(tile_passability)} blocked tiles from SQLite")
     except Exception as e:
         print(f"[tile_overrides] SQLite load failed: {e}")
 
@@ -3138,28 +3771,39 @@ def _save_tile_overrides_to_disk() -> None:
     global tile_overrides_dirty
     try:
         now = time.time()
+        # A row is "live" if ANY of biome/tint/passability has a non-default
+        # value for that tile. Union of the three in-memory dicts.
+        live_keys = set(tile_overrides.keys()) | set(tile_tints.keys()) \
+            | set(tile_passability.keys())
         with _db() as conn:
-            # Wipe rows that no longer have an in-memory mapping (admin cleared them).
             existing = {(int(r["tx"]), int(r["ty"]))
                         for r in conn.execute("SELECT tx, ty FROM tile_overrides")}
             present: set = set()
-            for key, biome in tile_overrides.items():
+            for key in live_keys:
                 try:
                     tx_s, ty_s = key.split(",")
                     tx = int(tx_s); ty = int(ty_s)
                 except (ValueError, AttributeError):
                     continue
                 present.add((tx, ty))
+                biome = str(tile_overrides.get(key, ""))
+                tint = tile_tints.get(key, {})
+                h = int(tint.get("h", 0))
+                v = int(tint.get("v", 0))
+                p_flag = 1 if tile_passability.get(key, True) else 0
                 conn.execute(
                     "INSERT OR REPLACE INTO tile_overrides "
-                    "(tx, ty, biome, updated_at) VALUES (?, ?, ?, ?)",
-                    (tx, ty, str(biome), now))
+                    "(tx, ty, biome, tint_h, tint_v, passable, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (tx, ty, biome, h, v, p_flag, now))
             for tx, ty in existing - present:
                 conn.execute(
                     "DELETE FROM tile_overrides WHERE tx=? AND ty=?", (tx, ty))
             conn.commit()
         tile_overrides_dirty = False
-        print(f"[tile_overrides] saved {len(tile_overrides)} tiles to SQLite")
+        print(f"[tile_overrides] saved {len(live_keys)} tile rows "
+              f"({len(tile_overrides)} biomes, {len(tile_tints)} tints, "
+              f"{len(tile_passability)} blocked)")
     except Exception as e:
         print(f"[tile_overrides] save failed: {e}")
 
@@ -3763,6 +4407,161 @@ async def _handle_admin_tile_set(ws, session: dict, msg: dict) -> None:
     _broadcast({"type": "tile_set", "tx": tx, "ty": ty, "biome": biome})
 
 
+async def _handle_admin_tile_set_bulk(ws, session: dict, msg: dict) -> None:
+    """Bulk paint — N tiles in one message. Used by brush sizes >1×1
+    and flood fill. Avoids spamming N separate `tile_set` messages.
+    Format: {"tiles": [{"tx":int, "ty":int, "biome":str|null}, ...]}
+    A null biome clears the override (same as admin_tile_clear)."""
+    global tile_overrides_dirty
+    if not _is_admin(session):
+        return
+    raw = msg.get("tiles", [])
+    if not isinstance(raw, list):
+        return
+    changes = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            tx = int(entry.get("tx", -1))
+            ty = int(entry.get("ty", -1))
+        except Exception:
+            continue
+        if tx < 0 or ty < 0:
+            continue
+        b = entry.get("biome", None)
+        key = _tile_key(tx, ty)
+        if b is None or str(b).strip() == "":
+            if tile_overrides.pop(key, None) is not None:
+                changes.append({"tx": tx, "ty": ty, "biome": None})
+        else:
+            biome = str(b).strip()
+            tile_overrides[key] = biome
+            changes.append({"tx": tx, "ty": ty, "biome": biome})
+    if changes:
+        tile_overrides_dirty = True
+        _broadcast({"type": "tile_set_bulk", "tiles": changes})
+
+
+def _biome_at_for_server(tx: int, ty: int) -> str:
+    """Server's view of the current biome at (tx, ty). Returns the override
+    if one exists; otherwise empty string (server doesn't know the
+    procedural base). Flood-fill uses this — when no override exists the
+    fill is over the "default" pseudo-biome '' which still gives the
+    expected behavior (paints any unpainted tile that's connected)."""
+    return str(tile_overrides.get(_tile_key(tx, ty), ""))
+
+
+async def _handle_admin_tile_flood_fill(ws, session: dict, msg: dict) -> None:
+    """BFS flood fill from (tx, ty), replacing all 4-connected tiles
+    of the SAME current biome with `biome`. Capped at 5000 tiles so a
+    bad click on a huge ocean doesn't repaint the whole world."""
+    global tile_overrides_dirty
+    if not _is_admin(session):
+        return
+    tx = int(msg.get("tx", -1))
+    ty = int(msg.get("ty", -1))
+    biome = str(msg.get("biome", "")).strip()
+    if tx < 0 or ty < 0 or not biome:
+        return
+    GRID_W, GRID_H = 300, 300
+    if tx >= GRID_W or ty >= GRID_H:
+        return
+    src = _biome_at_for_server(tx, ty)
+    if src == biome:
+        return
+    visited = set()
+    queue = [(tx, ty)]
+    changes = []
+    CAP = 5000
+    while queue and len(changes) < CAP:
+        cx, cy = queue.pop()
+        if (cx, cy) in visited:
+            continue
+        visited.add((cx, cy))
+        if cx < 0 or cy < 0 or cx >= GRID_W or cy >= GRID_H:
+            continue
+        if _biome_at_for_server(cx, cy) != src:
+            continue
+        key = _tile_key(cx, cy)
+        tile_overrides[key] = biome
+        changes.append({"tx": cx, "ty": cy, "biome": biome})
+        queue.extend([(cx + 1, cy), (cx - 1, cy),
+                      (cx, cy + 1), (cx, cy - 1)])
+    if changes:
+        tile_overrides_dirty = True
+        _broadcast({"type": "tile_set_bulk", "tiles": changes})
+        await _admin_confirm(ws,
+            f"Flood filled {len(changes)} tile(s) with '{biome}'.")
+    else:
+        await _admin_confirm(ws, "Nothing connected to flood — no change.")
+
+
+async def _handle_admin_tile_tint(ws, session: dict, msg: dict) -> None:
+    """Set per-tile color tint. h and v are integers in [-100, 100] which
+    the shader maps to ±20% hue / brightness. tiles: list of {tx, ty}."""
+    global tile_overrides_dirty
+    if not _is_admin(session):
+        return
+    h = max(-100, min(100, int(msg.get("h", 0))))
+    v = max(-100, min(100, int(msg.get("v", 0))))
+    raw = msg.get("tiles", [])
+    if not isinstance(raw, list):
+        return
+    changes = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            tx = int(entry.get("tx", -1))
+            ty = int(entry.get("ty", -1))
+        except Exception:
+            continue
+        if tx < 0 or ty < 0:
+            continue
+        key = _tile_key(tx, ty)
+        if h == 0 and v == 0:
+            tile_tints.pop(key, None)
+        else:
+            tile_tints[key] = {"h": h, "v": v}
+        changes.append({"tx": tx, "ty": ty, "h": h, "v": v})
+    if changes:
+        tile_overrides_dirty = True
+        _broadcast({"type": "tile_tint_bulk", "tiles": changes})
+
+
+async def _handle_admin_tile_passability(ws, session: dict, msg: dict) -> None:
+    """Toggle or set per-tile passability. tiles: list of {tx, ty}.
+    passable: bool (True = walkable, False = blocked)."""
+    global tile_overrides_dirty
+    if not _is_admin(session):
+        return
+    p_flag = bool(msg.get("passable", True))
+    raw = msg.get("tiles", [])
+    if not isinstance(raw, list):
+        return
+    changes = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            tx = int(entry.get("tx", -1))
+            ty = int(entry.get("ty", -1))
+        except Exception:
+            continue
+        if tx < 0 or ty < 0:
+            continue
+        key = _tile_key(tx, ty)
+        if p_flag:
+            tile_passability.pop(key, None)
+        else:
+            tile_passability[key] = False
+        changes.append({"tx": tx, "ty": ty, "passable": p_flag})
+    if changes:
+        tile_overrides_dirty = True
+        _broadcast({"type": "tile_passability_bulk", "tiles": changes})
+
+
 async def _handle_admin_tile_clear(ws, session: dict, msg: dict) -> None:
     global tile_overrides_dirty
     if not _is_admin(session):
@@ -3771,7 +4570,13 @@ async def _handle_admin_tile_clear(ws, session: dict, msg: dict) -> None:
     ty = int(msg.get("ty", -1))
     if tx < 0 or ty < 0:
         return
-    if tile_overrides.pop(_tile_key(tx, ty), None) is not None:
+    key = _tile_key(tx, ty)
+    if tile_overrides.pop(key, None) is not None:
+        tile_overrides_dirty = True
+    # Erase also clears tint + passability for the tile — admin
+    # "(erase)" is a full reset to the procedural baseline.
+    tile_tints.pop(key, None)
+    if tile_passability.pop(key, None) is not None:
         tile_overrides_dirty = True
     _broadcast({"type": "tile_clear", "tx": tx, "ty": ty})
 
@@ -4877,6 +5682,10 @@ def _maybe_apply_pledge(conn, session: dict, quest_id: str, now: float) -> None:
         "  pledged_at = excluded.pledged_at",
         (town_id, cid, now))
     print(f"[pledge] {session['username']}'s warband {cid} now holds {town_id}")
+    # Seal lifecycle — pledge change might give one warband all five
+    # towns (triggering the seal to charge) or break a prior hold
+    # (triggering dormant). Cheap recompute.
+    _refresh_seal_after_pledge_change()
 
 
 def _warband_holding_town(conn, town_id: str) -> str:
@@ -4885,6 +5694,384 @@ def _warband_holding_town(conn, town_id: str) -> str:
         "SELECT warband_id FROM town_pledges WHERE town_id=?",
         (town_id,)).fetchone()
     return str(row["warband_id"]) if row else ""
+
+
+# ── Seal of Kings / World-Eater (Phase A foundation) ──────────────────────
+#
+# State is owned by `seal_state` (single-row config) + `world_entities`
+# rows of kind='seal_statue' / 'world_eater'. The lifecycle is driven by:
+#
+#   * `_compute_ruling_warband()` — runs whenever a pledge changes. If a
+#     single warband holds all 5 town pledges, the statue spawns at the
+#     capital (Kjelvik) in 'charged' state. If no warband does, the statue
+#     is cleared and the seal goes back to 'dormant'.
+#   * Player click on a 'charged' statue with all 5 High Seat Tokens
+#     starts 'breaking' (statue takes damage). When integrity hits 0 the
+#     statue is destroyed, the World-Eater spawns at the statue's site
+#     ('walking' state), and the ruling warband becomes the doomed_warband.
+#   * AI tick walks the World-Eater toward the doomed warband's structures
+#     (banners, outposts, strongholds) and town pledge rows. When all are
+#     gone it transitions to 'boss' (vulnerable).
+#
+# This pass ships: state table, aggregator, statue spawn/despawn, click
+# handler, World-Eater entity scaffold + Phase 1 walk tick. The Phase 2
+# boss combat reuses the existing monster_join/damage pipeline once the
+# entity becomes vulnerable — no new combat code needed.
+
+ALL_TOWN_IDS = ["bjorn", "kjelvik", "frostheim", "ironwood", "eastmark"]
+SEAL_STATUE_POS = (2780.0, 3760.0)   # Kjelvik capital seat
+
+
+def _read_seal_state(conn) -> dict:
+    row = conn.execute("SELECT * FROM seal_state WHERE id=1").fetchone()
+    if row is None:
+        return {
+            "state": "dormant", "ruling_warband": "", "doomed_warband": "",
+            "awakened_by": "", "awakened_at": 0.0, "world_eater_id": "",
+        }
+    return {k: row[k] for k in row.keys()}
+
+
+def _write_seal_state(conn, **kwargs) -> None:
+    cur = _read_seal_state(conn)
+    cur.update(kwargs)
+    conn.execute(
+        "UPDATE seal_state SET state=?, ruling_warband=?, doomed_warband=?, "
+        "awakened_by=?, awakened_at=?, world_eater_id=? WHERE id=1",
+        (str(cur["state"]), str(cur["ruling_warband"]),
+         str(cur["doomed_warband"]), str(cur["awakened_by"]),
+         float(cur["awakened_at"]), str(cur["world_eater_id"])))
+
+
+def _compute_ruling_warband(conn) -> str:
+    """Returns the warband id that holds all 5 town pledges, or '' if no
+    single warband does. Cheap — one query, 5-row max."""
+    rows = conn.execute(
+        "SELECT town_id, warband_id FROM town_pledges").fetchall()
+    if len(rows) != len(ALL_TOWN_IDS):
+        return ""
+    held = {str(r["town_id"]): str(r["warband_id"]) for r in rows}
+    if set(held.keys()) != set(ALL_TOWN_IDS):
+        return ""
+    warbands = set(held.values())
+    if len(warbands) != 1:
+        return ""
+    return next(iter(warbands))
+
+
+def _spawn_seal_statue(conn, warband_id: str) -> str:
+    """Place (or replace) the seal statue at the capital coords. The
+    statue is a world_entity (so all existing client visual / click
+    plumbing works) with `kind='seal_statue'`. data carries:
+      { warband_id, integrity (0-100), state ('charged'/'breaking') }
+    Returns the new entity id."""
+    # Remove any prior seal statue first — only one exists at a time.
+    conn.execute("DELETE FROM world_entities WHERE kind='seal_statue'")
+    eid = "a:" + secrets.token_hex(8)
+    x, y = SEAL_STATUE_POS
+    data = {"warband_id": warband_id, "integrity": 100, "state": "charged"}
+    conn.execute(
+        "INSERT INTO world_entities (id, kind, subtype, x, y, data) "
+        "VALUES (?, 'seal_statue', 'seal_statue', ?, ?, ?)",
+        (eid, x, y, json.dumps(data)))
+    _broadcast({"type": "world_entity_add", "entity": {
+        "id": eid, "kind": "seal_statue", "subtype": "seal_statue",
+        "x": x, "y": y, "data": data,
+    }})
+    print(f"[seal] statue spawned at {SEAL_STATUE_POS} for warband {warband_id}")
+    return eid
+
+
+def _despawn_seal_statue(conn) -> None:
+    rows = conn.execute(
+        "SELECT id FROM world_entities WHERE kind='seal_statue'").fetchall()
+    for r in rows:
+        conn.execute("DELETE FROM world_entities WHERE id=?", (str(r["id"]),))
+        _broadcast({"type": "world_entity_remove", "id": str(r["id"])})
+
+
+def _refresh_seal_after_pledge_change() -> None:
+    """Called by every pledge handler (apply / remove). Recomputes ruling
+    warband and synchronizes statue + seal_state. Locked-from-other-world
+    semantics (multi-world rule) are NOT enforced — by design (see plan
+    doc 'Multi-world rule deferred')."""
+    with _db() as conn:
+        seal = _read_seal_state(conn)
+        # Don't fiddle with the statue/seal while a break is in progress
+        # or the World-Eater is active.
+        if seal["state"] in ("breaking", "walking", "boss"):
+            return
+        ruler = _compute_ruling_warband(conn)
+        if ruler == "":
+            if seal["state"] != "dormant":
+                _despawn_seal_statue(conn)
+                _write_seal_state(conn, state="dormant", ruling_warband="")
+                conn.commit()
+                print("[seal] no ruling warband — back to dormant")
+            return
+        # Ruler exists. If it changed or seal was dormant, refresh the
+        # statue and flip to charged.
+        if ruler != seal["ruling_warband"] or seal["state"] != "charged":
+            _spawn_seal_statue(conn, ruler)
+            _write_seal_state(conn, state="charged", ruling_warband=ruler)
+            conn.commit()
+            print(f"[seal] charged — ruling warband: {ruler}")
+
+
+async def _handle_seal_awaken(ws, session, _msg: dict) -> None:
+    """Player attempts to awaken the seal. Requirements:
+    1. Player possesses all 5 High Seat Tokens (q_token_*).
+    2. Player is NOT in the ruling warband.
+    3. Seal is currently 'charged' (not already breaking or dormant).
+    Multi-world locking is intentionally not enforced — single world."""
+    if session is None:
+        return
+    REQUIRED = ["frost_token", "iron_token", "sea_token",
+                "heart_token", "fifth_token"]
+    pid = session["id"]
+    for tok in REQUIRED:
+        if not _player_has_item(pid, tok, 1):
+            await _send(ws, {"type": "chat", "username": "System",
+                "text": "The seal does not stir for the unworthy. "
+                        "(All 5 Tokens of the High Seat required.)"})
+            return
+    with _db() as conn:
+        seal = _read_seal_state(conn)
+        if seal["state"] != "charged":
+            await _send(ws, {"type": "chat", "username": "System",
+                "text": "The seal cannot be awakened right now."})
+            return
+        cid = _clan_id_for_player(conn, pid)
+        if cid == seal["ruling_warband"]:
+            await _send(ws, {"type": "chat", "username": "System",
+                "text": "You cannot awaken your own seal."})
+            return
+        # Flip the statue to 'breaking' — its data.state becomes attackable.
+        row = conn.execute(
+            "SELECT id, data FROM world_entities WHERE kind='seal_statue'"
+        ).fetchone()
+        if not row:
+            await _send(ws, {"type": "chat", "username": "System",
+                "text": "The seal statue is missing."})
+            return
+        eid = str(row["id"])
+        try:
+            data = json.loads(row["data"] or "{}")
+        except Exception:
+            data = {}
+        data["state"] = "breaking"
+        data["integrity"] = max(1, int(data.get("integrity", 100)))
+        conn.execute("UPDATE world_entities SET data=? WHERE id=?",
+            (json.dumps(data), eid))
+        _write_seal_state(conn, state="breaking",
+            awakened_by=session["username"], awakened_at=time.time())
+        conn.commit()
+    _broadcast({"type": "world_entity_update", "id": eid, "data": data})
+    # Alert ALL members of the ruling warband — their seal is being broken.
+    _broadcast({"type": "chat", "username": "System",
+        "text": "⚔  The Seal of Kings is being broken by %s!"
+                % session["username"]})
+    print(f"[seal] AWAKENED by {session['username']} "
+          f"(warband under attack: {seal['ruling_warband']})")
+
+
+async def _handle_seal_attack(ws, session, msg: dict) -> None:
+    """Damage the breaking seal. Anyone outside the ruling warband can
+    contribute. amount caps at 25 per hit so the break takes a few
+    swings. When integrity hits 0 the World-Eater spawns."""
+    if session is None:
+        return
+    amount = max(1, min(25, int(msg.get("amount", 5))))
+    with _db() as conn:
+        seal = _read_seal_state(conn)
+        if seal["state"] != "breaking":
+            return
+        cid = _clan_id_for_player(conn, session["id"])
+        if cid and cid == seal["ruling_warband"]:
+            await _send(ws, {"type": "chat", "username": "System",
+                "text": "You cannot strike your own seal."})
+            return
+        row = conn.execute(
+            "SELECT id, x, y, data FROM world_entities "
+            "WHERE kind='seal_statue'").fetchone()
+        if not row:
+            return
+        eid = str(row["id"])
+        try:
+            data = json.loads(row["data"] or "{}")
+        except Exception:
+            data = {}
+        new_integ = max(0, int(data.get("integrity", 100)) - amount)
+        data["integrity"] = new_integ
+        if new_integ > 0:
+            conn.execute("UPDATE world_entities SET data=? WHERE id=?",
+                (json.dumps(data), eid))
+            conn.commit()
+            _broadcast({"type": "world_entity_update", "id": eid, "data": data})
+            return
+        # ── Seal shatters → World-Eater spawns ──
+        sx, sy = float(row["x"]), float(row["y"])
+        conn.execute("DELETE FROM world_entities WHERE id=?", (eid,))
+        _broadcast({"type": "world_entity_remove", "id": eid})
+        we_id = _spawn_world_eater(conn, sx, sy)
+        _write_seal_state(conn,
+            state="walking",
+            doomed_warband=seal["ruling_warband"],
+            world_eater_id=we_id)
+        conn.commit()
+    _broadcast({"type": "chat", "username": "System",
+        "text": ("⚡  The Seal of Kings shatters! "
+                 "The World-Eater walks the realm.")})
+    print(f"[seal] SHATTERED — World-Eater spawned. "
+          f"Doomed warband: {seal['ruling_warband']}")
+
+
+def _spawn_world_eater(conn, x: float, y: float) -> str:
+    """Create the world_eater entity in world_entities. The slow-walk
+    tick reads from this row each AI tick to advance position and pick
+    its next structure target."""
+    eid = "a:" + secrets.token_hex(8)
+    data = {"phase": 1, "hp": 0, "max_hp": 5000, "target_kind": "", "target_id": ""}
+    conn.execute(
+        "INSERT INTO world_entities (id, kind, subtype, x, y, data) "
+        "VALUES (?, 'world_eater', 'world_eater', ?, ?, ?)",
+        (eid, x, y, json.dumps(data)))
+    _broadcast({"type": "world_entity_add", "entity": {
+        "id": eid, "kind": "world_eater", "subtype": "world_eater",
+        "x": x, "y": y, "data": data,
+    }})
+    return eid
+
+
+# Routed in _route_message below.
+
+
+WORLD_EATER_STEP_PX = 16.0     # px per tick (~2s) — slow ominous walk
+WORLD_EATER_REACH_PX = 48.0    # destroy a target within this radius
+
+
+def _pick_world_eater_target(conn, doomed_warband: str) -> tuple:
+    """Find the nearest doomed-warband structure to chase. Returns
+    (kind, entity_id, x, y) or (None, None, 0, 0) if nothing left.
+
+    Search order matches the design doc: banners + outposts + strongholds
+    by world_entities.data.warband_id == doomed; town pledges as the
+    fallback when no structure remains."""
+    we_row = conn.execute(
+        "SELECT x, y FROM world_entities WHERE kind='world_eater'"
+    ).fetchone()
+    if not we_row:
+        return (None, None, 0, 0)
+    wx, wy = float(we_row["x"]), float(we_row["y"])
+    rows = conn.execute(
+        "SELECT id, kind, x, y, data FROM world_entities "
+        "WHERE kind IN ('banner', 'outpost', 'stronghold')").fetchall()
+    nearest = None
+    nearest_d2 = float("inf")
+    for r in rows:
+        try:
+            d = json.loads(r["data"] or "{}")
+        except Exception:
+            continue
+        if str(d.get("warband_id", "")) != doomed_warband:
+            continue
+        rx, ry = float(r["x"]), float(r["y"])
+        d2 = (rx - wx) ** 2 + (ry - wy) ** 2
+        if d2 < nearest_d2:
+            nearest_d2 = d2
+            nearest = (str(r["kind"]), str(r["id"]), rx, ry)
+    if nearest is not None:
+        return nearest
+    # No structures left — fall back to walking to town pledge sites.
+    # Town centers (matching client `Lore.gd` town coords roughly).
+    TOWN_CENTERS = {
+        "bjorn":     (7823.0, 4488.0),
+        "kjelvik":   (2780.0, 3760.0),
+        "frostheim": (1390.0,  944.0),
+        "ironwood":  (3580.0, 4960.0),
+        "eastmark":  (5944.0, 5872.0),
+    }
+    pledge_rows = conn.execute(
+        "SELECT town_id FROM town_pledges WHERE warband_id=?",
+        (doomed_warband,)).fetchall()
+    nearest = None
+    nearest_d2 = float("inf")
+    for pr in pledge_rows:
+        tid = str(pr["town_id"])
+        if tid not in TOWN_CENTERS:
+            continue
+        rx, ry = TOWN_CENTERS[tid]
+        d2 = (rx - wx) ** 2 + (ry - wy) ** 2
+        if d2 < nearest_d2:
+            nearest_d2 = d2
+            nearest = ("town_pledge", tid, rx, ry)
+    return nearest if nearest else (None, None, 0, 0)
+
+
+def _world_eater_tick() -> None:
+    """Per-tick movement + destruction for the active World-Eater. Only
+    runs while seal_state == 'walking'; transitions to 'boss' (Phase 2)
+    when the doomed warband has nothing left to destroy."""
+    with _db() as conn:
+        seal = _read_seal_state(conn)
+        if seal["state"] != "walking":
+            return
+        we_row = conn.execute(
+            "SELECT id, x, y, data FROM world_entities WHERE kind='world_eater'"
+        ).fetchone()
+        if not we_row:
+            return
+        we_id = str(we_row["id"])
+        wx, wy = float(we_row["x"]), float(we_row["y"])
+        kind, target_id, tx, ty = _pick_world_eater_target(
+            conn, seal["doomed_warband"])
+        if kind is None:
+            # Phase 2 — boss. Make the entity vulnerable. Real boss combat
+            # will use the standard monster_join pipeline; for the
+            # foundation pass we just flip the phase and broadcast.
+            try:
+                data = json.loads(we_row["data"] or "{}")
+            except Exception:
+                data = {}
+            data["phase"] = 2
+            data["hp"] = int(data.get("max_hp", 5000))
+            conn.execute("UPDATE world_entities SET data=? WHERE id=?",
+                (json.dumps(data), we_id))
+            _write_seal_state(conn, state="boss")
+            conn.commit()
+            _broadcast({"type": "world_entity_update",
+                "id": we_id, "data": data})
+            _broadcast({"type": "chat", "username": "System",
+                "text": ("⚡  The World-Eater's hunger is sated. "
+                         "It turns to face the world.")})
+            print("[seal] World-Eater Phase 1 complete → Phase 2 boss")
+            return
+        # In reach → destroy the target and clear it from the world.
+        d2 = (tx - wx) ** 2 + (ty - wy) ** 2
+        if d2 <= WORLD_EATER_REACH_PX ** 2:
+            if kind == "town_pledge":
+                conn.execute("DELETE FROM town_pledges WHERE town_id=?",
+                    (target_id,))
+                _broadcast({"type": "chat", "username": "System",
+                    "text": f"⚡  The pledge of {target_id} is unmade."})
+            else:
+                conn.execute("DELETE FROM world_entities WHERE id=?",
+                    (target_id,))
+                _broadcast({"type": "world_entity_remove", "id": target_id})
+                _broadcast({"type": "chat", "username": "System",
+                    "text": f"⚡  A {kind} falls to the World-Eater."})
+            conn.commit()
+            return
+        # Walk one tick step toward the target.
+        dist = math.sqrt(d2) if d2 > 0 else 1.0
+        nx = wx + (tx - wx) / dist * WORLD_EATER_STEP_PX
+        ny = wy + (ty - wy) / dist * WORLD_EATER_STEP_PX
+        conn.execute("UPDATE world_entities SET x=?, y=? WHERE id=?",
+            (nx, ny, we_id))
+        conn.commit()
+        # Broadcast the position update so clients render the slow
+        # approach. We reuse the existing world_entity_move plumbing.
+        _broadcast({"type": "world_entity_move", "id": we_id, "x": nx, "y": ny})
 
 
 def _town_of_shopkeeper(npc_id: str, npc_name: str) -> str:
@@ -5305,6 +6492,15 @@ def _load_monster_state_from_db() -> None:
             # xp_reward, respawn_until. Seeded from heuristics here so the AI
             # tick can read them safely. They get OVERWRITTEN with the real
             # client-supplied values on the next monster_join from any player.
+            # NEVER restore combat state from disk. Aggro / target_player
+            # are session-scoped — a monster mid-chase when the server was
+            # killed must NOT come back chasing the next player who logs in.
+            # The prior bug: SQLite preserved state="aggro" with target
+            # cleared, then any monster_join would re-target whoever
+            # engaged. Combined with the home-leash skip on aggro state,
+            # the monster chased forever from across the map. Force-reset
+            # state to idle + wander targets back to home so every reboot
+            # starts the world quiet.
             monsters_state[mid] = {
                 "x": float(r["pos_x"]), "y": float(r["pos_y"]),
                 "home_x": float(r["home_x"]), "home_y": float(r["home_y"]),
@@ -5312,16 +6508,16 @@ def _load_monster_state_from_db() -> None:
                 "level": lvl,
                 "hostile": bool(int(r["hostile"] or 0)),
                 "is_boss": is_boss,
-                "state": str(r["state"] or "idle"),
+                "state": "idle",
                 "target_player": None,
                 "max_hp": db_max_hp,
                 "hp": hp,
                 "alive": bool(int(r["alive"] or 1)),
                 "participants": [], "damage": {},
                 "last_attack_at": 0.0,
-                "next_wander_at": now,   # rolled forward on next AI tick
-                "wander_x": float(r["pos_x"]),
-                "wander_y": float(r["pos_y"]),
+                "next_wander_at": now,
+                "wander_x": float(r["home_x"]),
+                "wander_y": float(r["home_y"]),
                 "aggro_radius": _aggro_radius_for(lvl),
                 "passive_flee": _default_passive_flee(mtype),
                 "size": _default_size(mtype),
@@ -5903,10 +7099,17 @@ def _purge_monster_state(mid: str) -> bool:
 
 
 async def _world_tick_loop() -> None:
-    """Respawn depleted nodes / dead monsters and tell nearby clients."""
+    """Respawn depleted nodes / dead monsters and tell nearby clients.
+    Also drives the slow World-Eater Phase 1 walk when an event is active."""
+    we_tick_counter = 0
     while True:
         await asyncio.sleep(1.0)
         now = time.time()
+        # World-Eater walks every 2 ticks (= ~2s) to keep the broadcast
+        # rate low; movement is intentionally ominous.
+        we_tick_counter += 1
+        if we_tick_counter % 2 == 0:
+            _world_eater_tick()
         for eid, st in list(nodes_state.items()):
             if st["depleted_until"] > 0.0 and st["depleted_until"] <= now:
                 _broadcast_near(st["x"], st["y"], {"type": "node_respawned", "id": eid})
@@ -6049,9 +7252,35 @@ def _tick_monster_ai(mid: str, st: dict, now: float, attack_msgs: list) -> None:
             st["wander_x"], st["wander_y"] = home_x, home_y
             st["next_wander_at"] = now
             return
-        # Chase: step toward target at chase speed.
+        # Chase: step toward target at chase speed. Terrain bitmap (if
+        # loaded) rejects steps into impassable tiles — the monster
+        # simply doesn't move that tick rather than walking into water.
+        # If the path is fully blocked the monster will look stuck;
+        # combined with the 1200 px de-aggro leash it eventually gives
+        # up. A future pass can layer perpendicular slide attempts here.
         step = MONSTER_CHASE_SPEED * MONSTER_AI_TICK
-        new_x, new_y = _step_toward(cur_x, cur_y, tx, ty, step)
+        candidate_x, candidate_y = _step_toward(cur_x, cur_y, tx, ty, step)
+        if terrain.is_passable(candidate_x, candidate_y):
+            new_x, new_y = candidate_x, candidate_y
+        else:
+            # Try a 1-axis slide so corners/coastlines don't fully wall
+            # the monster. Prefer the axis with the greater remaining
+            # delta; if that's also blocked, hold position.
+            dx = tx - cur_x
+            dy = ty - cur_y
+            tried = False
+            if abs(dx) >= abs(dy):
+                sx, sy = _step_toward(cur_x, cur_y, tx, cur_y, step)
+                if terrain.is_passable(sx, sy):
+                    new_x, new_y = sx, sy
+                    tried = True
+            if not tried:
+                sx, sy = _step_toward(cur_x, cur_y, cur_x, ty, step)
+                if terrain.is_passable(sx, sy):
+                    new_x, new_y = sx, sy
+                    tried = True
+            if not tried:
+                new_x, new_y = cur_x, cur_y
         st["x"], st["y"] = new_x, new_y
         # Attack if in range and cooldown elapsed. Range = ATTACK_RANGE
         # (20px tight) + the monster's `size` (its body radius), so a
@@ -6104,7 +7333,16 @@ def _tick_monster_ai(mid: str, st: dict, now: float, attack_msgs: list) -> None:
     # Step toward the wander target only while actually wandering.
     if st["state"] == "wander":
         step = MONSTER_WALK_SPEED * MONSTER_AI_TICK
-        new_x, new_y = _step_toward(cur_x, cur_y, st["wander_x"], st["wander_y"], step)
+        cx, cy = _step_toward(cur_x, cur_y, st["wander_x"], st["wander_y"], step)
+        # Terrain gate — same rule as the chase step. A monster wandering
+        # into water just stops at the edge instead of swimming.
+        if terrain.is_passable(cx, cy):
+            new_x, new_y = cx, cy
+        else:
+            new_x, new_y = cur_x, cur_y
+            # Drop the unreachable wander target so we re-roll next tick.
+            st["wander_x"] = cur_x
+            st["wander_y"] = cur_y
         st["x"], st["y"] = new_x, new_y
         if (new_x - st["wander_x"]) ** 2 + (new_y - st["wander_y"]) ** 2 < 4.0:
             st["state"] = "idle"
@@ -6177,6 +7415,26 @@ async def _route_message(ws, session, mtype: str, msg: dict) -> None:
         await _handle_register(ws, msg)
     elif mtype == "login":
         await _handle_login(ws, msg)
+    elif mtype == "request_password_reset":
+        await _handle_request_password_reset(ws, msg)
+    elif mtype == "verify_password_reset_token":
+        await _handle_verify_password_reset_token(ws, msg)
+    elif mtype == "complete_password_reset":
+        await _handle_complete_password_reset(ws, msg)
+    elif mtype == "change_email":
+        await _handle_change_email(ws, session, msg)
+    elif mtype == "change_password":
+        await _handle_change_password(ws, session, msg)
+    elif mtype == "get_account_info":
+        await _handle_get_account_info(ws, session, msg)
+    elif mtype == "set_backstory":
+        await _handle_set_backstory(ws, session, msg)
+    elif mtype == "set_pet_type":
+        await _handle_set_pet_type(ws, session, msg)
+    elif mtype == "seal_awaken":
+        await _handle_seal_awaken(ws, session, msg)
+    elif mtype == "seal_attack":
+        await _handle_seal_attack(ws, session, msg)
     elif mtype == "ping":
         await _send(ws, {"type": "pong"})
     elif session is None:
@@ -6259,10 +7517,28 @@ async def _route_message(ws, session, mtype: str, msg: dict) -> None:
         await _handle_admin_view_inventory(ws, session, msg)
     elif mtype == "admin_list_players":
         await _handle_admin_list_players(ws, session, msg)
+    elif mtype == "admin_list_accounts":
+        await _handle_admin_list_accounts(ws, session, msg)
+    elif mtype == "admin_reset_password":
+        await _handle_admin_reset_password(ws, session, msg)
+    elif mtype == "admin_unlock_account":
+        await _handle_admin_unlock_account(ws, session, msg)
+    elif mtype == "admin_verify_email":
+        await _handle_admin_verify_email(ws, session, msg)
+    elif mtype == "admin_upload_terrain":
+        await _handle_admin_upload_terrain(ws, session, msg)
     elif mtype == "admin_restore_last_loss":
         await _handle_admin_restore_last_loss(ws, session, msg)
     elif mtype == "admin_tile_set":
         await _handle_admin_tile_set(ws, session, msg)
+    elif mtype == "admin_tile_set_bulk":
+        await _handle_admin_tile_set_bulk(ws, session, msg)
+    elif mtype == "admin_tile_flood_fill":
+        await _handle_admin_tile_flood_fill(ws, session, msg)
+    elif mtype == "admin_tile_tint":
+        await _handle_admin_tile_tint(ws, session, msg)
+    elif mtype == "admin_tile_passability":
+        await _handle_admin_tile_passability(ws, session, msg)
     elif mtype == "admin_tile_clear":
         await _handle_admin_tile_clear(ws, session, msg)
     elif mtype == "admin_save_map":
@@ -6432,6 +7708,10 @@ async def main() -> None:
     # idempotent — loading state then loading caches would work too, but
     # this is the natural dependency direction.
     _load_entity_existence_caches()
+    # Optional terrain bitmap — when present, monster movement respects
+    # passability tiles (no walking into water/coast). When absent,
+    # movement is unrestricted (original behavior).
+    terrain.load()
     # Rehydrate the AI dict from the persisted mirror (post-purge so only
     # valid rows reach memory). Non-boss monsters reset to full HP per the
     # partial-persist rule; bosses keep their last persisted HP.

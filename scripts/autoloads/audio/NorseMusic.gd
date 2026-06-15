@@ -22,7 +22,8 @@ extends Node
 ##
 ## Combat intensity is the only place dynamic intensity changes the layers.
 
-const SoundForge = preload("res://scripts/autoloads/audio/SoundForge.gd")
+# SoundForge uses `class_name SoundForge` — globally available, no preload
+# const needed (would shadow the class_name symbol under strict mode).
 
 # ── Modal scales (5-7 note Norse-friendly modes) ────────────────────────────
 const SCALES := {

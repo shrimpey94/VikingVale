@@ -21,7 +21,12 @@ const PAINT_BIOMES: Array = [
 	"snow", "helheim", "ashlands", "town", "road", "(erase)",
 ]
 
-enum Mode { OFF, PLACE, DELETE, MOVE, TILE }
+enum Mode { OFF, PLACE, DELETE, MOVE, TILE, FLOOD, TINT, PASSABILITY }
+
+# Brush sizes for TILE / TINT / PASSABILITY modes. 1 = single click.
+# 3/5/7 paint odd-sized squares centered on the cursor tile. The FLOOD
+# pseudo-mode replaces all brush-size options.
+const BRUSH_SIZES := [1, 3, 5, 7]
 
 var _mode: int = Mode.OFF
 var _entries: Array = []
@@ -45,8 +50,24 @@ var _level_spin: SpinBox        = null
 # tile controls) and "Items" (admin item give/take/view/restore).
 var _world_section: VBoxContainer = null
 var _items_section: VBoxContainer = null
+var _accounts_section: VBoxContainer = null
 var _tab_world_btn: Button        = null
 var _tab_items_btn: Button        = null
+var _tab_accounts_btn: Button     = null
+# Accounts tab state
+var _accounts_search: LineEdit    = null
+var _accounts_list_root: VBoxContainer = null
+
+# Tile editor v2 state — brush size, flood mode, tint sliders, brush preview
+var _brush_size: int = 1
+var _flood_mode: bool = false
+var _tint_h_slider: HSlider = null
+var _tint_v_slider: HSlider = null
+var _brush_size_opt: OptionButton = null
+# Live preview rectangle drawn under the cursor when a brush larger than 1×1
+# is active. A child of the overlay so it inherits the same hit-test mask.
+var _brush_preview: ColorRect = null
+var _last_mouse_world: Vector2 = Vector2.ZERO
 
 # Items-tab widgets.
 var _items_player_opt: OptionButton    = null
@@ -112,18 +133,26 @@ func _build_panel() -> void:
 	var tab_row := HBoxContainer.new()
 	tab_row.add_theme_constant_override("separation", 4)
 	vb.add_child(tab_row)
-	_tab_world_btn = _tab_button("World", true)
-	_tab_items_btn = _tab_button("Items", false)
+	_tab_world_btn    = _tab_button("World", true)
+	_tab_items_btn    = _tab_button("Items", false)
+	_tab_accounts_btn = _tab_button("Accounts", false)
 	_tab_world_btn.pressed.connect(func() -> void: _show_tab("world"))
 	_tab_items_btn.pressed.connect(func() -> void: _show_tab("items"))
+	_tab_accounts_btn.pressed.connect(func() -> void: _show_tab("accounts"))
 	tab_row.add_child(_tab_world_btn)
 	tab_row.add_child(_tab_items_btn)
+	tab_row.add_child(_tab_accounts_btn)
 
-	_world_section = _build_world_section()
-	_items_section = _build_items_section()
+	_world_section    = _build_world_section()
+	_items_section    = _build_items_section()
+	_accounts_section = _build_accounts_section()
 	vb.add_child(_world_section)
 	vb.add_child(_items_section)
+	vb.add_child(_accounts_section)
 	_items_section.visible = false
+	_accounts_section.visible = false
+	# Wire the account-list response signal once.
+	Events.admin_account_list_received.connect(_on_account_list_received)
 
 	_update_mode_label()
 
@@ -149,6 +178,8 @@ func _build_world_section() -> VBoxContainer:
 	row2.add_theme_constant_override("separation", 4)
 	vb.add_child(row2)
 	row2.add_child(_mode_button("Tile",  Mode.TILE))
+	row2.add_child(_mode_button("Tint",  Mode.TINT))
+	row2.add_child(_mode_button("Pass",  Mode.PASSABILITY))
 	row2.add_child(_mode_button("Off",   Mode.OFF))
 
 	var el := Label.new()
@@ -196,6 +227,32 @@ func _build_world_section() -> VBoxContainer:
 		_biome_opt.add_item(str(PAINT_BIOMES[i]), i)
 	vb.add_child(_biome_opt)
 
+	# Brush size selector — applies to Tile / Tint / Pass modes. 1×1 is the
+	# default; the FLOOD entry is a pseudo-size that switches to flood fill.
+	var brush_lbl := Label.new()
+	brush_lbl.text = "Brush:"
+	brush_lbl.add_theme_color_override("font_color", UITheme.DIM)
+	brush_lbl.add_theme_font_size_override("font_size", 11)
+	vb.add_child(brush_lbl)
+	_brush_size_opt = OptionButton.new()
+	for s: int in BRUSH_SIZES:
+		_brush_size_opt.add_item("%d×%d" % [s, s])
+	_brush_size_opt.add_item("Flood fill")    # special "size"
+	_brush_size_opt.item_selected.connect(_on_brush_size_selected)
+	vb.add_child(_brush_size_opt)
+
+	# Tint sliders — used by Tint mode + optionally during Tile/biome paint
+	# to colorize each stamped tile. Each runs -100..100; 0 = no shift.
+	var tint_lbl := Label.new()
+	tint_lbl.text = "Tile tint (Tint mode):"
+	tint_lbl.add_theme_color_override("font_color", UITheme.DIM)
+	tint_lbl.add_theme_font_size_override("font_size", 11)
+	vb.add_child(tint_lbl)
+	_tint_h_slider = _make_tint_slider("Hue ±")
+	vb.add_child(_tint_h_slider)
+	_tint_v_slider = _make_tint_slider("Bright ±")
+	vb.add_child(_tint_v_slider)
+
 	var save_btn := Button.new()
 	save_btn.text = "💾  Save Map / Refresh Minimap"
 	save_btn.add_theme_stylebox_override("normal", UITheme.sb(UITheme.BTN_A, UITheme.GOLD, 2))
@@ -203,6 +260,18 @@ func _build_world_section() -> VBoxContainer:
 	save_btn.add_theme_color_override("font_color", UITheme.GOLD)
 	save_btn.pressed.connect(_on_save_map)
 	vb.add_child(save_btn)
+
+	var bake_btn := Button.new()
+	bake_btn.text = "🌊  Bake Terrain Bitmap (server)"
+	bake_btn.add_theme_stylebox_override("normal", UITheme.sb(UITheme.BTN_N, UITheme.BORDER, 1))
+	bake_btn.add_theme_stylebox_override("hover",  UITheme.sb(UITheme.BTN_H, UITheme.GOLD, 1))
+	bake_btn.add_theme_color_override("font_color", UITheme.TEXT)
+	bake_btn.tooltip_text = ("Bake the 300×300 passability bitmap from "
+		+ "Ground.biome_at_world and upload it. Server uses it to block "
+		+ "monster movement into water/coast tiles. Run once whenever "
+		+ "biome generation changes. Owner-only.")
+	bake_btn.pressed.connect(_on_bake_terrain)
+	vb.add_child(bake_btn)
 
 	var hint := Label.new()
 	hint.add_theme_color_override("font_color", UITheme.DIM)
@@ -321,21 +390,184 @@ func _tab_button(text: String, active: bool) -> Button:
 	return b
 
 func _show_tab(which: String) -> void:
-	var world := which == "world"
-	if _world_section != null: _world_section.visible = world
-	if _items_section != null: _items_section.visible = not world
-	if _tab_world_btn != null:
-		_tab_world_btn.add_theme_stylebox_override("normal",
-			UITheme.sb(UITheme.BTN_A if world else UITheme.BTN_N,
-				UITheme.GOLD if world else UITheme.BORDER, 2))
-	if _tab_items_btn != null:
-		_tab_items_btn.add_theme_stylebox_override("normal",
-			UITheme.sb(UITheme.BTN_A if not world else UITheme.BTN_N,
-				UITheme.GOLD if not world else UITheme.BORDER, 2))
-	# Auto-fetch the player list the first time the Items tab is opened
-	# (saves the admin a manual ↻ click when they switch tabs).
-	if not world and _items_player_opt != null and _items_player_opt.item_count <= 1:
+	if _world_section != null:    _world_section.visible    = which == "world"
+	if _items_section != null:    _items_section.visible    = which == "items"
+	if _accounts_section != null: _accounts_section.visible = which == "accounts"
+	_paint_tab(_tab_world_btn,    which == "world")
+	_paint_tab(_tab_items_btn,    which == "items")
+	_paint_tab(_tab_accounts_btn, which == "accounts")
+	# Lazy first-fetches per tab so the admin doesn't have to hit a manual
+	# refresh after opening it.
+	if which == "items" and _items_player_opt != null \
+			and _items_player_opt.item_count <= 1:
 		_on_refresh_players()
+	if which == "accounts" and _accounts_list_root != null \
+			and _accounts_list_root.get_child_count() == 0:
+		NetworkManager.send_admin_list_accounts("")
+
+func _paint_tab(btn: Button, active: bool) -> void:
+	if btn == null:
+		return
+	btn.add_theme_stylebox_override("normal",
+		UITheme.sb(UITheme.BTN_A if active else UITheme.BTN_N,
+			UITheme.GOLD if active else UITheme.BORDER, 2))
+
+# ── Accounts tab ────────────────────────────────────────────────────────────
+## Search-driven account list. Each row shows username, email + verified
+## status, last-login timestamp, lockout indicator, with three actions:
+## Reset (mail a token), Unlock, Verify-email. All routes are gated by
+## _is_admin on the server side; the client just sends.
+func _build_accounts_section() -> VBoxContainer:
+	var vb := VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 6)
+
+	# Search row.
+	var search_row := HBoxContainer.new()
+	search_row.add_theme_constant_override("separation", 4)
+	vb.add_child(search_row)
+	_accounts_search = LineEdit.new()
+	_accounts_search.placeholder_text = "search username or email"
+	_accounts_search.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_accounts_search.add_theme_stylebox_override("normal",
+		UITheme.sb(UITheme.BTN_N, UITheme.BORDER, 1))
+	_accounts_search.add_theme_color_override("font_color", UITheme.TEXT)
+	_accounts_search.add_theme_font_size_override("font_size", 11)
+	_accounts_search.text_submitted.connect(func(_t: String) -> void:
+		NetworkManager.send_admin_list_accounts(_accounts_search.text))
+	search_row.add_child(_accounts_search)
+	var go_btn := Button.new()
+	go_btn.text = "Go"
+	go_btn.custom_minimum_size = Vector2(40, 0)
+	go_btn.add_theme_stylebox_override("normal",
+		UITheme.sb(UITheme.BTN_N, UITheme.BORDER, 1))
+	go_btn.add_theme_color_override("font_color", UITheme.TEXT)
+	go_btn.add_theme_font_size_override("font_size", 11)
+	go_btn.pressed.connect(func() -> void:
+		NetworkManager.send_admin_list_accounts(_accounts_search.text))
+	search_row.add_child(go_btn)
+
+	# Scrollable list.
+	var scroll := ScrollContainer.new()
+	scroll.custom_minimum_size = Vector2(0, 280)
+	scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	vb.add_child(scroll)
+	_accounts_list_root = VBoxContainer.new()
+	_accounts_list_root.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_accounts_list_root.add_theme_constant_override("separation", 3)
+	scroll.add_child(_accounts_list_root)
+
+	return vb
+
+func _on_account_list_received(accounts: Array) -> void:
+	if _accounts_list_root == null:
+		return
+	for c: Node in _accounts_list_root.get_children():
+		c.queue_free()
+	if accounts.is_empty():
+		var none := Label.new()
+		none.text = "(no accounts match)"
+		none.add_theme_color_override("font_color", UITheme.DIM)
+		none.add_theme_font_size_override("font_size", 10)
+		_accounts_list_root.add_child(none)
+		return
+	for entry: Variant in accounts:
+		if not (entry is Dictionary):
+			continue
+		_accounts_list_root.add_child(_build_account_row(entry as Dictionary))
+
+func _build_account_row(a: Dictionary) -> PanelContainer:
+	var row := PanelContainer.new()
+	row.add_theme_stylebox_override("panel",
+		UITheme.sb(UITheme.BG.lightened(0.04), UITheme.BORDER.darkened(0.4), 1))
+	var inner := VBoxContainer.new()
+	inner.add_theme_constant_override("separation", 2)
+	row.add_child(inner)
+
+	var username := str(a.get("username", "?"))
+
+	# Header: username + lock badge
+	var head := HBoxContainer.new()
+	head.add_theme_constant_override("separation", 6)
+	inner.add_child(head)
+	var name_lbl := Label.new()
+	name_lbl.text = username
+	name_lbl.add_theme_color_override("font_color", UITheme.GOLD)
+	name_lbl.add_theme_font_size_override("font_size", 12)
+	name_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	head.add_child(name_lbl)
+	var locked_until := float(a.get("locked_until", 0.0))
+	if locked_until > Time.get_unix_time_from_system():
+		var lock_lbl := Label.new()
+		lock_lbl.text = "LOCKED"
+		lock_lbl.add_theme_color_override("font_color", Color(0.95, 0.40, 0.30))
+		lock_lbl.add_theme_font_size_override("font_size", 10)
+		head.add_child(lock_lbl)
+
+	# Email row
+	var email := str(a.get("email", ""))
+	var verified := bool(a.get("email_verified", false))
+	var email_lbl := Label.new()
+	if email.is_empty():
+		email_lbl.text = "(no email)"
+		email_lbl.add_theme_color_override("font_color", UITheme.DIM)
+	else:
+		email_lbl.text = "%s%s" % [email, "  ✓" if verified else ""]
+		email_lbl.add_theme_color_override("font_color",
+			UITheme.TEXT if verified else UITheme.DIM)
+	email_lbl.add_theme_font_size_override("font_size", 10)
+	inner.add_child(email_lbl)
+
+	# Last login + failed-count line
+	var ll := Label.new()
+	var ll_ts := float(a.get("last_login_at", 0.0))
+	var ll_text := "never"
+	if ll_ts > 0.0:
+		var dt := Time.get_datetime_dict_from_unix_time(int(ll_ts))
+		ll_text = "%04d-%02d-%02d %02d:%02d" % [
+			dt.year, dt.month, dt.day, dt.hour, dt.minute]
+	var fails := int(a.get("failed_login_count", 0))
+	ll.text = "last login: %s   fails: %d" % [ll_text, fails]
+	ll.add_theme_color_override("font_color", UITheme.DIM)
+	ll.add_theme_font_size_override("font_size", 9)
+	inner.add_child(ll)
+
+	# Action buttons
+	var btn_row := HBoxContainer.new()
+	btn_row.add_theme_constant_override("separation", 4)
+	inner.add_child(btn_row)
+	var reset_btn := _account_action_btn("Reset PW")
+	reset_btn.pressed.connect(func() -> void:
+		NetworkManager.send_admin_reset_password(username))
+	btn_row.add_child(reset_btn)
+	var unlock_btn := _account_action_btn("Unlock")
+	unlock_btn.pressed.connect(func() -> void:
+		NetworkManager.send_admin_unlock_account(username)
+		# Refresh after a short delay so the lock badge updates.
+		get_tree().create_timer(0.3).timeout.connect(func() -> void:
+			NetworkManager.send_admin_list_accounts(_accounts_search.text)))
+	btn_row.add_child(unlock_btn)
+	var verify_btn := _account_action_btn("Verify ✓")
+	verify_btn.pressed.connect(func() -> void:
+		NetworkManager.send_admin_verify_email(username)
+		get_tree().create_timer(0.3).timeout.connect(func() -> void:
+			NetworkManager.send_admin_list_accounts(_accounts_search.text)))
+	btn_row.add_child(verify_btn)
+
+	return row
+
+func _account_action_btn(text: String) -> Button:
+	var b := Button.new()
+	b.text = text
+	b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	b.custom_minimum_size = Vector2(0, 22)
+	b.add_theme_stylebox_override("normal",
+		UITheme.sb(UITheme.BTN_N, UITheme.BORDER, 1))
+	b.add_theme_stylebox_override("hover",
+		UITheme.sb(UITheme.BTN_H, UITheme.GOLD, 1))
+	b.add_theme_color_override("font_color", UITheme.TEXT)
+	b.add_theme_font_size_override("font_size", 9)
+	return b
 
 func _section_label(text: String) -> Label:
 	var l := Label.new()
@@ -437,6 +669,23 @@ func _on_restore_last_loss() -> void:
 ## so painted terrain shows. The server replies with its own confirmation chat.
 func _on_save_map() -> void:
 	NetworkManager.send_admin_save_map()
+
+## Bake the server-side passability bitmap from Ground.biome_at_world and
+## upload it. Server gates monster movement against the bitmap, blocking
+## chase paths across water/coast. Owner-only — server rejects non-owner.
+func _on_bake_terrain() -> void:
+	var ground := get_tree().get_first_node_in_group("ground")
+	if ground == null:
+		Events.chat_message.emit("[Terrain] Ground node not found.")
+		return
+	Events.chat_message.emit("[Terrain] Baking 300×300 bitmap…")
+	var baker_script := load("res://scripts/TerrainBaker.gd")
+	var payload: String = baker_script.bake(ground) as String
+	if payload.is_empty():
+		Events.chat_message.emit("[Terrain] Bake failed.")
+		return
+	NetworkManager.send_admin_upload_terrain(payload)
+	Events.chat_message.emit("[Terrain] Uploaded %d chars to server." % payload.length())
 	Events.minimap_refresh.emit()
 
 func _mode_button(text: String, mode: int) -> Button:
@@ -455,16 +704,24 @@ func _set_mode(mode: int) -> void:
 	_overlay.mouse_filter = (Control.MOUSE_FILTER_IGNORE if mode == Mode.OFF
 							 else Control.MOUSE_FILTER_STOP)
 	_update_mode_label()
+	_update_brush_preview()
+	# Tell World to show/hide the red impassable overlay — only visible
+	# while the admin is in PASSABILITY edit mode.
+	var w := _world()
+	if w != null and w.has_method("set_passability_overlay_visible"):
+		w.call("set_passability_overlay_visible", mode == Mode.PASSABILITY)
 
 func _update_mode_label() -> void:
 	if _mode_lbl == null:
 		return
 	match _mode:
-		Mode.PLACE:  _mode_lbl.text = "Mode: PLACE — click map"
-		Mode.DELETE: _mode_lbl.text = "Mode: DELETE — click entity"
-		Mode.MOVE:   _mode_lbl.text = "Mode: MOVE — drag entity"
-		Mode.TILE:   _mode_lbl.text = "Mode: TILE — drag to paint"
-		_:           _mode_lbl.text = "Mode: off"
+		Mode.PLACE:        _mode_lbl.text = "Mode: PLACE — click map"
+		Mode.DELETE:       _mode_lbl.text = "Mode: DELETE — click entity"
+		Mode.MOVE:         _mode_lbl.text = "Mode: MOVE — drag entity"
+		Mode.TILE:         _mode_lbl.text = "Mode: TILE — drag to paint"
+		Mode.TINT:         _mode_lbl.text = "Mode: TINT — drag to color"
+		Mode.PASSABILITY:  _mode_lbl.text = "Mode: PASS — drag to block / unblock"
+		_:                 _mode_lbl.text = "Mode: off"
 
 func _toggle_panel() -> void:
 	var show_now := not _panel.visible
@@ -472,6 +729,8 @@ func _toggle_panel() -> void:
 	_overlay.visible = show_now
 	if not show_now:
 		_set_mode(Mode.OFF)
+		if _brush_preview != null and is_instance_valid(_brush_preview):
+			_brush_preview.visible = false
 
 # ── Input ──────────────────────────────────────────────────────────────────────
 func _input(event: InputEvent) -> void:
@@ -508,7 +767,7 @@ func _on_overlay_input(event: InputEvent) -> void:
 				elif _drag_id != "":
 					NetworkManager.send_admin_move(_drag_id, _drag_pos.x, _drag_pos.y)
 					_drag_id = ""
-			Mode.TILE:
+			Mode.TILE, Mode.TINT, Mode.PASSABILITY:
 				_painting = mb.pressed
 				if mb.pressed:
 					_last_tile = Vector2i(-9999, -9999)
@@ -516,10 +775,12 @@ func _on_overlay_input(event: InputEvent) -> void:
 		_overlay.accept_event()
 	elif event is InputEventMouseMotion:
 		var wpos := _screen_to_world((event as InputEventMouseMotion).position)
+		_last_mouse_world = wpos
 		if _mode == Mode.MOVE and _drag_id != "":
 			_drag_pos = wpos
-		elif _mode == Mode.TILE and _painting:
+		elif _mode in [Mode.TILE, Mode.TINT, Mode.PASSABILITY] and _painting:
 			_paint_at(wpos)
+		_update_brush_preview()
 
 func _place_at(wpos: Vector2) -> void:
 	var idx := _type_opt.get_selected_id()
@@ -561,13 +822,168 @@ func _delete_at(wpos: Vector2) -> void:
 	if id != "":
 		NetworkManager.send_admin_delete(id)
 
+# ── Brush + tint + passability UI helpers ──────────────────────────────────
+func _on_brush_size_selected(idx: int) -> void:
+	# Last entry is the special "Flood fill" pseudo-size; the BRUSH_SIZES
+	# array carries the real sizes 1/3/5/7.
+	if idx >= 0 and idx < BRUSH_SIZES.size():
+		_brush_size = int(BRUSH_SIZES[idx])
+		_flood_mode = false
+	else:
+		_brush_size = 1
+		_flood_mode = true
+	_update_brush_preview()
+
+func _make_tint_slider(label_text: String) -> HSlider:
+	# Slider rides ±100; 0 = no shift, ±100 = ±20% (the shader maps it).
+	# Label-on-the-side gets baked into the HBox so we don't smuggle
+	# Tools-into-a-Slider — return the HBox masquerading as HSlider via
+	# size_flags. Simpler: just an HSlider, mouseover tooltip carries the
+	# label text since the brush+tint section already has its own header.
+	var s := HSlider.new()
+	s.min_value = -100
+	s.max_value =  100
+	s.step      =    1
+	s.value     =    0
+	s.custom_minimum_size = Vector2(0, 18)
+	s.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	s.tooltip_text = label_text + "  (-100 cool / cooler  →  +100 warm / brighter)"
+	return s
+
+## Build the translucent preview rect that follows the cursor. Lives on the
+## overlay so its coordinate space matches what _on_overlay_input uses.
+func _ensure_brush_preview() -> void:
+	if _brush_preview != null and is_instance_valid(_brush_preview):
+		return
+	if _overlay == null:
+		return
+	_brush_preview = ColorRect.new()
+	_brush_preview.color = Color(0.95, 0.78, 0.18, 0.20)
+	_brush_preview.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_brush_preview.visible = false
+	# Pinned at the top of the overlay so it draws above the world but below
+	# any future on-overlay UI.
+	_overlay.add_child(_brush_preview)
+
+func _update_brush_preview() -> void:
+	_ensure_brush_preview()
+	if _brush_preview == null:
+		return
+	var painting_mode := _mode in [Mode.TILE, Mode.TINT, Mode.PASSABILITY]
+	if not painting_mode or _brush_size <= 1 or _flood_mode:
+		_brush_preview.visible = false
+		return
+	# Convert _last_mouse_world to the tile origin, then back to screen.
+	var t := Vector2i(int(floor(_last_mouse_world.x / TILE)),
+		int(floor(_last_mouse_world.y / TILE)))
+	@warning_ignore("integer_division") var half := _brush_size / 2
+	var origin_world := Vector2(float(t.x - half) * TILE, float(t.y - half) * TILE)
+	var px_size := float(_brush_size) * TILE
+	# overlay is anchored full-rect at the screen, so we paint in screen px.
+	var xform := get_viewport().get_canvas_transform()
+	var screen_pos := xform * origin_world
+	var screen_size := Vector2(px_size, px_size) * xform.get_scale()
+	# Pick a color hint per mode so the preview reads at a glance.
+	match _mode:
+		Mode.TINT:
+			_brush_preview.color = Color(0.40, 0.65, 0.95, 0.25)
+		Mode.PASSABILITY:
+			_brush_preview.color = Color(0.95, 0.20, 0.20, 0.30)
+		_:
+			_brush_preview.color = Color(0.95, 0.78, 0.18, 0.22)
+	_brush_preview.position = screen_pos
+	_brush_preview.size = screen_size
+	_brush_preview.visible = true
+
+## Compute the brush footprint as an Array of Vector2i tile coordinates,
+## centered on `t`. Out-of-bounds tiles are clipped.
+func _brush_footprint(t: Vector2i) -> Array:
+	var out: Array = []
+	@warning_ignore("integer_division") var half := _brush_size / 2
+	for dy in range(-half, half + 1):
+		for dx in range(-half, half + 1):
+			var tx := t.x + dx
+			var ty := t.y + dy
+			if tx < 0 or ty < 0 or tx >= 300 or ty >= 300:
+				continue
+			out.append(Vector2i(tx, ty))
+	return out
+
+func _tiles_array_for_wire(coords: Array) -> Array:
+	# Build a network-friendly list of {tx, ty} dicts.
+	var out: Array = []
+	for c: Variant in coords:
+		var v: Vector2i = c
+		out.append({"tx": v.x, "ty": v.y})
+	return out
+
 func _paint_at(wpos: Vector2) -> void:
 	var t := Vector2i(int(floor(wpos.x / TILE)), int(floor(wpos.y / TILE)))
 	if t == _last_tile:
 		return
 	_last_tile = t
+
+	# ── Passability mode ──
+	if _mode == Mode.PASSABILITY:
+		var coords := _brush_footprint(t)
+		if coords.is_empty():
+			return
+		# Toggle based on the centre tile's CURRENT state so a single click
+		# either blocks or unblocks the brush footprint as a group.
+		var g := get_tree().get_first_node_in_group("ground")
+		var was_blocked := false
+		if g != null and g.has_method("is_tile_impassable"):
+			was_blocked = bool(g.call("is_tile_impassable", t.x, t.y))
+		var new_passable := was_blocked   # if it was blocked, make passable
+		NetworkManager.send_admin_tile_passability(
+			_tiles_array_for_wire(coords), new_passable)
+		return
+
+	# ── Tint mode ──
+	if _mode == Mode.TINT:
+		var coords2 := _brush_footprint(t)
+		if coords2.is_empty():
+			return
+		var h := int(_tint_h_slider.value) if _tint_h_slider != null else 0
+		var v := int(_tint_v_slider.value) if _tint_v_slider != null else 0
+		NetworkManager.send_admin_tile_tint(
+			_tiles_array_for_wire(coords2), h, v)
+		return
+
+	# ── Tile (biome) paint ──
 	var biome := str(PAINT_BIOMES[_biome_opt.get_selected_id()])
+	# Flood fill is a single-seed action regardless of brush size.
+	if _flood_mode:
+		if biome == "(erase)":
+			# Treat flood-erase as flood-paint with the procedural-baseline
+			# biome at the click — server doesn't know procedural, so we
+			# just send "plains" as a safe fallback. Or admin can run the
+			# Bake Terrain Bitmap afterward to refresh.
+			NetworkManager.send_admin_tile_clear(t.x, t.y)
+			return
+		NetworkManager.send_admin_tile_flood_fill(t.x, t.y, biome)
+		return
+
+	# 1×1 brush — fast path: keep the existing single-tile message so we
+	# don't pay the bulk overhead for the most common case.
+	if _brush_size <= 1:
+		if biome == "(erase)":
+			NetworkManager.send_admin_tile_clear(t.x, t.y)
+		else:
+			NetworkManager.send_admin_tile_set(t.x, t.y, biome)
+		return
+
+	# N×N brush — build the footprint and send one bulk message.
+	var coords3 := _brush_footprint(t)
+	if coords3.is_empty():
+		return
+	var bulk: Array = []
+	var biome_or_null: Variant
 	if biome == "(erase)":
-		NetworkManager.send_admin_tile_clear(t.x, t.y)
+		biome_or_null = null
 	else:
-		NetworkManager.send_admin_tile_set(t.x, t.y, biome)
+		biome_or_null = biome
+	for c: Variant in coords3:
+		var v: Vector2i = c
+		bulk.append({"tx": v.x, "ty": v.y, "biome": biome_or_null})
+	NetworkManager.send_admin_tile_set_bulk(bulk)

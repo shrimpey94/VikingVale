@@ -5,6 +5,8 @@ extends VBoxContainer
 ## emits Events.skill_cell_pressed so HUD keeps ownership of the windows a cell opens.
 
 const UITheme = preload("res://scripts/ui/UITheme.gd")
+# VikingTheme uses `class_name VikingTheme` — globally available, no
+# preload const needed (would shadow the class_name symbol).
 
 const _ICONS: Dictionary = {
 	"woodcutting": "🪓", "mining": "⛏", "fishing": "🎣", "foraging": "🌿",
@@ -34,8 +36,8 @@ func _ready() -> void:
 			_refresh())
 
 func _build() -> void:
-	add_child(UITheme.title("Skills"))
-	add_child(HSeparator.new())
+	add_child(VikingTheme.section_header("Skills", 14))
+	add_child(VikingTheme.divider())
 
 	var grid := GridContainer.new()
 	grid.columns = 3

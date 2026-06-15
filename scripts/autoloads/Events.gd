@@ -186,6 +186,14 @@ extends Node
 @warning_ignore("unused_signal") signal tile_overrides_received(overrides: Array)
 @warning_ignore("unused_signal") signal tile_override_set(tx: int, ty: int, biome: String)
 @warning_ignore("unused_signal") signal tile_override_cleared(tx: int, ty: int)
+## Tile editor v2 — bulk paint (brush stamp + flood fill), per-tile color
+## tints, and per-tile passability paints. Each `entries` array carries
+## the same per-tile dicts the server stored: `tile_set_bulk` entries are
+## {tx, ty, biome|null}; `tile_tint_bulk` are {tx, ty, h, v}; passability
+## entries are {tx, ty, passable}.
+@warning_ignore("unused_signal") signal tile_overrides_bulk_received(entries: Array)
+@warning_ignore("unused_signal") signal tile_tints_bulk_received(entries: Array)
+@warning_ignore("unused_signal") signal tile_passability_bulk_received(entries: Array)
 @warning_ignore("unused_signal") signal entity_edits_received(edits: Array)
 @warning_ignore("unused_signal") signal entity_edit_applied(entity_id: String, deleted: bool, x: float, y: float)
 @warning_ignore("unused_signal") signal minimap_refresh()
@@ -194,6 +202,14 @@ extends Node
 ## the server's admin_give_item / admin_take_item / admin_view_inventory /
 ## admin_list_players / admin_restore_last_loss handlers.
 @warning_ignore("unused_signal") signal admin_player_list_received(usernames: Array)
+## Admin Accounts tab — each entry is a Dictionary with keys: username,
+## email, email_verified, last_login_at, last_login_ip, locked_until,
+## failed_login_count, created_at. See _handle_admin_list_accounts.
+@warning_ignore("unused_signal") signal admin_account_list_received(accounts: Array)
+## Touch-input adapter — fires at the halfway point of a long-press so a
+## future UI overlay can show a ring-fill / progress hint. The actual
+## right-click synthesis happens in TouchInput.gd at LONG_PRESS_SECONDS.
+@warning_ignore("unused_signal") signal touch_long_press_armed(pos: Vector2)
 @warning_ignore("unused_signal") signal admin_inventory_view_received(target: String, online: bool, inventory: Array)
 
 ## Fishing reel minigame (Phase 2 of the fishing rework). Player.gd emits

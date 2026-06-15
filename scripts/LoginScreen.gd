@@ -21,6 +21,7 @@ const DEFAULT_SERVER := "147.185.221.211:21498"
 var _status_lbl: Label    = null
 var _user_field: LineEdit = null
 var _pass_field: LineEdit = null
+var _email_field: LineEdit = null
 var _url_field:  LineEdit = null
 var _status_dot: Panel    = null
 var _addr_lbl:   Label    = null
@@ -115,6 +116,10 @@ func _build_ui() -> void:
 	_pass_field = _make_field("Password", true)
 	_pass_field.gui_input.connect(_on_pass_input)
 	vbox.add_child(_pass_field)
+	# Email field — optional, only used on Create Account. Login ignores it.
+	# Helps brand-new accounts have a recovery channel out of the gate.
+	_email_field = _make_field("Email (optional — for password recovery)", false)
+	vbox.add_child(_email_field)
 
 	# ── Primary buttons ───────────────────────────────────────────────────────
 	var btn_row := HBoxContainer.new()
@@ -128,6 +133,14 @@ func _build_ui() -> void:
 	reg_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	reg_btn.pressed.connect(_on_register_pressed)
 	btn_row.add_child(reg_btn)
+
+	# ── Forgot password link ──────────────────────────────────────────────────
+	var forgot_row := HBoxContainer.new()
+	forgot_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	vbox.add_child(forgot_row)
+	var forgot_link := _link_btn("Forgot password?")
+	forgot_link.pressed.connect(_on_forgot_pressed)
+	forgot_row.add_child(forgot_link)
 
 	# ── Status message (errors / progress) ────────────────────────────────────
 	_status_lbl = Label.new()
@@ -328,18 +341,36 @@ func _on_register_pressed() -> void:
 		return
 	var u := _user_field.text.strip_edges()
 	var p := _pass_field.text
+	var e := _email_field.text.strip_edges() if _email_field != null else ""
 	if u.is_empty() or p.is_empty():
 		_status("Choose a username and password to register.", RS_RED)
 		return
 	_status("Creating account…", RS_DIM)
 	if _nm != null:
-		_nm.send_register(u, p)
+		_nm.send_register(u, p, e)
 
 func _on_offline_pressed() -> void:
 	if _nm != null:
 		_nm.go_offline()
 	_status("Playing offline.", RS_GREEN)
 	_close()
+
+# Open the password reset screen as a modal CanvasLayer overlay. Whatever
+# the player typed in the username field carries forward as a prefill, so
+# they don't have to re-type it if they just realized they forgot the pass.
+func _on_forgot_pressed() -> void:
+	if not _connected:
+		_status("Server offline — connect first to request a reset.", RS_RED)
+		_attempt_connect()
+		return
+	var screen_script := load("res://scripts/PasswordResetScreen.gd")
+	if screen_script == null:
+		_status("Reset screen unavailable.", RS_RED)
+		return
+	var prefill := _user_field.text.strip_edges()
+	var modal: Node = screen_script.new()
+	modal.set("prefill_username", prefill)
+	add_child(modal)
 
 func _on_pass_input(event: InputEvent) -> void:
 	if event is InputEventKey and (event as InputEventKey).pressed:

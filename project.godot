@@ -23,6 +23,23 @@ ThrallManager="*res://scripts/autoloads/ThrallManager.gd"
 NetworkManager="*res://scripts/autoloads/NetworkManager.gd"
 AudioManager="*res://scripts/autoloads/AudioManager.gd"
 NorseMusic="*res://scripts/autoloads/audio/NorseMusic.gd"
+PlayerMods="*res://scripts/autoloads/PlayerMods.gd"
+TouchInput="*res://scripts/autoloads/TouchInput.gd"
+PetManager="*res://scripts/autoloads/PetManager.gd"
+
+[display]
+
+; Mobile + small-screen support. Stretch mode "canvas_items" scales the
+; UI as the window changes size; "expand" aspect keeps the canvas
+; consistent across phone screens without letterboxing. Min size targets
+; the smallest phone we care to support; the project scales up cleanly.
+window/size/viewport_width=1280
+window/size/viewport_height=720
+window/size/window_width_override=0
+window/size/window_height_override=0
+window/handheld/orientation="sensor_landscape"
+window/stretch/mode="canvas_items"
+window/stretch/aspect="expand"
 
 [layer_names]
 
@@ -38,3 +55,16 @@ NorseMusic="*res://scripts/autoloads/audio/NorseMusic.gd"
 
 textures/canvas_textures/default_texture_filter=0
 rendering_device/driver.windows="d3d12"
+; Mobile devices (Android / iOS) — fall back to the mobile renderer so
+; the GLES driver kicks in. Forward Plus desktop renderer doesn't support
+; GLES devices.
+renderer/rendering_method.mobile="mobile"
+
+[input_devices]
+
+; Pointer emulation lets touch taps trigger MOUSE_BUTTON_LEFT and mouse
+; clicks trigger touch events, so a single input pipeline serves both.
+; The long-press → right-click translation lives in Player._unhandled_input
+; using TouchInput.gd (see scripts/autoloads/TouchInput.gd).
+pointing/emulate_mouse_from_touch=true
+pointing/emulate_touch_from_mouse=false
