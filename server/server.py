@@ -1246,11 +1246,24 @@ def _migrate_v15(conn) -> None:
             "ALTER TABLE tile_overrides ADD COLUMN passable INTEGER NOT NULL DEFAULT 1")
 
 
+def _migrate_v16(conn) -> None:
+    """Interior return-coord persistence. Exit was reading session["x"] as
+    the return target, but that's the LIVE player coord which gets
+    overwritten by interior movement — players teleported to the world
+    corner on exit. Added dedicated columns so relog + exit both use
+    the saved entry position."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(players)")}
+    if "interior_return_x" not in cols:
+        conn.execute("ALTER TABLE players ADD COLUMN interior_return_x REAL DEFAULT 0")
+    if "interior_return_y" not in cols:
+        conn.execute("ALTER TABLE players ADD COLUMN interior_return_y REAL DEFAULT 0")
+
+
 _MIGRATIONS = [
     _migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4,
     _migrate_v5, _migrate_v6, _migrate_v7, _migrate_v8,
     _migrate_v9, _migrate_v10, _migrate_v11, _migrate_v12, _migrate_v13,
-    _migrate_v14, _migrate_v15,
+    _migrate_v14, _migrate_v15, _migrate_v16,
 ]
 
 
@@ -2164,10 +2177,25 @@ async def _handle_login(ws, msg: dict) -> None:
     cur_interior_id = ""
     cur_interior_x  = 0.0
     cur_interior_y  = 0.0
+    # Persisted return coords (v16 columns). If the row predates the migration
+    # or the columns are 0 (never entered interior), fall back to the current
+    # exterior x/y so an exit never lands the player at (0,0).
+    cur_interior_return_x = float(row["x"])
+    cur_interior_return_y = float(row["y"])
     try:
         cur_interior_id = str(row["interior_id"] or "")
         cur_interior_x  = float(row["interior_x"] or 0.0)
         cur_interior_y  = float(row["interior_y"] or 0.0)
+        if "interior_return_x" in row.keys():
+            rx_col = float(row["interior_return_x"] or 0.0)
+            ry_col = float(row["interior_return_y"] or 0.0)
+            # Only trust the persisted return coord if it's non-zero AND
+            # sits inside the exterior playable area (walls block the
+            # interior band at ty >= 300, so ry must be < ~9600 to be a
+            # real exterior return).
+            if rx_col > 0.0 and ry_col > 0.0 and ry_col < 9600.0:
+                cur_interior_return_x = rx_col
+                cur_interior_return_y = ry_col
     except (IndexError, KeyError, TypeError):
         pass
     sessions[ws] = {
@@ -2181,6 +2209,11 @@ async def _handle_login(ws, msg: dict) -> None:
         "interior_id":    cur_interior_id,
         "interior_x":     cur_interior_x,
         "interior_y":     cur_interior_y,
+        # Restore the return coord from the DB so an exit after relog
+        # teleports the player back to their pre-entry exterior position,
+        # not to (0, 0) / world corner.
+        "interior_return_x": cur_interior_return_x,
+        "interior_return_y": cur_interior_return_y,
     }
     with _db() as conn:
         conn.execute("UPDATE players SET last_seen=? WHERE id=?", (time.time(), player_id))
@@ -2212,6 +2245,25 @@ async def _handle_login(ws, msg: dict) -> None:
         # (e.g. legacy accounts), client opens the picker on first login
         # after the column exists.
         "backstory":    str(row["backstory"] or "") if "backstory" in row.keys() else "",
+        # Interior state (Phase 6). If the player was inside a building
+        # when their last session ended, we ship the interior_id + return
+        # coords on login so the client can auto-re-enter — the world
+        # already stored this session state, so the player wakes up
+        # exactly where they were before the crash / relog.
+        "interior_id":  cur_interior_id,
+        # Prefer the dedicated interior_return_* columns (v16). Fall back
+        # to row["x"]/["y"] for legacy rows where those columns are 0 —
+        # in that case row.x/y is still the last exterior position because
+        # the player wasn't inside at their previous session end.
+        "interior_return_x": float(row["interior_return_x"] or row["x"])
+            if "interior_return_x" in row.keys() else float(row["x"]),
+        "interior_return_y": float(row["interior_return_y"] or row["y"])
+            if "interior_return_y" in row.keys() else float(row["y"]),
+        # Per-building interior coord (v-post-16). Client uses this to
+        # respawn the InteriorScene at the SAME plot the player left —
+        # important now that each building instance has its own room.
+        "interior_x":  cur_interior_x,
+        "interior_y":  cur_interior_y,
         # Saved pet type (Pet.gd via PetManager). Empty string = no pet
         # picked yet; client opens the picker or just shows "no pet".
         "pet_type":     str(row["pet_type"] or "") if "pet_type" in row.keys() else "",
@@ -4229,9 +4281,64 @@ async def _handle_shop_close(ws, session: dict, msg: dict) -> None:
 DOOR_INTERACT_RANGE = 64.0   # px — generous so misclicks still register
 
 
+# Interiors live FAR outside the exterior 300×300 tile grid (which ends
+# at 9600 px). The exterior shader clips there, so anywhere past ~y=10000
+# the player is drawn against nothing but the game's clear color — that's
+# what makes it read as a "different scene" instead of a corner of the
+# main map. Each interior gets its own island of coordinates 1000 px
+# apart on the Y axis so their scenes never overlap even if the room
+# sizes grow later.
+_INTERIOR_ROOMS = {
+    "great_hall": (500.0, 12000.0),
+    "tavern":     (500.0, 13000.0),
+    "chapel":     (500.0, 14000.0),
+    "warehouse":  (500.0, 15000.0),
+    "house":      (500.0, 16000.0),
+}
+
+# ── Per-building interior allocation ─────────────────────────────────────────
+# Each unique building instance (different town, different door, different
+# admin-placed structure) gets its OWN plot in the interior band so admin-
+# painted floors + walls persist per-building. The base _INTERIOR_ROOMS above
+# is only used as a fallback / theme reference.
+#
+# Grid layout of the interior band (y >= 12000 px, tx 15..225):
+#   - Each plot: 25 tiles wide × 20 tiles tall (800 × 640 px)
+#   - Origin at (tx=15, ty=375) → world (480, 12000)
+#   - 8 columns × 8 rows = 64 plots (plenty for a small town-heavy world)
+_INTERIOR_PLOT_W_TILES = 25
+_INTERIOR_PLOT_H_TILES = 20
+_INTERIOR_PLOT_COLS    = 8
+_INTERIOR_PLOT_ROWS    = 8
+_INTERIOR_ORIGIN_TX    = 15
+_INTERIOR_ORIGIN_TY    = 375
+
+
+def _interior_coord_for(key: str) -> tuple[float, float]:
+    """Deterministic allocation — same key ALWAYS resolves to the same plot,
+    so painted tiles persist per building without needing a separate
+    assignment table. Slot count is bounded; if two buildings hash to the
+    same slot they share the interior (rare for a village-scale world)."""
+    import hashlib
+    h = int(hashlib.sha1(key.encode()).hexdigest()[:8], 16)
+    total = _INTERIOR_PLOT_COLS * _INTERIOR_PLOT_ROWS
+    idx = h % total
+    col = idx % _INTERIOR_PLOT_COLS
+    row = idx // _INTERIOR_PLOT_COLS
+    tx = _INTERIOR_ORIGIN_TX + col * _INTERIOR_PLOT_W_TILES
+    ty = _INTERIOR_ORIGIN_TY + row * _INTERIOR_PLOT_H_TILES
+    # Center the player inside the plot — 12 tiles right, 10 tiles down.
+    return (float((tx + 12) * 32), float((ty + 10) * 32))
+
+
 async def _handle_enter_interior(ws, session: dict, msg: dict) -> None:
     door_id = str(msg.get("door_id", "")).strip()
-    if not door_id:
+    # Client-side hint for hardcoded town buildings that live only as
+    # Interactable nodes with `t:N` ids (never in world_entities). If the
+    # SQL lookup below whiffs, we fall back to this hint. Admin-placed
+    # buildings + doors leave the hint empty and use the DB path.
+    interior_id_hint = str(msg.get("interior_id_hint", "")).strip().lower()
+    if not door_id and not interior_id_hint:
         await _send(ws, {"type": "interior_error",
                          "reason": "Missing door id."})
         return
@@ -4241,57 +4348,130 @@ async def _handle_enter_interior(ws, session: dict, msg: dict) -> None:
         await _send(ws, {"type": "interior_error",
                          "reason": "You're already inside."})
         return
-    with _db() as conn:
-        row = conn.execute(
-            "SELECT kind, subtype, x, y, data FROM world_entities WHERE id=?",
-            (door_id,)).fetchone()
-    if not row:
+    row = None
+    if door_id:
+        with _db() as conn:
+            row = conn.execute(
+                "SELECT kind, subtype, x, y, data FROM world_entities WHERE id=?",
+                (door_id,)).fetchone()
+    if not row and not interior_id_hint:
         await _send(ws, {"type": "interior_error",
                          "reason": "Door not found."})
         return
-    if str(row["subtype"]) != "door":
+    # ── Hardcoded-building fast path ──
+    # No world_entities row but the client gave us a hint. Skip the
+    # subtype + proximity checks (the client's own action-menu range
+    # gate handled misclicks); accept the hint as the interior_id.
+    if not row:
+        valid_hints = {"great_hall", "tavern", "warehouse", "chapel", "house"}
+        if interior_id_hint not in valid_hints:
+            await _send(ws, {"type": "interior_error",
+                             "reason": "Unknown interior."})
+            return
+        rx = float(session.get("x", 0.0))
+        ry = float(session.get("y", 0.0))
+        # Per-building interior — key by (theme, rounded exterior position)
+        # so each building instance in each town gets its own plot. Two
+        # different taverns (Kjelvik vs Frostheim) hash to different rooms
+        # and admin paint stays local to each.
+        key = f"{interior_id_hint}:{round(rx / 32.0)}:{round(ry / 32.0)}"
+        tx, ty = _interior_coord_for(key)
+        session["interior_id"] = interior_id_hint
+        session["interior_x"]  = tx
+        session["interior_y"]  = ty
+        # Save the EXTERIOR return position — session["x"]/["y"] will be
+        # overwritten by interior-side movement updates so we can't rely
+        # on them at exit time. Server-truth for where to teleport back.
+        session["interior_return_x"] = rx
+        session["interior_return_y"] = ry
+        with _db() as conn:
+            conn.execute(
+                "UPDATE players SET interior_id=?, interior_x=?, interior_y=?, "
+                "interior_return_x=?, interior_return_y=? WHERE id=?",
+                (interior_id_hint, tx, ty, rx, ry, session["id"]))
+            conn.commit()
+        await _send(ws, {
+            "type":        "interior_entered",
+            "interior_id": interior_id_hint,
+            "x":           tx,
+            "y":           ty,
+            "return_x":    rx,
+            "return_y":    ry,
+        })
+        print(f"[interior] {session['username']} entered {interior_id_hint} "
+              f"at ({tx}, {ty}) via hardcoded building")
+        return
+    # Accept both explicit doors AND buildings — the user clicks the
+    # building sprite directly, so requiring a separately-placed door
+    # entity was too fussy for admin content creation.
+    subtype = str(row["subtype"])
+    if subtype != "door" and subtype != "building":
         await _send(ws, {"type": "interior_error",
-                         "reason": "Not a door."})
+                         "reason": "Not enterable."})
         return
     # Proximity check — anti-cheat plus prevents misclicks on far-away doors.
+    # Buildings get a wider range since they're larger and the clickable
+    # sprite is generous; DOOR_INTERACT_RANGE was tuned to a 28×38 door
+    # sprite, but the new 100×90 buildings need more slack.
     dx = float(session.get("x", 0.0)) - float(row["x"])
     dy = float(session.get("y", 0.0)) - float(row["y"])
-    if dx * dx + dy * dy > DOOR_INTERACT_RANGE * DOOR_INTERACT_RANGE:
+    reach = DOOR_INTERACT_RANGE * (2.0 if subtype == "building" else 1.0)
+    if dx * dx + dy * dy > reach * reach:
         await _send(ws, {"type": "interior_error",
-                         "reason": "You're too far from the door."})
+                         "reason": "You're too far from the entrance."})
         return
     try:
         data = json.loads(row["data"] or "{}")
     except Exception:
         data = {}
     interior_id = str(data.get("interior_id", ""))
+    # For buildings without an explicit data.interior_id, derive one from
+    # the entity's display_name so admin placements Just Work. Great Hall
+    # → great_hall, Tavern → tavern, Warehouse → warehouse, Chapel →
+    # chapel, House → house (fallback default in InteriorScene handles
+    # unknowns cleanly).
+    if not interior_id and subtype == "building":
+        display_name = str(data.get("display_name", "")).strip().lower()
+        _BUILDING_TO_INTERIOR = {
+            "great hall": "great_hall",
+            "tavern":     "tavern",
+            "warehouse":  "warehouse",
+            "chapel":     "chapel",
+            "house":      "house",
+        }
+        interior_id = _BUILDING_TO_INTERIOR.get(display_name, "house")
     if not interior_id:
         await _send(ws, {"type": "interior_error",
                          "reason": "This door leads nowhere."})
         return
-    # Snapshot exterior pos as the return point (already in session.x/y).
-    # Interior spawn coords come from InteriorCatalog in Phase 8; for now use
-    # (0, 0) as a placeholder — Phase 7's scene swap doesn't care.
+    rx = float(session.get("x", 0.0))
+    ry = float(session.get("y", 0.0))
+    # Per-building allocation — use the DB entity id if we have one so a
+    # persisted door/building keeps the same interior across restarts.
+    key = f"{interior_id}:{door_id}" if door_id else \
+          f"{interior_id}:{round(rx / 32.0)}:{round(ry / 32.0)}"
+    tx, ty = _interior_coord_for(key)
     session["interior_id"] = interior_id
-    session["interior_x"]  = 0.0
-    session["interior_y"]  = 0.0
-    # Persist immediately so a crash/relog lands the player back inside.
+    session["interior_x"]  = tx
+    session["interior_y"]  = ty
+    session["interior_return_x"] = rx
+    session["interior_return_y"] = ry
     with _db() as conn:
         conn.execute(
-            "UPDATE players SET interior_id=?, interior_x=?, interior_y=? "
-            "WHERE id=?",
-            (interior_id, 0.0, 0.0, session["id"]))
+            "UPDATE players SET interior_id=?, interior_x=?, interior_y=?, "
+            "interior_return_x=?, interior_return_y=? WHERE id=?",
+            (interior_id, tx, ty, rx, ry, session["id"]))
         conn.commit()
     await _send(ws, {
         "type":        "interior_entered",
         "interior_id": interior_id,
-        "x":           0.0,
-        "y":           0.0,
-        "return_x":    float(session.get("x", 0.0)),
-        "return_y":    float(session.get("y", 0.0)),
+        "x":           tx,
+        "y":           ty,
+        "return_x":    rx,
+        "return_y":    ry,
     })
     print(f"[interior] {session['username']} entered {interior_id} "
-          f"via door {door_id}")
+          f"at ({tx}, {ty}) via door {door_id}")
 
 
 async def _handle_exit_interior(ws, session: dict, msg: dict) -> None:
@@ -4300,16 +4480,27 @@ async def _handle_exit_interior(ws, session: dict, msg: dict) -> None:
                          "reason": "You're not inside an interior."})
         return
     interior_id = session["interior_id"]
-    return_x = float(session.get("x", 0.0))
-    return_y = float(session.get("y", 0.0))
+    # Server-truth return coord saved on entry. session["x"]/["y"] are
+    # the LIVE player position — during interior play those got updated
+    # to y=12000+ interior coords, so using them here dumped players
+    # near the world corner. Use the saved entry position instead.
+    return_x = float(session.get("interior_return_x", 0.0))
+    return_y = float(session.get("interior_return_y", 0.0))
     session["interior_id"] = ""
     session["interior_x"]  = 0.0
     session["interior_y"]  = 0.0
+    session["interior_return_x"] = 0.0
+    session["interior_return_y"] = 0.0
+    # Snap the server's authoritative player position back to the return
+    # coord immediately so any nearby-broadcast queries during the same
+    # tick see the exterior position, not a stale interior one.
+    session["x"] = return_x
+    session["y"] = return_y
     with _db() as conn:
         conn.execute(
-            "UPDATE players SET interior_id='', interior_x=0, interior_y=0 "
-            "WHERE id=?",
-            (session["id"],))
+            "UPDATE players SET interior_id='', interior_x=0, interior_y=0, "
+            "interior_return_x=0, interior_return_y=0, x=?, y=? WHERE id=?",
+            (return_x, return_y, session["id"]))
         conn.commit()
     await _send(ws, {
         "type": "interior_exited",
@@ -4616,6 +4807,60 @@ async def _handle_admin_spawn(ws, session: dict, msg: dict) -> None:
 
 
 FARM_PLOT_CONSTRUCTION_LEVEL = 10
+
+
+async def _handle_build_wall(ws, session: dict, msg: dict) -> None:
+    """Player-crafted wall placement (Phase 3 of Construction integration).
+    Client has already deducted materials + granted XP; server does level
+    gating + placement. Two subtypes: `wall` (level 1, any wood tier) and
+    `fortified_wall` (level 70, iron/mithril/runite reinforcement). Persists
+    as a resource-kind world entity so it loads via the standard admin
+    entity path on relog and broadcasts to nearby clients."""
+    subtype = str(msg.get("subtype", "")).strip()
+    if subtype not in ("wall", "fortified_wall"):
+        await _send(ws, {"type": "chat", "username": "System",
+                         "text": "Unknown wall type."})
+        return
+    min_lv = 70 if subtype == "fortified_wall" else 1
+    with _db() as conn:
+        row = conn.execute("SELECT skill_xp FROM players WHERE id=?",
+                           (session["id"],)).fetchone()
+    skill_xp = json.loads(row["skill_xp"] or "{}") if row else {}
+    if _calc_level(int(skill_xp.get("construction", 0))) < min_lv:
+        await _send(ws, {"type": "chat", "username": "System",
+                         "text": f"Requires Construction level {min_lv}."})
+        return
+    x = float(msg.get("x", session.get("x", 0.0)))
+    y = float(msg.get("y", session.get("y", 0.0)))
+    wood = str(msg.get("wood", "oak"))
+    display_name = str(msg.get("display_name", "Wall")).strip() or "Wall"
+    color_arr = msg.get("color", [0.55, 0.36, 0.18, 1.0])
+    if not isinstance(color_arr, list) or len(color_arr) < 4:
+        color_arr = [0.55, 0.36, 0.18, 1.0]
+    eid = "a:" + secrets.token_hex(8)
+    data = {
+        "type_str":     subtype,
+        "display_name": display_name,
+        "skill":        "construction",
+        "level":        min_lv,
+        "action":       "Inspect",
+        "color":        color_arr,
+        "wood":         wood,
+        "owner":        session["username"],
+    }
+    with _db() as conn:
+        conn.execute(
+            "INSERT INTO world_entities (id, kind, subtype, x, y, data) "
+            "VALUES (?,?,?,?,?,?)",
+            (eid, "resource", subtype, x, y, json.dumps(data)))
+        conn.commit()
+    entity = {"id": eid, "kind": "resource", "subtype": subtype,
+              "x": x, "y": y, "data": data}
+    _broadcast({"type": "world_entity_add", "entity": entity})
+    await _send(ws, {"type": "chat", "username": "System",
+                     "text": f"You raise a {display_name}."})
+    print(f"[wall] {session['username']} built {subtype} ({wood}) "
+          f"at ({x:.0f},{y:.0f})")
 
 
 async def _handle_build_farm_plot(ws, session: dict, msg: dict) -> None:
@@ -7545,6 +7790,8 @@ async def _route_message(ws, session, mtype: str, msg: dict) -> None:
         await _handle_admin_save_map(ws, session, msg)
     elif mtype == "build_farm_plot":
         await _handle_build_farm_plot(ws, session, msg)
+    elif mtype == "build_wall":
+        await _handle_build_wall(ws, session, msg)
     elif mtype == "build_warband_structure":
         await _handle_build_warband_structure(ws, session, msg)
     elif mtype == "banner_raid":

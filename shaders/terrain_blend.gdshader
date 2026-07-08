@@ -55,7 +55,7 @@ vec4 sample_biome(int b, vec2 local_px) {
 	return texture(atlas, atlas_uv);
 }
 
-bool is_water(int b) { return b == 8 || b == 9; }    // coast, ocean
+bool is_water(int b) { return b == 8 || b == 9 || b == 24; }  // coast, ocean, shallow_water
 bool is_path (int b) { return b == 13 || b == 14; }  // town, road
 // Grass-family biomes that get the per-blade detail pass (yellowing, dirt
 // patches, pebbles). PLAINS/PLAINS2/forests/swamp — anything where the

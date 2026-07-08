@@ -260,6 +260,42 @@ func _wire_signals() -> void:
 	# trade_request_received fires when someone proposes a trade — that
 	# moment is also peaceful (trade UI opens).
 	Events.trade_request_received.connect(_on_peaceful_event_str)
+	# Feel-good audio cues — pair with HUD visual feedback so each
+	# moment has both a sound + a visual punch.
+	Events.monster_attack_landed.connect(_duck_music_on_damage)
+	Events.level_up.connect(_pulse_master_on_level_up)
+
+
+## Briefly dip the Music bus by 6 dB when the player gets hit. The pause
+## lets the SFX layer (damage thud, monster grunt) read clearly without
+## fighting the looping drone for attention. Snaps back over 0.4s so the
+## music doesn't feel chopped — just "the room held its breath."
+func _duck_music_on_damage() -> void:
+	var bus_idx: int = AudioServer.get_bus_index("Music")
+	if bus_idx == -1:
+		return
+	var original_db: float = AudioServer.get_bus_volume_db(bus_idx)
+	AudioServer.set_bus_volume_db(bus_idx, original_db - 6.0)
+	# Restore on a one-shot timer so a rapid-fire string of hits doesn't
+	# stack the duck (the second hit overwrites the first with the same
+	# original_db captured at its moment, then both restore correctly).
+	get_tree().create_timer(0.40).timeout.connect(func() -> void:
+		AudioServer.set_bus_volume_db(bus_idx, original_db))
+
+
+## +2 dB pulse on the Master bus for 0.3s when the player levels up.
+## Pairs with the existing ascending chime from AudioManager.play_ui
+## "level_up" — together they make the moment feel celebratory rather
+## than just "the number went up."
+func _pulse_master_on_level_up(_skill: String, _new_level: int) -> void:
+	var bus_idx: int = AudioServer.get_bus_index("Master")
+	if bus_idx == -1:
+		return
+	var original_db: float = AudioServer.get_bus_volume_db(bus_idx)
+	AudioServer.set_bus_volume_db(bus_idx, original_db + 2.0)
+	get_tree().create_timer(0.30).timeout.connect(func() -> void:
+		AudioServer.set_bus_volume_db(bus_idx, original_db))
+
 
 func _on_combat_start(_monster: Node) -> void:
 	_in_combat = true

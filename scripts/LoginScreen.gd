@@ -17,6 +17,11 @@ const RS_GREEN  := Color(0.35, 0.88, 0.40)
 
 const VERSION        := "v0.1.0"
 const DEFAULT_SERVER := "147.185.221.211:21498"
+# Last-used server address persists across launches so mobile players (and
+# anyone running their own server) don't have to re-type the address every
+# time. ConfigFile at `user://server_address.cfg` — Godot maps user:// to
+# the per-OS app data dir, works identically on Windows and Android.
+const SERVER_ADDRESS_CFG := "user://server_address.cfg"
 
 var _status_lbl: Label    = null
 var _user_field: LineEdit = null
@@ -164,7 +169,7 @@ func _build_ui() -> void:
 	_status_dot.add_theme_stylebox_override("panel", _dot_style(RS_RED))
 	conn_row.add_child(_status_dot)
 	_addr_lbl = Label.new()
-	_addr_lbl.text = DEFAULT_SERVER
+	_addr_lbl.text = _load_saved_server_address()
 	_addr_lbl.add_theme_color_override("font_color", RS_DIM)
 	_addr_lbl.add_theme_font_size_override("font_size", 10)
 	conn_row.add_child(_addr_lbl)
@@ -181,7 +186,7 @@ func _build_ui() -> void:
 	_server_row.visible = false
 	vbox.add_child(_server_row)
 	_url_field = LineEdit.new()
-	_url_field.text = DEFAULT_SERVER
+	_url_field.text = _load_saved_server_address()
 	_url_field.placeholder_text = "host:port"
 	_url_field.add_theme_stylebox_override("normal", _rs(RS_BTN_N, RS_BORDER, 1))
 	_url_field.add_theme_color_override("font_color", RS_TEXT)
@@ -307,6 +312,35 @@ func _attempt_connect() -> void:
 	if _nm != null:
 		_nm.connect_to_server(_server_url())
 
+# ── Server address persistence ─────────────────────────────────────────────
+## Loads the last successfully-used server address from
+## `user://server_address.cfg`. Falls back to DEFAULT_SERVER on first
+## launch (or if the file is corrupt). Mobile players especially benefit —
+## they don't want to re-type a playit.gg subdomain every time the app
+## starts.
+func _load_saved_server_address() -> String:
+	var cfg := ConfigFile.new()
+	if cfg.load(SERVER_ADDRESS_CFG) != OK:
+		return DEFAULT_SERVER
+	var addr := str(cfg.get_value("server", "address", DEFAULT_SERVER)).strip_edges()
+	if addr.is_empty():
+		return DEFAULT_SERVER
+	return addr
+
+## Persist the currently-typed address. Called from _on_server_connected
+## so we only save addresses that actually work (no risk of "saved" a
+## typo and locking the user out on next launch).
+func _save_server_address() -> void:
+	if _url_field == null:
+		return
+	var addr := _url_field.text.strip_edges()
+	if addr.is_empty() or addr == DEFAULT_SERVER:
+		return
+	var cfg := ConfigFile.new()
+	cfg.set_value("server", "address", addr)
+	# Save errors are non-fatal — at worst the user retypes next launch.
+	var _e := cfg.save(SERVER_ADDRESS_CFG)
+
 func _reconnect() -> void:
 	_server_row.visible = false
 	if _nm != null:
@@ -381,6 +415,9 @@ func _on_pass_input(event: InputEvent) -> void:
 func _on_server_connected() -> void:
 	_set_connected(true)
 	_status("Connected — log in or create an account.", RS_GREEN)
+	# Persist the working address — by the time we're here we know it
+	# actually connects, so saving a typo is impossible.
+	_save_server_address()
 	if _user_field != null:
 		_user_field.grab_focus()
 

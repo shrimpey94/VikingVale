@@ -57,3 +57,10 @@ Desktop.ini
 .env
 .env.*
 credentials.json
+
+# ── Android signing keystores (NEVER commit; losing or leaking them is a
+# permanent disaster — release keystores can't be regenerated, and a leaked
+# one lets anyone push fake updates to your players).
+*.keystore
+*.jks
+build/*.keystore

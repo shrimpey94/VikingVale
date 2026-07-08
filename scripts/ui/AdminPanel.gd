@@ -18,7 +18,13 @@ const TILE := 32.0
 const PAINT_BIOMES: Array = [
 	"plains", "oak_forest", "pine_forest", "dark_forest", "swamp",
 	"mountain", "cliff", "rocky", "coast", "ocean",
-	"snow", "helheim", "ashlands", "town", "road", "(erase)",
+	"snow", "helheim", "ashlands", "town", "road",
+	# Interior floors + walls (walls auto-impassable via Ground._is_impassable_bid).
+	"wood_floor", "stone_floor", "red_carpet", "hearth_stone",
+	"wall_wood", "wall_stone",
+	# Exterior additions.
+	"sand", "dirt_path", "shallow_water", "farm_crops",
+	"(erase)",
 ]
 
 enum Mode { OFF, PLACE, DELETE, MOVE, TILE, FLOOD, TINT, PASSABILITY }
@@ -560,13 +566,14 @@ func _account_action_btn(text: String) -> Button:
 	var b := Button.new()
 	b.text = text
 	b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	b.custom_minimum_size = Vector2(0, 22)
+	# Touch-target — was 22 px tall. 32 px is comfortable for a thumb.
+	b.custom_minimum_size = Vector2(0, 32)
 	b.add_theme_stylebox_override("normal",
 		UITheme.sb(UITheme.BTN_N, UITheme.BORDER, 1))
 	b.add_theme_stylebox_override("hover",
 		UITheme.sb(UITheme.BTN_H, UITheme.GOLD, 1))
 	b.add_theme_color_override("font_color", UITheme.TEXT)
-	b.add_theme_font_size_override("font_size", 9)
+	b.add_theme_font_size_override("font_size", 11)
 	return b
 
 func _section_label(text: String) -> Label:

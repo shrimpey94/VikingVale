@@ -70,11 +70,13 @@ func _ready() -> void:
 	_setup_collision()
 	_last_pos = global_position   # avoid 1-frame "moving" pose on spawn
 	mouse_entered.connect(func() -> void:
+		# Corpses shouldn't react to hover at all — they're not
+		# interactive. Skip the is_hovered flag (which would otherwise
+		# brighten the name label via _draw_name_label) AND the modulate.
+		if not is_alive:
+			return
 		is_hovered = true
-		# 20% brightness boost while hovered. Only when alive; a corpse
-		# shouldn't pulse like it's clickable.
-		if is_alive:
-			self_modulate = Color(1.20, 1.20, 1.20)
+		self_modulate = Color(1.20, 1.20, 1.20)
 		queue_redraw())
 	mouse_exited.connect(func() -> void:
 		is_hovered = false
@@ -306,13 +308,20 @@ func _spawn_loot(drop: Dictionary) -> void:
 	var ld := Area2D.new()
 	ld.set_script(LootDropScript)
 	var offset := Vector2(randf_range(-14.0, 14.0), randf_range(-14.0, 14.0))
-	ld.global_position = global_position + offset
+	var landing := global_position + offset
+	# Spawn 18 px above the landing point and tween down with a TRANS_BOUNCE
+	# curve. Items popping in flat reads as generic; the bounce makes the
+	# drop feel like loot actually fell out of the corpse.
+	ld.global_position = landing + Vector2(0.0, -18.0)
 	get_parent().add_child(ld)
 	(ld as Area2D).call("setup",
 		drop["id"] as String,
 		drop["name"] as String,
 		drop["qty"] as int,
 		drop["color"] as Color)
+	var tw := ld.create_tween()
+	tw.tween_property(ld, "global_position", landing, 0.40) \
+		.set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_BOUNCE)
 
 func _respawn() -> void:
 	current_hp      = max_hp

@@ -464,10 +464,16 @@ func send_gold_pile_pickup(pile_id: String) -> void:
 # Server validates and replies with interior_entered / interior_exited; Phase 7
 # wires the InteriorCache + scene swap that responds to those signals.
 
-func send_enter_interior(door_id: String) -> void:
+func send_enter_interior(door_id: String, interior_id_hint: String = "") -> void:
 	if state != NetState.LOGGED_IN:
 		return
-	_send({"type": "enter_interior", "door_id": door_id})
+	# `interior_id_hint` covers hardcoded town buildings that live only
+	# as client-side Interactable nodes with `t:N` ids (never inserted
+	# into world_entities). Server tries the entity lookup first; if
+	# that fails, it uses the hint as-is. Admin-placed buildings (in
+	# world_entities) can leave the hint empty.
+	_send({"type": "enter_interior",
+		"door_id": door_id, "interior_id_hint": interior_id_hint})
 
 func send_exit_interior() -> void:
 	if state != NetState.LOGGED_IN:
@@ -519,6 +525,19 @@ func send_admin_save_map() -> void:
 func send_build_farm_plot(x: float, y: float) -> void:
 	if state == NetState.LOGGED_IN:
 		_send({"type": "build_farm_plot", "x": x, "y": y})
+
+## Player-crafted wall placement. `subtype` is "wall" or "fortified_wall";
+## `wood` is the oak/pine/... key for the wood tier (or the bar key for
+## fortified). Server gates on Construction level via the recipe map and
+## consumes materials before inserting the world_entity.
+func send_build_wall(subtype: String, wood: String, x: float, y: float,
+		display_name: String, tier_color: Array) -> void:
+	if state == NetState.LOGGED_IN:
+		_send({"type": "build_wall",
+			"subtype": subtype, "wood": wood,
+			"x": x, "y": y,
+			"display_name": display_name,
+			"color": tier_color})
 
 ## Warband-gated build for stronghold / banner / outpost. Server enforces
 ## per-warband caps + stronghold spacing + banner non-overlap rules and

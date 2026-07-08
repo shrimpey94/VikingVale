@@ -2,7 +2,11 @@ extends Node2D
 
 const TILE := 32
 const COLS := 300
-const ROWS := 300
+# ROWS covers exterior + interior band; exterior clamps + border walls use
+# EXTERIOR_ROWS so players can't wander south past the exterior into the
+# reserved interior tiles. Interior mode un-clamps the camera explicitly.
+const EXTERIOR_ROWS := 300
+const ROWS := 520
 
 # Chunk streaming
 const CHUNK_SIZE    := 16    # tiles per chunk side
@@ -245,10 +249,146 @@ func _ready() -> void:
 	# my_username is still empty here). Handles re-login too via the signal.
 	NetworkManager.login_ok.connect(_on_login_spawn_admin)
 	NetworkManager.login_ok.connect(_on_login_check_backstory)
+	NetworkManager.login_ok.connect(_on_login_check_interior)
 	NetworkManager.admin_rank_changed.connect(_on_admin_rank_changed)
+	# Interior scene swap — doors send enter_interior; server replies with
+	# interior_entered (with the target interior_id + return coords). We
+	# swap the exterior for an InteriorScene instance; walking on the door
+	# mat (or right-click Exit) sends exit_interior and we swap back.
+	Events.interior_entered.connect(_on_interior_entered)
+	Events.interior_exited.connect(_on_interior_exited)
+	Events.interior_error.connect(_on_interior_error)
 	_spawn_admin_panel_if_admin()
 	# Deferred so Ground._ready() and Player._ready() finish first
 	Events.player_respawned.emit.call_deferred(GameManager.RESPAWN_POS)
+
+# ── Interior scene swap ────────────────────────────────────────────────────
+## Interiors live at large Y offsets (12000+) well outside the exterior
+## 300×300 tile grid. Entering spawns an InteriorScene node ANCHORED at
+## the server-provided coord — its walls, floor, decorations, and exit
+## door all draw around that anchor. The player teleports into the room
+## and the camera follows; the exterior shader clips at y=9600 so nothing
+## exterior is visible from inside. Exit door on the south wall (walk
+## through OR click) fires exit_interior which teleports the player back.
+##
+## Saved return coords so a relog inside still knows the exit position.
+var _interior_scene: Node2D = null
+var _interior_return_pos: Vector2 = Vector2.ZERO
+
+func _on_interior_entered(interior_id: String, x: float, y: float,
+		return_x: float, return_y: float) -> void:
+	# Double-fire (shouldn't happen — server rejects nested entries).
+	if _interior_scene != null and is_instance_valid(_interior_scene):
+		_interior_scene.queue_free()
+	_interior_return_pos = Vector2(return_x, return_y)
+	var script := load("res://scripts/InteriorScene.gd")
+	if script == null:
+		return
+	_interior_scene = script.new() as Node2D
+	_interior_scene.name = "InteriorScene"
+	# Anchor the interior AT the teleport coord so walls/door surround
+	# the player. All of InteriorScene's drawing is in its local space
+	# centered on Vector2.ZERO — global_position offsets the whole room.
+	_interior_scene.global_position = Vector2(x, y)
+	add_child(_interior_scene)
+	# Move to the first child slot so this node renders BEFORE Player (and
+	# anything else already in the World tree). Ensures the player sprite
+	# sits on top of the floor even if a decoration ends up at equal z.
+	move_child(_interior_scene, 0)
+	_interior_scene.call("setup", interior_id)
+	# Fetch the exterior biome at the return coord — used by InteriorScene to
+	# color a small border around the walls in the biome the player just left,
+	# so the interior reads as "you're inside a building AT this location"
+	# rather than a disconnected black void.
+	var ext_biome := "plains"
+	var ground := get_node_or_null("Ground")
+	if ground != null:
+		var v: Variant = ground.call("biome_at_world", Vector2(return_x, return_y))
+		if typeof(v) == TYPE_STRING:
+			ext_biome = v
+	_interior_scene.set("exterior_biome", ext_biome)
+	_interior_scene.call("apply_exterior_backdrop")
+	var player := get_tree().get_first_node_in_group("player") as Node2D
+	if player != null:
+		# Spawn at room center — safely north of the south door mat so
+		# the walk-through Area2D doesn't retrigger the exit on entry.
+		player.global_position = Vector2(x, y)
+		# Bump player z above InteriorScene so the sprite draws over the
+		# floor + walls. Reset to 0 on exit.
+		player.z_index = 100
+		# Un-clamp the camera from the exterior 300×300 grid so it can
+		# follow the player into the far-Y interior island.
+		var cam := player.get_node_or_null("Camera2D") as Camera2D
+		if cam != null:
+			cam.limit_left   = -10000000
+			cam.limit_top    = -10000000
+			cam.limit_right  =  10000000
+			cam.limit_bottom =  10000000
+	Events.chat_message.emit(
+		"[Interior] Entered %s. Walk through or click the EXIT door to leave."
+		% interior_id)
+
+func _on_interior_exited(return_x: float, return_y: float) -> void:
+	if _interior_scene != null and is_instance_valid(_interior_scene):
+		_interior_scene.queue_free()
+		_interior_scene = null
+	var player := get_tree().get_first_node_in_group("player") as Node2D
+	if player != null:
+		player.global_position = Vector2(return_x, return_y)
+		# Reset the z_index bump applied on entry.
+		player.z_index = 0
+		# Restore the exterior grid clamp on the camera.
+		var cam := player.get_node_or_null("Camera2D") as Camera2D
+		if cam != null:
+			cam.limit_left   = 0
+			cam.limit_top    = 0
+			cam.limit_right  = COLS * TILE
+			cam.limit_bottom = EXTERIOR_ROWS * TILE
+	Events.chat_message.emit("[Interior] You step back outside.")
+
+func _on_interior_error(reason: String) -> void:
+	Events.chat_message.emit("[Interior] %s" % reason)
+
+## Client-side lookup of each interior's teleport center — MUST match the
+## server's `_INTERIOR_ROOMS` in server.py. Used for relog restoration
+## where the server ships back `interior_id` but not the coord; we fall
+## back to this table so the InteriorScene spawns in the same place it
+## did during the original entry. On fresh entries the server sends the
+## coord directly and this table isn't touched.
+const _INTERIOR_ROOM_CENTERS: Dictionary = {
+	"great_hall": Vector2(500.0, 12000.0),
+	"tavern":     Vector2(500.0, 13000.0),
+	"chapel":     Vector2(500.0, 14000.0),
+	"warehouse":  Vector2(500.0, 15000.0),
+	"house":      Vector2(500.0, 16000.0),
+}
+
+## Auto-restore an interior on relog. If the player last logged out
+## while inside a building, the server still has interior_id set and
+## ships it in the login_ok payload. Re-spawn the InteriorScene locally
+## so the player wakes up in the same room they left — otherwise they'd
+## spawn at their persisted exterior coords which no longer match server
+## state and the server would reject their next enter_interior attempt
+## with "You're already inside."
+func _on_login_check_interior(player_data: Dictionary) -> void:
+	var iid: String = str(player_data.get("interior_id", ""))
+	if iid == "":
+		return
+	# Defer one frame so Player._ready has finished + is in-scene before
+	# the interior teleport tries to move it.
+	var rx: float = float(player_data.get("interior_return_x", 0.0))
+	var ry: float = float(player_data.get("interior_return_y", 0.0))
+	# Prefer the per-building interior coord shipped in login_ok (server
+	# now allocates a unique plot per door/building instance). Fall back
+	# to the shared theme table for legacy sessions that predate the
+	# per-building allocation.
+	var ix: float = float(player_data.get("interior_x", 0.0))
+	var iy: float = float(player_data.get("interior_y", 0.0))
+	if ix == 0.0 and iy == 0.0:
+		var center: Vector2 = _INTERIOR_ROOM_CENTERS.get(iid, Vector2.ZERO)
+		ix = center.x
+		iy = center.y
+	call_deferred("_on_interior_entered", iid, ix, iy, rx, ry)
 
 ## Pops the backstory picker the first time a character logs in without a
 ## chosen backstory. Reads from `player_data` directly so this works
@@ -826,8 +966,13 @@ func _update_chunks(player_pos: Vector2) -> void:
 func _load_chunk(cx: int, cy: int) -> void:
 	var key    := Vector2i(cx, cy)
 	var nodes: Array = []
-	_spawn_chunk_resources(cx, cy, nodes)
-	_spawn_chunk_monsters(cx, cy, nodes)
+	# Interior band chunks: no procedural trees or monsters. Interior floors
+	# are hand-painted tile canvases; procedural spawn would litter them
+	# with wolves and oaks. Chunk-py boundary: EXTERIOR_ROWS * TILE.
+	var is_interior_chunk := cy * CHUNK_PX >= EXTERIOR_ROWS * TILE
+	if not is_interior_chunk:
+		_spawn_chunk_resources(cx, cy, nodes)
+		_spawn_chunk_monsters(cx, cy, nodes)
 	_active_chunks[key] = nodes
 	# Ask the server for the current shared state of this chunk's entities.
 	var node_ids: Array = []
@@ -1222,7 +1367,11 @@ func _monster_type(biome: String, pos: Vector2, rng: RandomNumberGenerator) -> S
 
 func _create_border_walls() -> void:
 	var w := float(COLS * TILE)
-	var h := float(ROWS * TILE)
+	# Keep the physical world border at the EXTERIOR bounds — otherwise the
+	# south wall would sit past the interior band and players could stroll
+	# straight into it from the overworld. Interior rooms have their own
+	# walls (built by InteriorScene) that constrain the player once inside.
+	var h := float(EXTERIOR_ROWS * TILE)
 	var t := 64.0
 	var borders: Array[Array] = [
 		[Vector2(w * 0.5, -t * 0.5),      Vector2(w + t * 2.0, t)],
@@ -1252,4 +1401,4 @@ func _setup_camera_limits() -> void:
 	cam.limit_left   = 0
 	cam.limit_top    = 0
 	cam.limit_right  = COLS * TILE
-	cam.limit_bottom = ROWS * TILE
+	cam.limit_bottom = EXTERIOR_ROWS * TILE

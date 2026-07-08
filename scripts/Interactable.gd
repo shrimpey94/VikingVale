@@ -122,6 +122,11 @@ func _set_stats() -> void:
 			# Door — instant-click interactive, never depletes. Click sends
 			# enter_interior to the server (Phase 6); Phase 7 swaps scenes.
 			_max_hp = 9999; _swing_interval = 1.0; _success_at_req = 1.0; _success_at_99 = 1.0; _regen_delay = 0.0
+		"wall", "fortified_wall":
+			# Player-built + admin-placed walls. Physically block movement
+			# via an added StaticBody2D (see _setup_collision). Right-click
+			# option is "Inspect" only in v1; not depletable.
+			_max_hp = 9999; _swing_interval = 1.0; _success_at_req = 1.0; _success_at_99 = 1.0; _regen_delay = 0.0
 		_:
 			_max_hp = 1; _swing_interval = 5.0; _success_at_req = 0.80; _success_at_99 = 0.95; _regen_delay = 45.0
 	_hp = _max_hp
@@ -145,12 +150,41 @@ func _setup_collision() -> void:
 		"rock":     rect.size = Vector2(32, 26)
 		"essence":  rect.size = Vector2(30, 30)
 		"fish":     rect.size = Vector2(42, 22)
-		"building": rect.size = Vector2(44, 40)
+		# Buildings must dwarf the ~26 px player + 32 px trees. Sizes below
+		# were previously tuned to the tiny sprite proportions; bumping to
+		# 2.2× so a house is clearly bigger than a person, and the Great
+		# Hall reads as monumental. Values match the drawn silhouette in
+		# _draw_building (both scale together).
+		"building": rect.size = Vector2(100, 90)
 		"stick":    rect.size = Vector2(18, 10)
 		"stone":    rect.size = Vector2(16, 12)
 		"door":     rect.size = Vector2(28, 38)
+		# Interior exit door — big + tall so it's an easy tap-target when
+		# the player wants OUT of a room they can't otherwise leave.
+		"exit_door": rect.size = Vector2(48, 64)
+		"wall":            rect.size = Vector2(48, 20)
+		"fortified_wall":  rect.size = Vector2(48, 24)
 		_:          rect.size = Vector2(32, 32)
 	cs.shape = rect
+	# Walls physically block the player. The base Area2D above handles clicks
+	# (right-click inspect); the StaticBody2D below handles movement collision.
+	if interactable_type_str == "wall" or interactable_type_str == "fortified_wall":
+		_add_wall_static_body(rect.size)
+
+## Add a StaticBody2D child that blocks player movement. Layer 2 = world
+## collision, same layer the impassable-tile collision body uses in Ground.gd,
+## so the player's KinematicBody-driven movement already tests against it.
+func _add_wall_static_body(size: Vector2) -> void:
+	var body := StaticBody2D.new()
+	body.name = "WallBody"
+	body.collision_layer = 2
+	body.collision_mask  = 0
+	add_child(body)
+	var cs2 := CollisionShape2D.new()
+	var rect2 := RectangleShape2D.new()
+	rect2.size = size
+	cs2.shape = rect2
+	body.add_child(cs2)
 
 # ── Process: action loop + regen + particles + shake ───────────────────────
 func _process(delta: float) -> void:
@@ -449,8 +483,27 @@ func _on_player_interacted(node: Node) -> void:
 	if interactable_type_str == "bank":
 		Events.open_bank.emit()
 		return
+	if interactable_type_str == "exit_door":
+		# Fires server-side exit_interior which pops the player back to
+		# their return coords. Universal — every interior region has one.
+		NetworkManager.send_exit_interior()
+		return
 	if interactable_type_str == "building":
-		Events.chat_message.emit("You enter the %s." % display_name)
+		# Enter the building's interior. Two paths:
+		#   1. Admin-placed buildings (id starts with "a:") are in
+		#      world_entities; server derives interior from data.display_name.
+		#   2. Hardcoded town buildings (id like "t:N") are NOT in
+		#      world_entities. We send an interior_id_hint derived from the
+		#      client-side display_name so the server can enter them
+		#      without a DB lookup.
+		var hint := ""
+		match display_name:
+			"Great Hall": hint = "great_hall"
+			"Tavern":     hint = "tavern"
+			"Warehouse":  hint = "warehouse"
+			"Chapel":     hint = "chapel"
+			_:            hint = "house"
+		NetworkManager.send_enter_interior(entity_id, hint)
 		return
 	if interactable_type_str == "crafting":
 		Events.open_crafting.emit()
@@ -498,6 +551,11 @@ func _on_player_interacted(node: Node) -> void:
 		# Future: open the warband info panel with member roster + held
 		# pledges + alliance status.
 		Events.chat_message.emit("You inspect the %s. (Coming soon.)" % display_name)
+		return
+	if interactable_type_str == "wall" or interactable_type_str == "fortified_wall":
+		# Walls are decorative + physical only in v1. Right-click inspect
+		# shows what it's made of. Future: warband damage / repair flow.
+		Events.chat_message.emit("You inspect the %s." % display_name)
 		return
 	if interactable_type_str in ["stick", "stone"]:
 		if _is_server_managed():
@@ -684,11 +742,14 @@ func _draw_body() -> void:
 		"construction": _draw_construction(ratio, c, cd)
 		"auction_house": _draw_auction_house(c, cd)
 		"door":         _draw_door(c, cd)
+		"exit_door":    _draw_exit_door(c, cd)
 		"stick":        _draw_stick(c)
 		"stone":        _draw_stone(c, cd)
 		"stronghold":   _draw_stronghold()
 		"banner":       _draw_banner()
 		"outpost":      _draw_outpost()
+		"wall":            _draw_wall_segment(c, cd, false)
+		"fortified_wall":  _draw_wall_segment(c, cd, true)
 		_:              draw_rect(Rect2(-14, -14, 28, 28), c)
 
 	# Directional shading overlay — top-down light from upper-left. Matches
@@ -1539,49 +1600,86 @@ func _draw_bank(_c: Color) -> void:
 	draw_circle(Vector2(0.0, -13.0), 3.0, Color(0.95, 0.82, 0.22))
 	draw_rect(Rect2(-1.5, -16.0, 3.0, 6.0), Color(0.80, 0.65, 0.08))
 
+## Building silhouettes. All scaled ~2.2× from their prior tiny values so
+## buildings visibly tower over the ~26 px player and ~32 px trees. Colors
+## and detail proportions unchanged — just the pixel counts. Roof always
+## sits ABOVE the wall, front door punches through the wall bottom.
 func _draw_building(c: Color, cd: Color) -> void:
 	match display_name:
 		"Great Hall":
-			draw_rect(Rect2(-22, -19, 44, 37), cd)
-			draw_rect(Rect2(-20, -17, 40, 33), c)
-			draw_rect(Rect2(-20, -17, 40, 5), c.lightened(0.18))
-			draw_rect(Rect2(-6, -2, 12, 20), Color(0.20, 0.12, 0.04))
-			draw_rect(Rect2(-4, 0, 8, 14), Color(0.30, 0.18, 0.06))
-			draw_rect(Rect2(-16, -9, 6, 6), Color(0.68, 0.72, 0.50, 0.75))
-			draw_rect(Rect2(10,  -9, 6, 6), Color(0.68, 0.72, 0.50, 0.75))
-			draw_rect(Rect2(-1.5, -17, 3, 5), c.lightened(0.35))  # roof ridge
+			# Monumental longhouse — 100 × 90.
+			draw_rect(Rect2(-50, -45, 100, 85), cd)
+			draw_rect(Rect2(-45, -40, 90, 75), c)
+			# Overhanging thatched roof strip.
+			draw_rect(Rect2(-50, -45, 100, 14), c.lightened(0.18))
+			draw_rect(Rect2(-50, -47, 100, 5), c.darkened(0.35))
+			# Roof ridge peak.
+			draw_rect(Rect2(-3, -50, 6, 8), c.lightened(0.35))
+			# Grand double door.
+			draw_rect(Rect2(-14, 4, 28, 36), Color(0.20, 0.12, 0.04))
+			draw_rect(Rect2(-10, 8, 20, 30), Color(0.30, 0.18, 0.06))
+			draw_line(Vector2(0, 8), Vector2(0, 38), Color(0.10, 0.05, 0.02), 1.5)
+			# Windows.
+			draw_rect(Rect2(-36, -20, 14, 14), Color(0.68, 0.72, 0.50, 0.75))
+			draw_rect(Rect2(22,  -20, 14, 14), Color(0.68, 0.72, 0.50, 0.75))
+			# Support beams.
+			draw_line(Vector2(-45, -12), Vector2(45, -12), c.darkened(0.30), 2.0)
 		"Tavern":
-			draw_rect(Rect2(-18, -15, 36, 29), cd)
-			draw_rect(Rect2(-16, -13, 32, 25), c)
-			draw_rect(Rect2(-16, -13, 32, 5), c.lightened(0.20))
-			draw_rect(Rect2(-5, -1, 10, 15), Color(0.22, 0.12, 0.04))
-			draw_rect(Rect2(-10, -23, 20, 8), Color(0.55, 0.38, 0.14))
-			draw_rect(Rect2(-8,  -22, 16, 5), Color(0.75, 0.55, 0.22))
-			draw_rect(Rect2(-13, -7, 6, 6), Color(0.72, 0.78, 0.52, 0.78))
-			draw_rect(Rect2(7,   -7, 6, 6), Color(0.72, 0.78, 0.52, 0.78))
+			# ~82 × 66 with a hanging sign.
+			draw_rect(Rect2(-41, -33, 82, 64), cd)
+			draw_rect(Rect2(-37, -29, 74, 56), c)
+			draw_rect(Rect2(-41, -33, 82, 12), c.lightened(0.20))
+			# Door.
+			draw_rect(Rect2(-11, -2, 22, 33), Color(0.22, 0.12, 0.04))
+			draw_rect(Rect2(-8, 2, 16, 27), Color(0.32, 0.20, 0.08))
+			# Hanging tavern sign above the door.
+			draw_rect(Rect2(-22, -52, 44, 18), Color(0.55, 0.38, 0.14))
+			draw_rect(Rect2(-18, -49, 36, 12), Color(0.75, 0.55, 0.22))
+			# Small round windows either side.
+			draw_circle(Vector2(-28, -14), 8, Color(0.72, 0.78, 0.52, 0.78))
+			draw_circle(Vector2(28,  -14), 8, Color(0.72, 0.78, 0.52, 0.78))
 		"Warehouse":
-			draw_rect(Rect2(-20, -11, 40, 25), cd)
-			draw_rect(Rect2(-18,  -9, 36, 21), c)
-			draw_rect(Rect2(-18,  -9, 36, 4), c.lightened(0.12))
-			draw_rect(Rect2(-10,  1, 20, 13), Color(0.30, 0.22, 0.10))
-			draw_line(Vector2(0, 1), Vector2(0, 13), Color(0.42, 0.32, 0.16), 1.5)
-			draw_line(Vector2(-18, -2), Vector2(18, -2), c.darkened(0.35), 1.0)
-			draw_line(Vector2(-18,  2), Vector2(18,  2), c.darkened(0.35), 1.0)
+			# ~90 × 56 — long low storage. Cargo doors instead of windows.
+			draw_rect(Rect2(-45, -25, 90, 55), cd)
+			draw_rect(Rect2(-41, -21, 82, 47), c)
+			draw_rect(Rect2(-41, -21, 82, 10), c.lightened(0.12))
+			# Central double cargo door.
+			draw_rect(Rect2(-22, 2, 44, 28), Color(0.30, 0.22, 0.10))
+			draw_line(Vector2(0, 2), Vector2(0, 30), Color(0.42, 0.32, 0.16), 2.5)
+			# Horizontal plank lines.
+			draw_line(Vector2(-41, -6), Vector2(41, -6), c.darkened(0.35), 1.5)
+			draw_line(Vector2(-41,  0), Vector2(41,  0), c.darkened(0.35), 1.5)
 		"Chapel":
-			draw_rect(Rect2(-13, -13, 26, 27), cd)
-			draw_rect(Rect2(-11, -11, 22, 23), c)
-			draw_rect(Rect2(-5,   1, 10, 13), Color(0.25, 0.20, 0.14))
-			draw_circle(Vector2(0, 1), 5, Color(0.25, 0.20, 0.14))
-			draw_rect(Rect2(-1.5, -11, 3, 10), Color(0.88, 0.85, 0.78))
-			draw_rect(Rect2(-5, -7, 10, 3),    Color(0.88, 0.85, 0.78))
-			draw_circle(Vector2(0, -3), 4, Color(0.62, 0.72, 0.88, 0.72))
+			# ~60 × 62 — tall narrow chapel with cross window + spire.
+			draw_rect(Rect2(-30, -30, 60, 60), cd)
+			draw_rect(Rect2(-26, -26, 52, 52), c)
+			# Peaked spire above the door.
+			draw_colored_polygon(PackedVector2Array([
+				Vector2(-8, -30), Vector2(8, -30), Vector2(0, -46)]),
+				c.lightened(0.10))
+			# Door.
+			draw_rect(Rect2(-11, 4, 22, 26), Color(0.25, 0.20, 0.14))
+			# Rounded arch at door top.
+			draw_circle(Vector2(0, 6), 11, Color(0.25, 0.20, 0.14))
+			# Cross window.
+			draw_rect(Rect2(-3, -22, 6, 20), Color(0.88, 0.85, 0.78))
+			draw_rect(Rect2(-10, -14, 20, 6), Color(0.88, 0.85, 0.78))
+			# Blue circular stained-glass round window.
+			draw_circle(Vector2(0, -6), 8, Color(0.62, 0.72, 0.88, 0.72))
 		_:  # House
-			draw_rect(Rect2(-15, -13, 30, 27), cd)
-			draw_rect(Rect2(-13, -11, 26, 23), c)
-			draw_rect(Rect2(-13, -11, 26, 4), c.lightened(0.18))
-			draw_rect(Rect2(-5,  -1, 10, 14), Color(0.28, 0.18, 0.08))
-			draw_circle(Vector2(3.0, 6.0), 1.5, Color(0.82, 0.66, 0.15))
-			draw_rect(Rect2(-11, -5, 7, 7), Color(0.68, 0.74, 0.52, 0.78))
+			# ~66 × 60 default cottage.
+			draw_rect(Rect2(-33, -30, 66, 60), cd)
+			draw_rect(Rect2(-29, -26, 58, 52), c)
+			draw_rect(Rect2(-33, -30, 66, 10), c.lightened(0.18))
+			# Door.
+			draw_rect(Rect2(-11, 2, 22, 28), Color(0.28, 0.18, 0.08))
+			draw_rect(Rect2(-8, 6, 16, 22), Color(0.38, 0.24, 0.10))
+			# Doorknob.
+			draw_circle(Vector2(6.0, 16.0), 2.0, Color(0.82, 0.66, 0.15))
+			# Window on the side.
+			draw_rect(Rect2(-24, -10, 14, 14), Color(0.68, 0.74, 0.52, 0.78))
+			# Chimney.
+			draw_rect(Rect2(16, -36, 8, 12), c.darkened(0.30))
 
 func _draw_crafting_bench(ratio: float, _c: Color, _cd: Color) -> void:
 	var wood := Color(0.52, 0.34, 0.14)
@@ -1776,6 +1874,46 @@ func _draw_door(c: Color, cd: Color) -> void:
 	# Subtle threshold shadow at the base.
 	draw_rect(Rect2(-13, 16, 26, 3), Color(0.0, 0.0, 0.0, 0.30))
 
+## Interior exit door — the return trigger inside every interior room.
+## Bigger + more contrasty than the entry door because players need to
+## SEE it across a room they might not recognise. Gold "EXIT" label
+## + upward-pointing chevron so the intent is obvious regardless of theme.
+func _draw_exit_door(c: Color, cd: Color) -> void:
+	# 48×64 footprint — matches the collision rect.
+	# Frame (stone lintel + posts).
+	var frame_c := cd.darkened(0.25)
+	draw_rect(Rect2(-24, -32, 48, 64), frame_c)
+	# Door slab.
+	draw_rect(Rect2(-20, -28, 40, 56), c)
+	# Vertical plank grooves.
+	draw_line(Vector2(-7, -26), Vector2(-7, 26), cd.darkened(0.40), 1.4)
+	draw_line(Vector2( 7, -26), Vector2( 7, 26), cd.darkened(0.40), 1.4)
+	# Iron banding.
+	var iron := Color(0.18, 0.18, 0.20)
+	draw_rect(Rect2(-22, -18, 44, 3), iron)
+	draw_rect(Rect2(-22,  15, 44, 3), iron)
+	# Stone lintel across the top with brighter capstone.
+	draw_rect(Rect2(-26, -34, 52, 5), frame_c.lightened(0.15))
+	# Gold handle on the right side.
+	draw_circle(Vector2(12, 0), 3.0, Color(0.95, 0.78, 0.20))
+	draw_circle(Vector2(12, 0), 1.6, Color(1.00, 0.92, 0.55))
+	# Pulsing gold "EXIT" cue above the door — sinusoidal alpha via _time
+	# so the player registers it as a clickable/important object.
+	var pulse: float = 0.6 + 0.4 * abs(sin(_time_elapsed * 2.0))
+	var gold := Color(0.95, 0.85, 0.30, pulse)
+	# Upward chevron.
+	draw_colored_polygon(PackedVector2Array([
+		Vector2(-10, -46), Vector2( 10, -46), Vector2(  0, -56)]), gold)
+	# EXIT label above the chevron.
+	var font := ThemeDB.fallback_font
+	if font != null:
+		var label := "EXIT"
+		var fsize := 12
+		var lw: float = font.get_string_size(label, HORIZONTAL_ALIGNMENT_CENTER,
+			-1, fsize).x
+		draw_string(font, Vector2(-lw * 0.5, -60), label,
+			HORIZONTAL_ALIGNMENT_CENTER, -1, fsize, gold)
+
 ## ── Warband structures (placeholder visuals for v1) ────────────────────────
 ## These three draws are intentionally chunky and readable from camera
 ## distance — the player needs to spot a friendly stronghold from across
@@ -1890,3 +2028,36 @@ func _draw_outpost() -> void:
 	draw_line(Vector2( 15, -18), Vector2(0, -28), thatch.darkened(0.25), 1.0)
 	# Small horn / signal on top.
 	draw_circle(Vector2(0, -29), 1.5, Color(0.62, 0.55, 0.45))
+
+
+# ── Wall segment (Construction + admin-placed) ──────────────────────────────
+## Draws a horizontal wall panel sized to the collision rect. `color` c is the
+## per-tier tint (wood log color for wall, metal bar tint for fortified_wall);
+## `fortified` toggles the reinforcement bands. StaticBody2D physical block
+## is added separately in `_setup_collision`.
+func _draw_wall_segment(c: Color, cd: Color, fortified: bool) -> void:
+	var w: float = 48.0
+	var h: float = 24.0 if fortified else 20.0
+	var half_w: float = w * 0.5
+	var half_h: float = h * 0.5
+	# Base panel + darker outline.
+	draw_rect(Rect2(-half_w, -half_h, w, h), cd)
+	draw_rect(Rect2(-half_w + 2, -half_h + 2, w - 4, h - 4), c)
+	# Vertical plank / stone divisions every 8 px.
+	var dark := c.darkened(0.35)
+	var i: int = 1
+	while float(i) * 8.0 < w - 4.0:
+		var x: float = -half_w + 2 + float(i) * 8.0
+		draw_line(Vector2(x, -half_h + 2), Vector2(x, half_h - 2), dark, 1.0)
+		i += 1
+	# Trim strip on top + shadow strip on bottom.
+	draw_rect(Rect2(-half_w, -half_h, w, 3), c.lightened(0.20))
+	draw_rect(Rect2(-half_w, half_h - 3, w, 3), c.darkened(0.35))
+	# Fortified: iron reinforcement bands + rivet dots.
+	if fortified:
+		var iron := Color(0.55, 0.55, 0.60)
+		draw_rect(Rect2(-half_w + 2, -3, w - 4, 2), iron)
+		for j in range(4):
+			var rx: float = -half_w + 6.0 + float(j) * 12.0
+			draw_circle(Vector2(rx, -2), 1.2, iron.lightened(0.20))
+			draw_circle(Vector2(rx,  4), 1.2, iron.darkened(0.20))

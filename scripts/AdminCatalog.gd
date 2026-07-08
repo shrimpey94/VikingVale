@@ -98,6 +98,19 @@ static func entries() -> Array:
 		_res("archery",      "Archery Range",  "ranged",       1, "Train",   Color(0.50, 0.35, 0.20)),
 		_res("runestone",    "Runestone",      "magic",        1, "Inscribe",Color(0.50, 0.20, 0.75)),
 		_res("construction", "Workbench",      "construction", 1, "Build",   Color(0.55, 0.40, 0.20)),
+		# ── Walls (Construction skill wall recipes; admin can spawn freely) ─
+		# Tiered by wood color — mirrors HUD.gd _CONSTR_WOOD entries. Player
+		# path via Construction recipe deducts materials + XP; admin path
+		# via admin_place bypasses all gates.
+		_res("wall", "Oak Wall",       "construction",  1, "Inspect", Color(0.55, 0.36, 0.18)),
+		_res("wall", "Pine Wall",      "construction",  1, "Inspect", Color(0.42, 0.30, 0.14)),
+		_res("wall", "Cherry Wall",    "construction",  1, "Inspect", Color(0.72, 0.38, 0.42)),
+		_res("wall", "Ironwood Wall",  "construction",  1, "Inspect", Color(0.30, 0.18, 0.08)),
+		_res("wall", "Frost Wall",     "construction",  1, "Inspect", Color(0.72, 0.90, 0.98)),
+		_res("wall", "Ancient Wall",   "construction",  1, "Inspect", Color(0.55, 0.40, 0.12)),
+		_res("fortified_wall", "Fortified Wall (Iron)",    "construction", 70, "Inspect", Color(0.55, 0.55, 0.60)),
+		_res("fortified_wall", "Fortified Wall (Mithril)", "construction", 70, "Inspect", Color(0.40, 0.65, 0.90)),
+		_res("fortified_wall", "Fortified Wall (Runite)",  "construction", 70, "Inspect", Color(0.65, 0.20, 0.82)),
 		_res("auction_house","Auction House",  "",             1, "Browse",  Color(0.85, 0.70, 0.25)),
 		_res("stick",        "Stick Pickup",   "foraging",     1, "Pick",    Color(0.55, 0.36, 0.18)),
 		_res("stone",        "Stone Pickup",   "foraging",     1, "Pick",    Color(0.58, 0.56, 0.52)),

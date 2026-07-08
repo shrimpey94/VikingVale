@@ -10,7 +10,18 @@ signal tile_changed(tx: int, ty: int, biome_id: int)
 
 const TILE := 32
 const COLS := 300
-const ROWS := 300
+# ROWS covers BOTH the exterior playable area (rows 0..EXTERIOR_ROWS-1) and
+# the reserved interior rows (rows EXTERIOR_ROWS..ROWS-1) that sit far below
+# the exterior world at y=12000+. Interior rooms live inside this reserved
+# band so the existing tile editor / paint / passability code Just Works
+# — admins can paint interior floors with the same brushes they use on the
+# overworld. The camera is clamped to EXTERIOR_ROWS during exterior play so
+# players can't wander into the interior band; interior mode un-clamps it.
+const EXTERIOR_ROWS := 300
+const ROWS := 520
+# First interior tile row. Everything at ty >= INTERIOR_ROWS_START is treated
+# as interior-scope: default biome, no impassable border rules, admin can paint.
+const INTERIOR_ROWS_START := 300
 
 # Biome cache — built once in _ready, looked up O(1) during draw
 var _biome_cache: PackedByteArray  # biome IDs 0-13
@@ -39,7 +50,7 @@ var _impassable_tiles:  Dictionary = {}    # idx → true   (only stored when bl
 # startup via SubViewport, then handed to the terrain_blend shader as a uniform.
 var _biome_atlas_img: Image       = null
 var _biome_atlas_tex: ImageTexture = null
-const BIOME_COUNT := 16
+const BIOME_COUNT := 26
 
 # True once the atlas bake has finished AND terrain_blend.gdshader is bound to
 # this node. Before that, _draw() falls back to the CPU per-tile dispatch so the
@@ -63,11 +74,27 @@ const B_ASHLANDS    := 12
 const B_TOWN        := 13
 const B_ROAD        := 14
 const B_CLIFF       := 15  # impassable mountain wall (zone border, hard collision)
+# Interior + exterior additions. Interior floors are walkable, walls are
+# impassable via _is_impassable_bid. Exterior additions cover long-missing
+# beach/path/river/farm biomes.
+const B_WOOD_FLOOR    := 16
+const B_STONE_FLOOR   := 17
+const B_RED_CARPET    := 18
+const B_HEARTH_STONE  := 19
+const B_WALL_WOOD     := 20  # impassable
+const B_WALL_STONE    := 21  # impassable
+const B_SAND          := 22
+const B_DIRT_PATH     := 23
+const B_SHALLOW_WATER := 24  # walkable water (unlike ocean/coast)
+const B_FARM_CROPS    := 25
 
 const _BIOME_NAMES := [
 	"plains", "plains", "oak_forest", "pine_forest", "dark_forest",
 	"swamp", "mountain", "rocky", "coast", "ocean",
 	"snow", "helheim", "ashlands", "town", "road", "cliff",
+	"wood_floor", "stone_floor", "red_carpet", "hearth_stone",
+	"wall_wood", "wall_stone",
+	"sand", "dirt_path", "shallow_water", "farm_crops",
 ]
 
 func _ready() -> void:
@@ -175,7 +202,8 @@ func _bid_at(tx: int, ty: int) -> int:
 	return _biome_cache[idx]
 
 func _is_impassable_bid(bid: int) -> bool:
-	return bid == B_OCEAN or bid == B_COAST or bid == B_CLIFF
+	return (bid == B_OCEAN or bid == B_COAST or bid == B_CLIFF
+		or bid == B_WALL_WOOD or bid == B_WALL_STONE)
 
 ## Rebuild the single combined collision body from the effective (override-aware)
 ## biome map. Called once at startup and again whenever a tile is painted —
@@ -293,6 +321,16 @@ func _draw_biome_cell(ci: CanvasItem, bid: int, x: int, y: int) -> void:
 		"swamp":       _draw_swamp(ci, hv, x, y, cx, cy)
 		"helheim":     _draw_helheim(ci, hv, x, y, cx, cy)
 		"ashlands":    _draw_ashlands(ci, hv, x, y, cx, cy)
+		"wood_floor":    _draw_wood_floor(ci, hv, x, y, cx, cy)
+		"stone_floor":   _draw_stone_floor(ci, hv, x, y, cx, cy)
+		"red_carpet":    _draw_red_carpet(ci, hv, x, y, cx, cy)
+		"hearth_stone":  _draw_hearth_stone(ci, hv, x, y, cx, cy)
+		"wall_wood":     _draw_wall_wood(ci, hv, x, y, cx, cy)
+		"wall_stone":    _draw_wall_stone(ci, hv, x, y, cx, cy)
+		"sand":          _draw_sand(ci, hv, x, y, cx, cy)
+		"dirt_path":     _draw_dirt_path(ci, hv, x, y, cx, cy)
+		"shallow_water": _draw_shallow_water(ci, hv, x, y, cx, cy)
+		"farm_crops":    _draw_farm_crops(ci, hv, x, y, cx, cy)
 		_:             _draw_plains(ci, hv, x, y, cx, cy)
 
 ## THE single entry point for mutating a tile. Nothing else (editor, network,
@@ -507,6 +545,12 @@ func _biome_at(tx: int, ty: int) -> String:
 	return _BIOME_NAMES[_bid_at(tx, ty)]
 
 func _compute_biome_id(tx: int, ty: int) -> int:
+	# Interior band — default to bare wood floor so first-entry rooms are
+	# walkable AND read as "interior" out of the box. Admins can repaint
+	# to stone/carpet/hearth per room theme. All noise-based biome rules
+	# below are exterior-only.
+	if ty >= INTERIOR_ROWS_START:
+		return B_WOOD_FLOOR
 	if _is_town(tx, ty): return B_TOWN
 	if _is_road(tx, ty): return B_ROAD
 
@@ -631,6 +675,16 @@ func _biome_base_color(biome: String) -> Color:
 		"swamp":       return Color(0.20, 0.27, 0.14)
 		"helheim":     return Color(0.40, 0.06, 0.50)
 		"ashlands":    return Color(0.54, 0.28, 0.08)
+		"wood_floor":    return Color(0.42, 0.30, 0.16)
+		"stone_floor":   return Color(0.55, 0.55, 0.55)
+		"red_carpet":    return Color(0.55, 0.15, 0.15)
+		"hearth_stone":  return Color(0.20, 0.16, 0.14)
+		"wall_wood":     return Color(0.32, 0.22, 0.10)
+		"wall_stone":    return Color(0.50, 0.48, 0.44)
+		"sand":          return Color(0.86, 0.78, 0.58)
+		"dirt_path":     return Color(0.42, 0.32, 0.20)
+		"shallow_water": return Color(0.45, 0.65, 0.85)
+		"farm_crops":    return Color(0.35, 0.22, 0.10)
 		_:             return Color(0.30, 0.52, 0.20)
 
 func _draw_tile(biome: String, hv: int, tx: int, ty: int, x: int, y: int) -> void:
@@ -654,6 +708,16 @@ func _draw_tile(biome: String, hv: int, tx: int, ty: int, x: int, y: int) -> voi
 		"swamp":       _draw_swamp(self, hv, x, y, cx, cy)
 		"helheim":     _draw_helheim(self, hv, x, y, cx, cy)
 		"ashlands":    _draw_ashlands(self, hv, x, y, cx, cy)
+		"wood_floor":    _draw_wood_floor(self, hv, x, y, cx, cy)
+		"stone_floor":   _draw_stone_floor(self, hv, x, y, cx, cy)
+		"red_carpet":    _draw_red_carpet(self, hv, x, y, cx, cy)
+		"hearth_stone":  _draw_hearth_stone(self, hv, x, y, cx, cy)
+		"wall_wood":     _draw_wall_wood(self, hv, x, y, cx, cy)
+		"wall_stone":    _draw_wall_stone(self, hv, x, y, cx, cy)
+		"sand":          _draw_sand(self, hv, x, y, cx, cy)
+		"dirt_path":     _draw_dirt_path(self, hv, x, y, cx, cy)
+		"shallow_water": _draw_shallow_water(self, hv, x, y, cx, cy)
+		"farm_crops":    _draw_farm_crops(self, hv, x, y, cx, cy)
 		_:             _draw_plains(self, hv, x, y, cx, cy)
 
 	# Biome edge transitions — width / intensity / dither scale vary per biome PAIR:
@@ -1081,6 +1145,207 @@ func _draw_plains(ci: CanvasItem, hv: int, x: int, y: int, _cx: float, _cy: floa
 		ci.draw_circle(Vector2(float(x) + 16.0, float(y) + 24.0), 0.8,
 				Color(0.65, 0.08, 0.60, 0.80))
 
+# ══════════════════════════════════════════════════════════════════════════════
+# ── Interior + additional exterior tile biomes ────────────────────────────────
+# Signature matches the other _draw_<name> funcs: (ci, hv, x, y, cx, cy). hv is
+# a per-tile deterministic hash used to seed variation without RNG allocations.
+
+func _draw_wood_floor(ci: CanvasItem, hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	# Warm plank floor. Two-tone base for row variation, horizontal plank
+	# separator every ~10 px, offset vertical breaks per row.
+	var base := Color(0.42, 0.30, 0.16) if hv % 3 != 0 else Color(0.38, 0.27, 0.14)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	var dark := base.darkened(0.28)
+	# Horizontal plank lines (3 rows of ~10 px).
+	for row in range(3):
+		var sy := y + 10 + row * 10
+		ci.draw_line(Vector2(float(x), float(sy)),
+				Vector2(float(x + TILE), float(sy)), dark, 1.0)
+	# Vertical plank breaks — one per row, at deterministic x offsets.
+	for row in range(3):
+		var bx := x + 6 + ((hv >> row) % 20)
+		var by := y + row * 10
+		ci.draw_line(Vector2(float(bx), float(by)),
+				Vector2(float(bx), float(by + 10)), dark, 1.0)
+	# Subtle highlight on top of one plank.
+	if hv % 5 == 0:
+		ci.draw_line(Vector2(float(x + 2), float(y + 4)),
+				Vector2(float(x + TILE - 2), float(y + 4)),
+				base.lightened(0.10), 1.0)
+
+
+func _draw_stone_floor(ci: CanvasItem, hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	# Grey flagstone. 4×4 tile grid of ~8-px flagstones with dark mortar.
+	var base := Color(0.55, 0.55, 0.55) if hv % 3 == 0 else Color(0.50, 0.50, 0.51)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	var mortar := base.darkened(0.35)
+	# Grid lines every 8 px vertically + horizontally.
+	for i in range(1, 4):
+		ci.draw_line(Vector2(float(x + i * 8), float(y)),
+				Vector2(float(x + i * 8), float(y + TILE)), mortar, 1.0)
+		ci.draw_line(Vector2(float(x), float(y + i * 8)),
+				Vector2(float(x + TILE), float(y + i * 8)), mortar, 1.0)
+	# Random flagstone highlight for depth — pick one cell per tile.
+	var hi_col := (hv >> 2) % 4
+	var hi_row := (hv >> 5) % 4
+	ci.draw_rect(Rect2(x + hi_col * 8 + 1, y + hi_row * 8 + 1, 6, 6),
+			base.lightened(0.10))
+
+
+func _draw_red_carpet(ci: CanvasItem, hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	# Deep red woven carpet. Interior-only detail (weave crosshatch + a
+	# subtle gold medallion) — no trim on the tile edges so multiple
+	# carpet tiles placed side by side read as one large rug without any
+	# seams down the middle. The atlas can't know its neighbors, so ANY
+	# edge-drawn feature would leak into interior seams. Border trim
+	# lives on the FLOOR biome around the rug instead.
+	var base := Color(0.55, 0.15, 0.15) if hv % 3 != 0 else Color(0.50, 0.13, 0.13)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Weave — full-tile diagonal hatch that wraps cleanly across seams
+	# because the pattern is periodic at 4 px. Alternating shade for depth.
+	var hatch := base.lightened(0.12)
+	for i in range(-TILE, TILE * 2, 4):
+		ci.draw_line(Vector2(float(x + i), float(y)),
+				Vector2(float(x + i + TILE), float(y + TILE)),
+				hatch, 1.0)
+	# Subtle gold medallion centered in the tile — rare (hv-gated) so a
+	# large rug isn't visually noisy but individual tiles get some detail.
+	if hv % 4 == 0:
+		var gold := Color(0.85, 0.70, 0.25, 0.55)
+		ci.draw_circle(Vector2(float(x) + 16.0, float(y) + 16.0), 2.0, gold)
+
+
+func _draw_hearth_stone(ci: CanvasItem, hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	# Dark charcoal stone with soot cracks. For the tiles around fireplaces.
+	var base := Color(0.20, 0.16, 0.14) if hv % 3 == 0 else Color(0.24, 0.19, 0.16)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Cracks — a few short lines with deterministic angles.
+	var crack := base.darkened(0.35)
+	for i in range(3):
+		var sx := x + 4 + ((hv >> (i * 2)) % 24)
+		var sy := y + 4 + ((hv >> (i * 3)) % 24)
+		var ex := sx + 4 - ((hv >> i) % 8)
+		var ey := sy + 3 + ((hv >> (i + 1)) % 5)
+		ci.draw_line(Vector2(float(sx), float(sy)),
+				Vector2(float(ex), float(ey)), crack, 1.0)
+	# Rare ember glow for warmth.
+	if hv % 9 == 0:
+		ci.draw_circle(Vector2(float(x) + 16.0, float(y) + 16.0), 1.5,
+				Color(0.95, 0.35, 0.10, 0.65))
+
+
+func _draw_wall_wood(ci: CanvasItem, hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	# Vertical planks — impassable. Trim strip on top + shadow strip on
+	# bottom so contiguous painted rows read as a wall run.
+	var base := Color(0.42, 0.28, 0.14) if hv % 3 != 0 else Color(0.36, 0.24, 0.12)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	var dark := base.darkened(0.35)
+	# Vertical plank divisions every ~8 px.
+	for i in range(1, 4):
+		ci.draw_line(Vector2(float(x + i * 8), float(y)),
+				Vector2(float(x + i * 8), float(y + TILE)), dark, 1.0)
+	# Trim strip at top (bright) + shadow at bottom (dark) — "wall run".
+	ci.draw_rect(Rect2(x, y, TILE, 3), base.lightened(0.20))
+	ci.draw_rect(Rect2(x, y + TILE - 3, TILE, 3), base.darkened(0.40))
+
+
+func _draw_wall_stone(ci: CanvasItem, hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	# Staggered stone brick — impassable. Two rows of ~4 bricks with
+	# alternating half-offset for a running-bond pattern.
+	var base := Color(0.50, 0.48, 0.44) if hv % 3 == 0 else Color(0.46, 0.44, 0.40)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	var mortar := base.darkened(0.35)
+	# Row 1 — full bricks (0..8, 8..16, 16..24, 24..32).
+	ci.draw_line(Vector2(float(x), float(y + 10)),
+			Vector2(float(x + TILE), float(y + 10)), mortar, 1.0)
+	# Row 2 — offset by 4 px.
+	ci.draw_line(Vector2(float(x), float(y + 22)),
+			Vector2(float(x + TILE), float(y + 22)), mortar, 1.0)
+	# Vertical mortar — offset per row.
+	for i in range(1, 4):
+		ci.draw_line(Vector2(float(x + i * 8), float(y)),
+				Vector2(float(x + i * 8), float(y + 10)), mortar, 1.0)
+	for i in range(1, 4):
+		ci.draw_line(Vector2(float(x + i * 8 - 4), float(y + 10)),
+				Vector2(float(x + i * 8 - 4), float(y + 22)), mortar, 1.0)
+	for i in range(1, 4):
+		ci.draw_line(Vector2(float(x + i * 8), float(y + 22)),
+				Vector2(float(x + i * 8), float(y + TILE)), mortar, 1.0)
+
+
+func _draw_sand(ci: CanvasItem, hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	# Warm tan beach sand with fine stipple flecks.
+	var base := Color(0.86, 0.78, 0.58) if hv % 3 != 0 else Color(0.82, 0.74, 0.54)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Stipple — a few darker specks (grains of coarser sand).
+	var speck := base.darkened(0.18)
+	for i in range(5):
+		var sx := x + ((hv >> (i * 2)) % TILE)
+		var sy := y + ((hv >> (i * 3)) % TILE)
+		ci.draw_rect(Rect2(sx, sy, 1, 1), speck)
+	# Occasional shell/pebble.
+	if hv % 11 == 0:
+		ci.draw_circle(Vector2(float(x) + 16.0, float(y) + 16.0), 1.5,
+				Color(0.95, 0.92, 0.85, 0.85))
+
+
+func _draw_dirt_path(ci: CanvasItem, hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	# Mid-brown dirt with pebble specks. Softer alternative to the stone road.
+	var base := Color(0.42, 0.32, 0.20) if hv % 3 == 0 else Color(0.38, 0.29, 0.18)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Pebble specks.
+	var pebble := base.lightened(0.18)
+	for i in range(4):
+		var sx := x + ((hv >> (i * 2)) % TILE)
+		var sy := y + ((hv >> (i * 3)) % TILE)
+		ci.draw_circle(Vector2(float(sx), float(sy)), 1.0, pebble)
+	# Rare grass tuft edge.
+	if hv % 7 == 0:
+		ci.draw_line(Vector2(float(x + 4), float(y + 28)),
+				Vector2(float(x + 6), float(y + 24)),
+				Color(0.30, 0.42, 0.16, 0.70), 1.0)
+
+
+func _draw_shallow_water(ci: CanvasItem, hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	# Light blue water — walkable. Wavy ripple lines animated by _process
+	# redraws (existing atlas cache captures a still frame; live tiles get
+	# the wave through the time-driven redraw path in Ground._draw).
+	var base := Color(0.45, 0.65, 0.85) if hv % 3 != 0 else Color(0.42, 0.62, 0.82)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	var t: float = float(Time.get_ticks_msec()) / 1000.0
+	var ripple := base.lightened(0.15)
+	# Two horizontal wave lines, offset in phase per tile via hv.
+	for row in range(2):
+		var yy: float = float(y + 10 + row * 12)
+		var phase: float = t * 2.0 + float(hv % 7)
+		for i in range(0, TILE, 4):
+			var xx: float = float(x + i)
+			var wy: float = yy + sin(phase + float(i) * 0.5) * 1.0
+			ci.draw_circle(Vector2(xx, wy), 0.8, ripple)
+	# Sandy bottom hint — a couple of light specks.
+	if hv % 5 == 0:
+		ci.draw_circle(Vector2(float(x) + 8.0, float(y) + 22.0), 1.2,
+				Color(0.80, 0.72, 0.55, 0.45))
+
+
+func _draw_farm_crops(ci: CanvasItem, hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	# Tilled brown soil with vertical crop rows. Placeholder for the planned
+	# Farming skill — currently paintable so admins can lay out farm plots.
+	var base := Color(0.35, 0.22, 0.10) if hv % 3 == 0 else Color(0.32, 0.20, 0.09)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Soil rows — darker vertical stripes every 4 px.
+	var row_col := base.darkened(0.30)
+	for i in range(0, TILE, 4):
+		ci.draw_line(Vector2(float(x + i + 2), float(y + 2)),
+				Vector2(float(x + i + 2), float(y + TILE - 2)),
+				row_col, 1.0)
+	# Sprout tips — small green marks between rows.
+	var sprout := Color(0.35, 0.55, 0.18)
+	for i in range(3):
+		var sx := x + 4 + ((hv >> (i * 2)) % 22)
+		var sy := y + 6 + ((hv >> (i * 3)) % 20)
+		ci.draw_rect(Rect2(sx, sy, 1, 3), sprout)
+
 # ── Atlas bake helper ─────────────────────────────────────────────────────────
 # Inner Node2D used once at startup as the SubViewport bake target. Its _draw()
 # walks every biome id and calls back into Ground's biome dispatcher, drawing
@@ -1091,5 +1356,10 @@ class _AtlasBaker extends Node2D:
 	func _draw() -> void:
 		if ground == null:
 			return
-		for bid in range(16):
+		# Use the outer script's BIOME_COUNT so this loop grows with new
+		# biomes without needing to touch the inner class.
+		var count: int = int(ground.get("BIOME_COUNT"))
+		if count <= 0:
+			count = 16
+		for bid in range(count):
 			ground.call("_draw_biome_cell", self, bid, 0, bid * 32)

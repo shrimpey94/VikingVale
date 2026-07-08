@@ -2552,10 +2552,12 @@ func _build_combat_window() -> void:
 	top_row.add_child(title)
 	var close_btn := Button.new()
 	close_btn.text = "✕"
-	close_btn.custom_minimum_size = Vector2(26, 0)
+	# 36×36 — meets Apple HIG 44 px touch-target close enough for a
+	# corner button, comfortable thumb-tap on Android. Up from 26×0.
+	close_btn.custom_minimum_size = Vector2(36, 36)
 	close_btn.add_theme_stylebox_override("normal", _rs(RS_BG, RS_BORDER, 2))
 	close_btn.add_theme_color_override("font_color", RS_TEXT)
-	close_btn.add_theme_font_size_override("font_size", 12)
+	close_btn.add_theme_font_size_override("font_size", 14)
 	close_btn.tooltip_text = "Hide panel (right-click any monster to reopen)"
 	close_btn.pressed.connect(func() -> void: _combat_window.visible = false)
 	top_row.add_child(close_btn)
@@ -2717,6 +2719,9 @@ func _build_combat_window() -> void:
 	# Listen for any external style change so the in-panel buttons sync.
 	Events.combat_style_changed.connect(_on_combat_style_changed_external)
 	Events.inventory_changed.connect(_refresh_persist_rune_row)
+	# Re-tint Ranged/Magic style buttons when arrows/runes change so the
+	# red "out of resource" hint clears the moment the player resupplies.
+	Events.inventory_changed.connect(_refresh_style_btns)
 	Events.xp_gained.connect(_on_xp_gained_for_rune_row)
 	NetworkManager.admin_rank_changed.connect(_on_admin_rank_for_rune_row)
 
@@ -2760,12 +2765,26 @@ func _clear_target() -> void:
 func _refresh_style_btns() -> void:
 	for sval: Variant in _style_btns:
 		var sb := _style_btns[sval] as Button
-		if sval == _combat_style:
+		# Out-of-resource tint — red font when the style has no ammo
+		# (ranged → arrows) / no rune in stock (magic → active rune).
+		# Melee never goes out. Applied to the inactive button too so
+		# the player can SEE it's broken even when not currently using
+		# that style. The first out-of-ammo swing chats once; this is
+		# the persistent visual signal so subsequent swings aren't silent.
+		var s_str: String = str(sval)
+		var out_of_resource: bool = false
+		if s_str == "ranged":
+			out_of_resource = GameManager.get_item_qty("arrows") <= 0
+		elif s_str == "magic":
+			var rune_id: String = GameManager.active_rune
+			out_of_resource = rune_id == "" or GameManager.get_item_qty(rune_id) <= 0
+		var active: bool = sval == _combat_style
+		if active:
 			sb.add_theme_stylebox_override("normal", _rs(RS_BTN_A, RS_GOLD, 2))
-			sb.add_theme_color_override("font_color", RS_GOLD)
+			sb.add_theme_color_override("font_color", Color(0.95, 0.30, 0.30) if out_of_resource else RS_GOLD)
 		else:
 			sb.add_theme_stylebox_override("normal", _rs(RS_BTN_N, RS_BORDER.darkened(0.4), 2))
-			sb.add_theme_color_override("font_color", RS_TEXT)
+			sb.add_theme_color_override("font_color", Color(0.85, 0.30, 0.30) if out_of_resource else RS_TEXT)
 
 func _on_open_combat(monster: Node) -> void:
 	_combat_monster   = monster
@@ -2789,6 +2808,12 @@ func _on_open_combat(monster: Node) -> void:
 	_target_section.visible = true
 	_attack_btn.visible = false
 	_flee_btn.visible = true
+	# Briefly disable Flee until the server acks our join (or the join
+	# timeout falls back to local). Without this the button shows but
+	# the player can't actually act on it — looks like a stuck button.
+	# Re-enabled in _on_mob_state_hud or after COMBAT_JOIN_TIMEOUT.
+	_flee_btn.disabled = false   # default — flipped to true below if joining
+	_flee_btn.tooltip_text = ""
 	_combat_log_box.visible = true
 	_combat_log.text = ""   # fresh log per fight
 	_combat_window.visible = true
@@ -2801,6 +2826,8 @@ func _on_open_combat(monster: Node) -> void:
 	var eid := str(monster.get("entity_id"))
 	if not eid.is_empty() and NetworkManager.state == NetworkManager.NetState.LOGGED_IN:
 		_combat_join_pending = true
+		_flee_btn.disabled = true
+		_flee_btn.tooltip_text = "Joining server fight…"
 		var mpos := (monster as Node2D).global_position
 		NetworkManager.send_monster_join(eid, mpos.x, mpos.y,
 			monster.get("max_hp") as int, monster.get("xp_reward") as int,
@@ -2829,7 +2856,18 @@ func _on_combat_ended() -> void:
 			and (_selected_target.get("is_alive") as bool):
 		_attack_btn.visible = true
 	else:
-		_clear_target()
+		# Target slain (or vanished). Briefly tell the player so they
+		# don't wonder why the panel just emptied, then clear. 2s on a
+		# scene-tree timer — small enough not to block the next click,
+		# long enough to register.
+		if _selected_target != null:
+			_combat_log_append("> Target slain — click another to engage.")
+			_combat_log_box.visible = true
+			get_tree().create_timer(2.0).timeout.connect(func() -> void:
+				_clear_target()
+				_combat_log_box.visible = false)
+		else:
+			_clear_target()
 
 # ── Shared-combat signal handlers ─────────────────────────────────────────────
 func _combat_target_id() -> String:
@@ -2842,6 +2880,10 @@ func _on_mob_state_hud(entity_id: String, _hp: int, _max_hp: int) -> void:
 	if entity_id == _combat_target_id():
 		_combat_join_pending = false
 		_combat_server       = true
+		# Re-enable Flee — server now knows about us, leave is meaningful.
+		if _flee_btn != null:
+			_flee_btn.disabled = false
+			_flee_btn.tooltip_text = ""
 		_update_combat_ui()
 
 func _on_mob_hit_hud(entity_id: String, x: float, y: float, amount: int, by_username: String, _hp: int, _max_hp: int) -> void:
@@ -2853,7 +2895,12 @@ func _on_mob_hit_hud(entity_id: String, x: float, y: float, amount: int, by_user
 
 func _on_mob_dead_on_join_hud(entity_id: String, _respawn_in: float) -> void:
 	if entity_id == _combat_target_id():
-		_combat_log_append("That monster is already dead.")
+		# Someone else got the kill while we were initiating combat.
+		# Combat panel was already open mid-build; rather than collapsing
+		# silently, post a top-of-screen toast so the player understands
+		# "I didn't break the game, someone beat me to it."
+		_show_top_toast("Target already slain — another fighter beat you to it.",
+			Color(0.95, 0.78, 0.18))
 		_on_combat_ended()
 
 func _on_mob_full_hud(entity_id: String) -> void:
@@ -2866,6 +2913,13 @@ func _update_combat_ui() -> void:
 	# "actively fighting". `_combat_monster` takes priority because it's
 	# the authoritative engaged target; otherwise we paint _selected_target.
 	var t: Node = _combat_monster if _combat_monster != null else _selected_target
+	# Defensive: if the selected target was freed between frames (admin
+	# delete, chunk stream-out, scene clean), the panel would otherwise
+	# keep showing stale label text. Clear it so the UI matches reality.
+	if t != null and not is_instance_valid(t):
+		if not _in_combat:
+			_clear_target()
+		return
 	if t != null and is_instance_valid(t):
 		var m_hp  := t.get("current_hp") as int
 		var m_max := t.get("max_hp")     as int
@@ -2875,7 +2929,7 @@ func _update_combat_ui() -> void:
 		_target_lvl_lbl.text   = "Level %d" % m_lv
 		_target_hp_lbl.text    = "%d / %d HP" % [m_hp, m_max]
 		_target_hp_bar.max_value = m_max
-		_target_hp_bar.value     = m_hp
+		_tween_bar(_target_hp_bar, float(m_hp))
 		if not (t.get("is_alive") as bool):
 			# Target died — drop selection but keep panel open with style
 			# toggles + player HP. _on_combat_ended already runs through
@@ -2900,7 +2954,45 @@ func _update_combat_ui() -> void:
 	var p_max := GameManager.get_max_hp()
 	_combat_plr_lbl.text      = "You   %d / %d HP" % [p_hp, p_max]
 	_combat_plr_bar.max_value = p_max
-	_combat_plr_bar.value     = p_hp
+	_tween_bar(_combat_plr_bar, float(p_hp))
+
+
+## 0.2s gold flash over the combat panel's target section on a kill.
+## Pairs with the quest_complete chime fired alongside. Reads as a clear
+## "the fight ended in your favor" cue without disrupting the player's
+## attention from the next target.
+func _flash_target_section_gold() -> void:
+	if _target_section == null or not is_instance_valid(_target_section):
+		return
+	var flash := ColorRect.new()
+	flash.color = Color(1.0, 0.85, 0.20, 0.55)
+	flash.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	flash.anchor_right = 1.0
+	flash.anchor_bottom = 1.0
+	_target_section.add_child(flash)
+	var tw := flash.create_tween()
+	tw.tween_property(flash, "modulate:a", 0.0, 0.20) \
+		.set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_QUAD)
+	tw.tween_callback(func() -> void: flash.queue_free())
+
+
+## Smoothly animate a ProgressBar to its new value over 0.3s with an
+## EASE_OUT curve. HP bars currently jump when damage applies — tweening
+## adds weight to every hit and reads as "the system is breathing." Kills
+## any prior tween on the bar so rapid-fire hits don't stack tweens
+## fighting each other.
+func _tween_bar(bar: ProgressBar, target_value: float) -> void:
+	if bar == null:
+		return
+	target_value = clampf(target_value, 0.0, bar.max_value)
+	var prev: Variant = bar.get_meta("_hp_tween", null)
+	if prev != null and prev is Tween and (prev as Tween).is_valid():
+		(prev as Tween).kill()
+	var tw := create_tween()
+	tw.tween_property(bar, "value", target_value, 0.3) \
+		.set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_QUAD)
+	bar.set_meta("_hp_tween", tw)
+
 
 ## Engage gate. Returns {ok: bool, reason: String}:
 ##   - ok=false, reason="Too far" — target > ATTACK_INITIATE_RANGE px away
@@ -2945,6 +3037,11 @@ func _combat_log_append(line: String) -> void:
 
 func _combat_tick(delta: float) -> void:
 	if _combat_monster == null or not is_instance_valid(_combat_monster):
+		# Monster despawned out from under us (admin delete, chunk
+		# stream-out, server purge). Surface SOMETHING in the combat log
+		# so the player isn't left wondering why their target vanished.
+		# Plain "Combat ended." beats a silent panel collapse.
+		_combat_log_append("Combat ended — your target has vanished.")
 		_on_combat_ended()
 		return
 
@@ -2955,12 +3052,22 @@ func _combat_tick(delta: float) -> void:
 			_combat_join_pending = false
 			_combat_server       = false
 			_combat_log_append("[Server slow — fighting locally.]")
+			# Local fallback — Flee is meaningful again (just stops the
+			# local fight without a server hop).
+			if _flee_btn != null:
+				_flee_btn.disabled = false
+				_flee_btn.tooltip_text = ""
 
 	if not (_combat_monster.get("is_alive") as bool):
 		# In server mode the kill reward is granted by the server (via World);
 		# only award locally when fighting offline/fallback.
 		if not _combat_server:
 			_award_combat_xp()
+		# Gold flash on the target section + quest-complete chime. The
+		# combat log line on its own is too easy to miss in a brawl;
+		# the flash + audio cue make the kill register every time.
+		_flash_target_section_gold()
+		AudioManager.play_ui("quest_complete")
 		_on_combat_ended()
 		return
 
@@ -2992,8 +3099,17 @@ func _combat_tick(delta: float) -> void:
 			var in_range := false
 			if _player != null:
 				var mdist := (_combat_monster as Node2D).global_position.distance_to((_player as Node2D).global_position)
-				in_range = mdist <= 55.0
+				in_range = mdist <= MELEE_HIT_RANGE
 			if in_range:
+				# Guard the player reference — if the player just logged
+				# out or was freed (race between the 2s monster tick and
+				# logout), skip the damage apply entirely. The vignette
+				# and damage number both deref _player; without this
+				# guard they spawn at a null position and the combat log
+				# would still chat "X hits you for N" against a dead
+				# session.
+				if _player == null or not is_instance_valid(_player):
+					return
 				var m_atk := _combat_monster.get("attack") as int
 				var raw   := m_atk + randi() % 3
 				var def   := GameManager.get_defense_power()
@@ -3009,7 +3125,11 @@ func _combat_tick(delta: float) -> void:
 
 	_update_combat_ui()
 
-const MELEE_HIT_RANGE := 52.0   # ~1.5 tiles — must be adjacent to swing
+## Single source of truth for melee reach. The player's swing gate AND
+## the monster's bite-back gate both consult this constant — without
+## that, the player feels "I can hit but they can't" or vice versa,
+## which reads as a bug even when neither system is wrong on its own.
+const MELEE_HIT_RANGE := 55.0   # ~1.7 tiles, generous enough that visual reach matches damage reach
 const _PROJECTILE := preload("res://scripts/Projectile.gd")
 
 ## Begin an attack: play the visible action (swing / projectile) and apply damage
@@ -3222,6 +3342,11 @@ func _build_dmg_layer() -> void:
 func _show_damage_vignette() -> void:
 	if _dmg_layer == null:
 		_build_dmg_layer()
+	# Punchy 0.10s camera shake to pair with the red vignette — red bars
+	# alone don't sell impact. ±4 px feels weighty without becoming
+	# nauseating. Targets the player's Camera2D via offset, which the
+	# existing _update_camera helper writes to.
+	_shake_camera(4.0, 0.10)
 	# `wrapper` rather than `wrap` — strict mode flags `wrap` as a shadow
 	# of @GlobalScope.wrap() (a math helper).
 	var wrapper := Control.new()
@@ -3262,6 +3387,36 @@ func _show_damage_vignette() -> void:
 	tw.tween_property(wrapper, "modulate:a", 0.0, 0.2) \
 		.set_ease(Tween.EASE_IN).set_trans(Tween.TRANS_QUAD)
 	tw.chain().tween_callback(func() -> void: wrapper.queue_free())
+
+
+## Brief camera offset shake on player damage. Looks up the player's
+## Camera2D (it lives as a child of Player), records the current offset,
+## tweens it to a random direction, then back to zero. 8 small jolts in
+## one short window give the "kick" feel without the slow swing a single
+## big offset produces.
+func _shake_camera(magnitude_px: float, duration_s: float) -> void:
+	if _player == null:
+		_player = get_tree().get_first_node_in_group("player")
+	if _player == null:
+		return
+	var cam: Camera2D = null
+	for child in _player.get_children():
+		if child is Camera2D:
+			cam = child as Camera2D
+			break
+	if cam == null:
+		return
+	# Eight jolts across the duration window — short enough to read as a
+	# single hit rather than a sustained earthquake.
+	var steps := 8
+	var step_dur: float = duration_s / float(steps)
+	var tw := create_tween()
+	for i in range(steps):
+		var ang := randf() * TAU
+		var off := Vector2(cos(ang), sin(ang)) * (magnitude_px * (1.0 - float(i) / float(steps)))
+		tw.tween_property(cam, "offset", off, step_dur).set_trans(Tween.TRANS_SINE)
+	tw.tween_property(cam, "offset", Vector2.ZERO, step_dur)
+
 
 func _on_player_died() -> void:
 	var flash := ColorRect.new()
@@ -3429,8 +3584,10 @@ func _refresh_thrall_tab() -> void:
 		# Up / Down buttons
 		var up_btn := Button.new()
 		up_btn.text = "↑"
-		up_btn.custom_minimum_size = Vector2(18, 18)
-		up_btn.add_theme_font_size_override("font_size", 8)
+		# Touch-target — was 18×18 (way below 44 px finger). 32×32 fits
+		# the side-bar layout and is finger-tappable.
+		up_btn.custom_minimum_size = Vector2(32, 32)
+		up_btn.add_theme_font_size_override("font_size", 14)
 		up_btn.add_theme_stylebox_override("normal",  _rs(RS_BTN_N, RS_BORDER.darkened(0.5), 1))
 		up_btn.add_theme_stylebox_override("hover",   _rs(RS_BTN_H, RS_BORDER, 1))
 		up_btn.add_theme_stylebox_override("pressed", _rs(RS_BTN_A, RS_GOLD,   1))
@@ -3444,8 +3601,8 @@ func _refresh_thrall_tab() -> void:
 
 		var dn_btn := Button.new()
 		dn_btn.text = "↓"
-		dn_btn.custom_minimum_size = Vector2(18, 18)
-		dn_btn.add_theme_font_size_override("font_size", 8)
+		dn_btn.custom_minimum_size = Vector2(32, 32)   # touch-friendly
+		dn_btn.add_theme_font_size_override("font_size", 14)
 		dn_btn.add_theme_stylebox_override("normal",  _rs(RS_BTN_N, RS_BORDER.darkened(0.5), 1))
 		dn_btn.add_theme_stylebox_override("hover",   _rs(RS_BTN_H, RS_BORDER, 1))
 		dn_btn.add_theme_stylebox_override("pressed", _rs(RS_BTN_A, RS_GOLD,   1))
@@ -3469,8 +3626,8 @@ func _refresh_thrall_tab() -> void:
 		# Remove button
 		var rm_btn := Button.new()
 		rm_btn.text = "✕"
-		rm_btn.custom_minimum_size = Vector2(18, 18)
-		rm_btn.add_theme_font_size_override("font_size", 8)
+		rm_btn.custom_minimum_size = Vector2(32, 32)   # touch-friendly
+		rm_btn.add_theme_font_size_override("font_size", 13)
 		rm_btn.add_theme_stylebox_override("normal",  _rs(RS_BTN_N, RS_BORDER.darkened(0.5), 1))
 		rm_btn.add_theme_stylebox_override("hover",   _rs(RS_BTN_H, RS_BORDER, 1))
 		rm_btn.add_theme_stylebox_override("pressed", _rs(RS_BTN_A, RS_GOLD,   1))
@@ -3641,8 +3798,8 @@ func _build_bank_window() -> void:
 
 	var close_btn := Button.new()
 	close_btn.text = "✕"
-	close_btn.custom_minimum_size = Vector2(26, 26)
-	close_btn.add_theme_font_size_override("font_size", 11)
+	close_btn.custom_minimum_size = Vector2(36, 36)   # touch-friendly (was 26×26)
+	close_btn.add_theme_font_size_override("font_size", 14)
 	close_btn.add_theme_stylebox_override("normal",  _rs(RS_BTN_N, RS_BORDER.darkened(0.4), 2))
 	close_btn.add_theme_stylebox_override("hover",   _rs(RS_BTN_H, RS_BORDER, 2))
 	close_btn.add_theme_stylebox_override("pressed", _rs(RS_BTN_A, RS_GOLD,   2))
@@ -4543,11 +4700,42 @@ func _construct(recipe: Dictionary) -> void:
 	if rid == "stronghold" or rid == "banner" or rid == "outpost":
 		_build_warband_structure(rid, recipe)
 		return
+	# Wall + fortified_wall recipes: place at the player's position rather
+	# than adding an inventory item. The recipe id is "<wood>_wall" or
+	# "<wood>_fortified_wall" — split to derive the subtype + wood tier.
+	if rid.ends_with("_wall") or rid.ends_with("_fortified_wall"):
+		_build_wall(recipe)
+		return
 	for ing: Dictionary in recipe["input"] as Array:
 		if not GameManager.remove_item_qty(ing["id"] as String, ing["qty"] as int):
 			return
 	GameManager.add_item(recipe["id"] as String, recipe["name"] as String, 1, recipe["color"] as Color)
 	GameManager.add_xp("construction", recipe["xp"] as int)
+	_refresh_construction()
+
+## Player-crafted wall placement. Mirrors _build_farm_plot — deducts
+## materials, grants XP, then RPCs the server to insert a world_entity at
+## the player's current position. Server does its own construction-level
+## check but does NOT re-validate materials (client already deducted).
+func _build_wall(recipe: Dictionary) -> void:
+	for ing: Dictionary in recipe["input"] as Array:
+		if GameManager.get_item_qty(ing["id"] as String) < (ing["qty"] as int):
+			Events.chat_message.emit("You lack the materials for a %s." % recipe["name"])
+			return
+	var players := get_tree().get_nodes_in_group("player")
+	if players.is_empty():
+		return
+	for ing: Dictionary in recipe["input"] as Array:
+		GameManager.remove_item_qty(ing["id"] as String, ing["qty"] as int)
+	GameManager.add_xp("construction", recipe["xp"] as int)
+	var pos := (players[0] as Node2D).global_position
+	var rid := str(recipe["id"])
+	var subtype: String = "fortified_wall" if rid.ends_with("_fortified_wall") else "wall"
+	var wood: String = rid.replace("_fortified_wall", "").replace("_wall", "")
+	var c: Color = recipe["color"] as Color
+	NetworkManager.send_build_wall(subtype, wood, pos.x, pos.y,
+		str(recipe["name"]),
+		[c.r, c.g, c.b, c.a])
 	_refresh_construction()
 
 func _build_farm_plot(recipe: Dictionary) -> void:
@@ -4980,9 +5168,28 @@ func _on_shop_close_pressed() -> void:
 	_shop_current_shop_id = ""
 
 # ── XP / Item toasts ─────────────────────────────────────────────────────────
+## Coalescer for XP toasts. Without this, four parallel +5 Combat XP
+## grants in the same combat tick spawn four separate floating labels
+## that look like a glitch. Now a 0.5s window per skill batches them
+## into a single "+20 Combat XP" toast.
+var _xp_toast_buckets: Dictionary = {}    # skill → {amount: int, timer: Timer}
+
 func _on_toast_xp(skill: String, amount: int) -> void:
-	var col: Color = SKILL_COLORS.get(skill, RS_GOLD) as Color
-	_show_toast("+%d %s XP" % [amount, skill.capitalize()], col)
+	if _xp_toast_buckets.has(skill):
+		var bucket: Dictionary = _xp_toast_buckets[skill]
+		bucket["amount"] = int(bucket["amount"]) + amount
+		return
+	# First grant in this window — open a bucket with a one-shot timer.
+	var t := get_tree().create_timer(0.5)
+	_xp_toast_buckets[skill] = {"amount": amount, "timer": t}
+	t.timeout.connect(func() -> void:
+		if not _xp_toast_buckets.has(skill):
+			return
+		var b: Dictionary = _xp_toast_buckets[skill]
+		var total: int = int(b["amount"])
+		_xp_toast_buckets.erase(skill)
+		var col: Color = SKILL_COLORS.get(skill, RS_GOLD) as Color
+		_show_toast("+%d %s XP" % [total, skill.capitalize()], col))
 
 func _on_toast_item(item_name: String, qty: int) -> void:
 	_show_toast("+%d %s" % [qty, item_name], RS_TEXT)
@@ -5232,6 +5439,15 @@ func _show_top_toast(text: String, col: Color) -> void:
 ## could see and right-click. Each entry: { "label": String, "cb": Callable }.
 func _action_menu_options(node: Node) -> Array:
 	if node.is_in_group("monster"):
+		# Hide Attack entirely on a corpse — the action would race the
+		# despawn and spawn-then-collapse the combat panel. Examine
+		# still works as a quick "what was this" peek.
+		var monster_alive: bool = bool(node.get("is_alive")) if node.get("is_alive") != null else true
+		if not monster_alive:
+			return [
+				{"label": "Examine", "cb": func() -> void:
+					Events.chat_message.emit("> %s — slain." % str(node.get("display_name")))},
+			]
 		return [
 			{"label": "Attack", "cb": func() -> void:
 				_select_target(node)
@@ -5288,10 +5504,16 @@ func _action_menu_options(node: Node) -> Array:
 		"door", "building":
 			return [{"label": "Enter", "cb": func() -> void:
 				Events.player_interacted.emit(node)}]
+		"exit_door":
+			return [{"label": "Leave building", "cb": func() -> void:
+				Events.player_interacted.emit(node)}]
 		"banner":
 			return [{"label": "Raid / Reinforce", "cb": func() -> void:
 				Events.player_interacted.emit(node)}]
 		"stronghold", "outpost":
+			return [{"label": "Inspect", "cb": func() -> void:
+				Events.player_interacted.emit(node)}]
+		"wall", "fortified_wall":
 			return [{"label": "Inspect", "cb": func() -> void:
 				Events.player_interacted.emit(node)}]
 		"seal_statue":
