@@ -1226,14 +1226,6 @@ def _migrate_v12(conn) -> None:
     """)
 
 
-_MIGRATIONS = [
-    _migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4,
-    _migrate_v5, _migrate_v6, _migrate_v7, _migrate_v8,
-    _migrate_v9, _migrate_v10, _migrate_v11, _migrate_v12, _migrate_v13,
-    _migrate_v14, _migrate_v15,
-]
-
-
 def _migrate_v15(conn) -> None:
     """Tile editor extras: per-tile color tint (hue + brightness) and
     per-tile passability flag. All default to neutral (no tint, passable)
@@ -1252,6 +1244,14 @@ def _migrate_v15(conn) -> None:
     if "passable" not in cols:
         conn.execute(
             "ALTER TABLE tile_overrides ADD COLUMN passable INTEGER NOT NULL DEFAULT 1")
+
+
+_MIGRATIONS = [
+    _migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4,
+    _migrate_v5, _migrate_v6, _migrate_v7, _migrate_v8,
+    _migrate_v9, _migrate_v10, _migrate_v11, _migrate_v12, _migrate_v13,
+    _migrate_v14, _migrate_v15,
+]
 
 
 def _hash(password: str, salt: str) -> str:
