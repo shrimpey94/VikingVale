@@ -14,15 +14,38 @@ Spawn → Build Phase → Wave → Reward → Build Phase → Wave → repeat fo
 
 ---
 
-## Starting State
+## Starting State — MMO Character Snapshot
 
-- Max level all skills.
-- Full best-tier armor equipped.
-- Empty weapon slot — chest of materials nearby to craft your preferred
-  weapon (or the unlocked starting weapon blueprint if you've earned one
-  via meta-progression).
-- Ammo / rune chest nearby.
-- Empty plot of land to build your base on.
+Endless does **not** hand you a fresh max-level character. It snapshots
+your MMO character at run start. See how far your levelled build can go
+with only the gear you've actually earned. This is Endless's core
+identity: progression-friendly, uses what you've built, rewards MMO
+investment.
+
+### Snapshot rules
+
+- **Levels**: snapshot from the player's MMO row at run start. If your
+  MMO character is level 42 Attack / 60 Woodcutting, the run begins at
+  those levels. No auto-max.
+- **Inventory + equipment**: bank contents + current inventory +
+  equipped gear at run start. Only items you have **crafted, personally
+  earned (drops/gathering), purchased from a vendor, or bought from the
+  Auction House** carry in. Admin-granted items count only if the admin
+  flagged them as such.
+- **Snapshot semantics**: it's a COPY, not a transfer. Items are
+  **not** consumed from the MMO bank when the run starts. Run ends →
+  whatever the Endless character had is discarded; the MMO bank is
+  untouched.
+- **Naked-fresh accounts** enter with no gear — they haven't earned
+  anything yet, so there's nothing to snapshot. Fair.
+- **Loot during the run** is available only inside the run. Nothing
+  carries back to MMO.
+- **Meta-progression unlocks** (see below) are ADDITIVE to the
+  snapshot: your unlocked starting weapon blueprint replaces the empty
+  weapon-chest fallback for players whose snapshot didn't include a
+  weapon.
+- **Nearby world**: empty plot of land to build your base on. Ammo /
+  rune chest nearby for consumables the snapshot didn't include.
 
 ---
 
@@ -182,8 +205,16 @@ migration adds the column. Each entry is a string id like
 `"cosmetic_bear_pelt"`.
 
 **Pre-run picker:** before starting a run, player picks one of their
-unlocked starting weapons. Default = empty weapon chest (current
-behavior). Picker appears as a small modal on the Endless mode select.
+unlocked starting weapons. Default = whatever weapon their MMO snapshot
+already includes (see Snapshot rules above). If the snapshot has no
+weapon AND no meta-unlocked blueprint is picked, the empty weapon chest
+falls back. Picker appears as a small modal on the Endless mode select.
+
+**Additive to snapshot:** meta-progression unlocks LAYER on top of the
+snapshot — they don't replace it. Snapshot brings your levels + your
+earned inventory; the blueprint picker adds an extra starting weapon on
+top. So a mid-progression MMO player entering Endless still benefits
+from wave-10 unlocks even though their snapshot already had gear.
 
 **Decorations** are placeable inside the base plot during build phase.
 Cosmetic only — no stats, no gameplay effects.
@@ -193,7 +224,7 @@ Play + Endless) as visual props.
 
 This is **small by design** — Endless is meant to be loose / replayable,
 not a grind to permanent power. Cosmetics + decorations give flavor
-without breaking the "fresh start every run" feel.
+without breaking the "snapshot-then-run" feel.
 
 ---
 
@@ -234,8 +265,54 @@ Stored in a new `endless_stats` SQLite table, one row per player_id.
 - ❌ Build phase timer / UI
 - ❌ Roguelite perk picker modal UI
 - ✅ Perk / player-modifier stack — **already exists** as `PlayerMods.gd` autoload (from backstory work)
+- ❌ **Character snapshot service** — server-side, on Endless entry: reads the MMO row, copies levels + bank + inventory + equipped gear into an ephemeral run character. Must respect the "only crafted / earned items" rule — needs an `item_source` (or `acquired_via`) tracking field on the inventory schema, OR a grandfathering heuristic for existing items.
 - ❌ Cooperative endless lobby
 - ❌ Endless leaderboard panel
 - ❌ Meta-progression unlock store + pre-run picker
 
 The perk hook is the only existing prereq. Everything else is greenfield. Recommend building the wave spawner + build-phase UI first since they're the load-bearing core; perks layer on top without any architectural risk.
+
+---
+
+## Entry Points
+
+Two ways in, both ship:
+
+1. **Main menu button** — the login screen grows an "∞ Endless" button
+   next to "Enter World" and "Quick Play". Pick post-authentication so
+   the account exists before mode selection. Clicking opens the pre-run
+   modal (snapshot summary + weapon blueprint picker + difficulty
+   toggle) then drops the player into a fresh Endless world.
+2. **In-world portal** — an `endless_portal` interactable (ancient
+   runestone visual) admin-placed in MMO towns. Right-click → "Enter
+   Endless" opens the same pre-run modal. Clicking it cleanly ends the
+   MMO session; the player's MMO character bank + gear stay untouched
+   (snapshot is a copy). Coming back = a normal relog.
+
+Both entry paths use the same server handler and the same modal. The
+portal is a convenience shortcut for players already inside the MMO;
+neither is mechanically different.
+
+---
+
+## What Crosses Between Modes
+
+| Thing | MMO | Endless | Quick Play |
+|---|---|---|---|
+| Cosmetics unlocked | earnable + visible | earnable + visible | earnable + visible |
+| Levels / XP | primary source | snapshot IN (read-only) | max-everything |
+| Crafted items | primary source | snapshot IN (read-only) | ignored |
+| Achievements | earnable | earnable | earnable |
+| Stat card / leaderboard | MMO leaderboard | Endless leaderboard | Quick Play leaderboard |
+| Meta-progression unlocks | — | Endless-only | — |
+
+**Cosmetics** and **achievements** cross freely. A skin unlocked from
+an Endless wave-20 milestone is wearable on the MMO character. An
+achievement fired in Endless credits the MMO account.
+
+**Stat cards stay independent** — three separate leaderboards, three
+separate "here's your record" views. No composite score.
+
+**Endless meta-unlocks** (starting weapon blueprints, decorations) are
+scoped to Endless runs only. They don't clutter the MMO inventory or
+affect QP loadouts.

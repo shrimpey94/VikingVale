@@ -24,10 +24,100 @@ const PAINT_BIOMES: Array = [
 	"wall_wood", "wall_stone",
 	# Exterior additions.
 	"sand", "dirt_path", "shallow_water", "farm_crops",
+	# Hills (grass-family + non-grass).
+	"plains_hills", "oak_hills", "pine_hills", "snow_hills",
+	"ashlands_hills", "helheim_hills", "rocky_hills", "sand_hills",
+	# Transitions.
+	"forest_edge", "swamp_edge", "shore_grass", "snow_line", "cliff_scree",
+	# Terrain variety.
+	"meadow", "tundra", "clearing", "moss_rock", "volcanic_glass",
+	# Water / beach extras.
+	"reef", "tidepool", "wet_sand", "driftwood_shore",
+	# Bridges — walkable over water.
+	"wood_bridge", "stone_bridge",
 	"(erase)",
 ]
 
-enum Mode { OFF, PLACE, DELETE, MOVE, TILE, FLOOD, TINT, PASSABILITY }
+# Category-ordered swatch layout for the Tiles tab. Each entry: category
+# header string + the biome names to place under it in the swatch grid.
+# Kept as a nested Array so a designer can reorder without touching the
+# picker logic. Tiles tab renders one Label row per category then a
+# GridContainer with one Button per biome.
+const _TILE_CATEGORIES: Array = [
+	["Grass",       ["plains", "meadow", "tundra", "clearing"]],
+	["Forest",      ["oak_forest", "pine_forest", "dark_forest"]],
+	["Wetlands",    ["swamp", "farm_crops"]],
+	["Rock/Mtn",    ["mountain", "rocky", "cliff"]],
+	["Water",       ["coast", "ocean", "shallow_water", "reef", "tidepool"]],
+	["Path/Town",   ["town", "road", "dirt_path"]],
+	["Snow/Fire",   ["snow", "helheim", "ashlands"]],
+	["Beach",       ["sand", "wet_sand", "driftwood_shore"]],
+	["Hills",       ["plains_hills", "oak_hills", "pine_hills", "snow_hills",
+					 "ashlands_hills", "helheim_hills", "rocky_hills", "sand_hills"]],
+	["Transitions", ["forest_edge", "swamp_edge", "shore_grass", "snow_line", "cliff_scree"]],
+	["Variety",     ["moss_rock", "volcanic_glass"]],
+	["Bridges",     ["wood_bridge", "stone_bridge"]],
+	["Interior",    ["wood_floor", "stone_floor", "red_carpet", "hearth_stone",
+					 "wall_wood", "wall_stone"]],
+]
+
+enum Mode { OFF, PLACE, DELETE, MOVE, TILE, FLOOD, TINT, PASSABILITY, STRUCTURE }
+
+## Category-grouped roster of all 18 Construction buildables. Same shape as
+## _TILE_CATEGORIES — the Structures tab renders one Label per category
+## then the buildables underneath in an OptionButton (or grid). Kinds map
+## to interactable_type_str values that Interactable.gd knows how to draw.
+const _STRUCTURE_CATEGORIES: Array = [
+	["Defensive", ["wall", "fortified_wall", "fence", "gate",
+		"watchtower", "guard_tower"]],
+	["Housing",   ["house_frame", "large_house", "grand_hall", "clan_hall"]],
+	["Civic",     ["well", "altar", "dock", "market_stall",
+		"site_marker", "portal_shrine"]],
+	["Utility",   ["workbench", "smith_station", "bank_chest",
+		"armory_rack", "plant_bed"]],
+]
+
+## Human-readable labels for the structures picker. Keys match kind strings
+## in _STRUCTURE_CATEGORIES.
+const _STRUCTURE_LABELS: Dictionary = {
+	"wall": "Wall", "fortified_wall": "Fortified Wall",
+	"fence": "Fence", "gate": "Gate",
+	"watchtower": "Watchtower", "guard_tower": "Guard Tower",
+	"house_frame": "House Frame", "large_house": "Large House",
+	"grand_hall": "Grand Hall", "clan_hall": "Clan Hall",
+	"well": "Well", "altar": "Altar", "dock": "Dock",
+	"market_stall": "Market Stall", "site_marker": "Site Marker",
+	"portal_shrine": "Portal Shrine",
+	"workbench": "Workbench", "smith_station": "Smith Station",
+	"bank_chest": "Bank Chest", "armory_rack": "Armory Rack",
+	"plant_bed": "Plant Bed",
+}
+
+## Which buildables consume bars (metal tier picker becomes visible).
+const _STRUCTURE_USES_BAR: Dictionary = {
+	"smith_station": true, "bank_chest": true, "armory_rack": true,
+	"fortified_wall": true, "clan_hall": true, "grand_hall": true,
+}
+
+## Wood tier options + display colors — mirrors HUD.gd _CONSTR_WOOD.
+const _WOOD_TIERS: Array = [
+	["oak",      "Oak",      Color(0.55, 0.36, 0.18)],
+	["pine",     "Pine",     Color(0.42, 0.30, 0.14)],
+	["cherry",   "Cherry",   Color(0.72, 0.38, 0.42)],
+	["ironwood", "Ironwood", Color(0.30, 0.18, 0.08)],
+	["frost",    "Frost",    Color(0.72, 0.90, 0.98)],
+	["ancient",  "Ancient",  Color(0.55, 0.40, 0.12)],
+]
+
+## Metal tier options for buildables that consume bars.
+const _BAR_TIERS: Array = [
+	["copper_bar",  "Copper",  Color(0.72, 0.42, 0.22)],
+	["iron_bar",    "Iron",    Color(0.55, 0.55, 0.60)],
+	["gold_bar",    "Gold",    Color(0.88, 0.72, 0.12)],
+	["mithril_bar", "Mithril", Color(0.40, 0.65, 0.90)],
+	["adamant_bar", "Adamant", Color(0.20, 0.65, 0.30)],
+	["runite_bar",  "Runite",  Color(0.65, 0.20, 0.82)],
+]
 
 # Brush sizes for TILE / TINT / PASSABILITY modes. 1 = single click.
 # 3/5/7 paint odd-sized squares centered on the cursor tile. The FLOOD
@@ -41,7 +131,6 @@ var _panel:     PanelContainer = null
 var _overlay:   Control        = null
 var _toggle:    Button         = null
 var _type_opt:  OptionButton   = null
-var _biome_opt: OptionButton   = null
 var _mode_lbl:  Label          = null
 
 # Level adjuster shown only when the picked entity is a monster. SpinBox
@@ -57,9 +146,35 @@ var _level_spin: SpinBox        = null
 var _world_section: VBoxContainer = null
 var _items_section: VBoxContainer = null
 var _accounts_section: VBoxContainer = null
+# Tiles tab — swatch grid picker + moved tile-editing controls + how-to help.
+var _tiles_section: VBoxContainer = null
 var _tab_world_btn: Button        = null
 var _tab_items_btn: Button        = null
 var _tab_accounts_btn: Button     = null
+var _tab_tiles_btn:  Button        = null
+var _tab_structures_btn: Button    = null
+var _structures_section: VBoxContainer = null
+# Structures tab state — the kind + wood/bar tier the admin has picked.
+var _selected_structure_kind: String = "wall"
+var _selected_wood_tier: String = "oak"
+var _selected_bar_tier: String = "iron_bar"
+var _structure_kind_opt: OptionButton = null
+var _structure_wood_opt: OptionButton = null
+var _structure_bar_opt:  OptionButton = null
+var _structure_bar_row:  HBoxContainer = null
+# Selected biome (drives paint). Replaces the old `_biome_opt` selected id
+# — swatch grid buttons set this directly. `(erase)` still uses the special
+# button at the bottom of the grid.
+var _selected_biome: String = "plains"
+# Container for the swatch Button widgets — used to re-tint the selected
+# swatch's border when the pick changes.
+var _swatch_buttons: Dictionary = {}   # biome name → Button
+var _help_body: VBoxContainer = null
+var _help_toggle_btn: Button = null
+# Tint editor widgets — numeric readouts + preview swatch.
+var _tint_h_label: Label = null
+var _tint_v_label: Label = null
+var _tint_preview: ColorRect = null
 # Accounts tab state
 var _accounts_search: LineEdit    = null
 var _accounts_list_root: VBoxContainer = null
@@ -139,22 +254,34 @@ func _build_panel() -> void:
 	var tab_row := HBoxContainer.new()
 	tab_row.add_theme_constant_override("separation", 4)
 	vb.add_child(tab_row)
-	_tab_world_btn    = _tab_button("World", true)
-	_tab_items_btn    = _tab_button("Items", false)
-	_tab_accounts_btn = _tab_button("Accounts", false)
+	_tab_world_btn      = _tab_button("World", true)
+	_tab_tiles_btn      = _tab_button("Tiles", false)
+	_tab_structures_btn = _tab_button("Structures", false)
+	_tab_items_btn      = _tab_button("Items", false)
+	_tab_accounts_btn   = _tab_button("Accounts", false)
 	_tab_world_btn.pressed.connect(func() -> void: _show_tab("world"))
+	_tab_tiles_btn.pressed.connect(func() -> void: _show_tab("tiles"))
+	_tab_structures_btn.pressed.connect(func() -> void: _show_tab("structures"))
 	_tab_items_btn.pressed.connect(func() -> void: _show_tab("items"))
 	_tab_accounts_btn.pressed.connect(func() -> void: _show_tab("accounts"))
 	tab_row.add_child(_tab_world_btn)
+	tab_row.add_child(_tab_tiles_btn)
+	tab_row.add_child(_tab_structures_btn)
 	tab_row.add_child(_tab_items_btn)
 	tab_row.add_child(_tab_accounts_btn)
 
-	_world_section    = _build_world_section()
-	_items_section    = _build_items_section()
-	_accounts_section = _build_accounts_section()
+	_world_section      = _build_world_section()
+	_tiles_section      = _build_tiles_section()
+	_structures_section = _build_structures_section()
+	_items_section      = _build_items_section()
+	_accounts_section   = _build_accounts_section()
 	vb.add_child(_world_section)
+	vb.add_child(_tiles_section)
+	vb.add_child(_structures_section)
 	vb.add_child(_items_section)
 	vb.add_child(_accounts_section)
+	_tiles_section.visible = false
+	_structures_section.visible = false
 	_items_section.visible = false
 	_accounts_section.visible = false
 	# Wire the account-list response signal once.
@@ -173,20 +300,15 @@ func _build_world_section() -> VBoxContainer:
 	_mode_lbl.add_theme_color_override("font_color", UITheme.GOLD)
 	vb.add_child(_mode_lbl)
 
+	# World tab handles entity placement modes only. Tile / Tint / Passability
+	# / Flood + biome swatch grid + tint sliders all live in the Tiles tab.
 	var row := HBoxContainer.new()
 	row.add_theme_constant_override("separation", 4)
 	vb.add_child(row)
 	row.add_child(_mode_button("Place",  Mode.PLACE))
 	row.add_child(_mode_button("Delete", Mode.DELETE))
 	row.add_child(_mode_button("Move",   Mode.MOVE))
-
-	var row2 := HBoxContainer.new()
-	row2.add_theme_constant_override("separation", 4)
-	vb.add_child(row2)
-	row2.add_child(_mode_button("Tile",  Mode.TILE))
-	row2.add_child(_mode_button("Tint",  Mode.TINT))
-	row2.add_child(_mode_button("Pass",  Mode.PASSABILITY))
-	row2.add_child(_mode_button("Off",   Mode.OFF))
+	row.add_child(_mode_button("Off",    Mode.OFF))
 
 	var el := Label.new()
 	el.text = "Entity:"
@@ -223,41 +345,7 @@ func _build_world_section() -> VBoxContainer:
 	# is starting on (defaults to 0).
 	_on_entity_picked(_type_opt.selected if _type_opt.selected >= 0 else 0)
 
-	var bl := Label.new()
-	bl.text = "Tile biome:"
-	bl.add_theme_color_override("font_color", UITheme.DIM)
-	bl.add_theme_font_size_override("font_size", 11)
-	vb.add_child(bl)
-	_biome_opt = OptionButton.new()
-	for i in range(PAINT_BIOMES.size()):
-		_biome_opt.add_item(str(PAINT_BIOMES[i]), i)
-	vb.add_child(_biome_opt)
-
-	# Brush size selector — applies to Tile / Tint / Pass modes. 1×1 is the
-	# default; the FLOOD entry is a pseudo-size that switches to flood fill.
-	var brush_lbl := Label.new()
-	brush_lbl.text = "Brush:"
-	brush_lbl.add_theme_color_override("font_color", UITheme.DIM)
-	brush_lbl.add_theme_font_size_override("font_size", 11)
-	vb.add_child(brush_lbl)
-	_brush_size_opt = OptionButton.new()
-	for s: int in BRUSH_SIZES:
-		_brush_size_opt.add_item("%d×%d" % [s, s])
-	_brush_size_opt.add_item("Flood fill")    # special "size"
-	_brush_size_opt.item_selected.connect(_on_brush_size_selected)
-	vb.add_child(_brush_size_opt)
-
-	# Tint sliders — used by Tint mode + optionally during Tile/biome paint
-	# to colorize each stamped tile. Each runs -100..100; 0 = no shift.
-	var tint_lbl := Label.new()
-	tint_lbl.text = "Tile tint (Tint mode):"
-	tint_lbl.add_theme_color_override("font_color", UITheme.DIM)
-	tint_lbl.add_theme_font_size_override("font_size", 11)
-	vb.add_child(tint_lbl)
-	_tint_h_slider = _make_tint_slider("Hue ±")
-	vb.add_child(_tint_h_slider)
-	_tint_v_slider = _make_tint_slider("Bright ±")
-	vb.add_child(_tint_v_slider)
+	# Tile / tint / passability widgets live in the Tiles tab now.
 
 	var save_btn := Button.new()
 	save_btn.text = "💾  Save Map / Refresh Minimap"
@@ -287,6 +375,446 @@ func _build_world_section() -> VBoxContainer:
 	hint.text = "Tile mode: drag to paint. Chat: /gold <name> <amt>, /spawn <type> <lvl>"
 	vb.add_child(hint)
 	return vb
+
+## Builds the Tiles tab — swatch grid picker grouped by category, tile-edit
+## mode row (Tile / Flood / Tint / Passability), brush size, tint sliders,
+## and a collapsible "How to edit tiles" help panel. Everything reads the
+## same NetworkManager RPCs the old World tab controls used; the only new
+## piece is `_selected_biome` replacing the old `_biome_opt.selected` lookup.
+func _build_tiles_section() -> VBoxContainer:
+	var vb := VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 6)
+
+	# ── Mode row — Tile / Flood / Tint / Passability. ──
+	var mode_row := HBoxContainer.new()
+	mode_row.add_theme_constant_override("separation", 4)
+	vb.add_child(mode_row)
+	mode_row.add_child(_mode_button("Tile", Mode.TILE))
+	mode_row.add_child(_mode_button("Flood", Mode.FLOOD))
+	mode_row.add_child(_mode_button("Tint", Mode.TINT))
+	mode_row.add_child(_mode_button("Pass", Mode.PASSABILITY))
+
+	# ── Biome swatch grid, category-grouped. ──
+	var swatch_lbl := Label.new()
+	swatch_lbl.text = "Biome (click a swatch to select):"
+	swatch_lbl.add_theme_color_override("font_color", UITheme.DIM)
+	swatch_lbl.add_theme_font_size_override("font_size", 11)
+	vb.add_child(swatch_lbl)
+
+	var ground := get_tree().get_first_node_in_group("ground")
+	for cat: Array in _TILE_CATEGORIES:
+		var cat_name: String = str(cat[0])
+		var biomes: Array = cat[1] as Array
+		# Category header row.
+		var header := Label.new()
+		header.text = cat_name
+		header.add_theme_color_override("font_color", UITheme.GOLD)
+		header.add_theme_font_size_override("font_size", 11)
+		vb.add_child(header)
+		# Grid of Buttons — one row per category, 8 swatches per row.
+		var grid := GridContainer.new()
+		grid.columns = 8
+		grid.add_theme_constant_override("h_separation", 3)
+		grid.add_theme_constant_override("v_separation", 3)
+		vb.add_child(grid)
+		for biome_name in biomes:
+			var name_str: String = str(biome_name)
+			var b := _make_swatch_button(name_str, cat_name, ground)
+			b.pressed.connect(func() -> void: _on_swatch_picked(name_str))
+			grid.add_child(b)
+			_swatch_buttons[name_str] = b
+	# If the atlas isn't ready yet (rare — bake takes ~2 frames), listen
+	# for atlas_ready and swap the color-chip swatches for real tile
+	# thumbnails when it fires.
+	if ground != null and ground.has_signal("atlas_ready"):
+		var already_ready: bool = bool(ground.get("_atlas_ready"))
+		if not already_ready:
+			ground.atlas_ready.connect(_refresh_swatches_with_atlas, CONNECT_ONE_SHOT)
+
+	# ── Erase button — dedicated row below the grid. ──
+	var erase_row := HBoxContainer.new()
+	erase_row.add_theme_constant_override("separation", 4)
+	vb.add_child(erase_row)
+	var erase_btn := Button.new()
+	erase_btn.text = "🧹  Erase (clears paint)"
+	erase_btn.add_theme_stylebox_override("normal", UITheme.sb(UITheme.BTN_N, UITheme.BORDER, 1))
+	erase_btn.add_theme_stylebox_override("hover",  UITheme.sb(UITheme.BTN_H, UITheme.GOLD, 1))
+	erase_btn.pressed.connect(func() -> void: _on_swatch_picked("(erase)"))
+	erase_row.add_child(erase_btn)
+
+	# ── Brush size — reused from the old World-tab widget. ──
+	var brush_lbl := Label.new()
+	brush_lbl.text = "Brush:"
+	brush_lbl.add_theme_color_override("font_color", UITheme.DIM)
+	brush_lbl.add_theme_font_size_override("font_size", 11)
+	vb.add_child(brush_lbl)
+	_brush_size_opt = OptionButton.new()
+	for s: int in BRUSH_SIZES:
+		_brush_size_opt.add_item("%d×%d" % [s, s])
+	_brush_size_opt.add_item("Flood fill")
+	_brush_size_opt.item_selected.connect(_on_brush_size_selected)
+	vb.add_child(_brush_size_opt)
+
+	# ── Tint editor — live numeric readouts + preview swatch + reset. ──
+	# The old sliders were bare and mysteriously "did nothing" because there
+	# was no feedback: user moved a slider, saw no readout, saw no preview,
+	# then clicked a tile and couldn't tell whether the effect landed.
+	# Now: sliders show `Hue: +0` / `Bright: +0` labels that update live;
+	# a small swatch to the right previews what a mid-grey tile would look
+	# like with the current tint. Click a tile in Tint mode to apply.
+	var tint_lbl := Label.new()
+	tint_lbl.text = "Tile tint (Tint mode — click to apply):"
+	tint_lbl.add_theme_color_override("font_color", UITheme.DIM)
+	tint_lbl.add_theme_font_size_override("font_size", 11)
+	vb.add_child(tint_lbl)
+	# Hue row.
+	var hue_row := HBoxContainer.new()
+	hue_row.add_theme_constant_override("separation", 6)
+	vb.add_child(hue_row)
+	_tint_h_label = Label.new()
+	_tint_h_label.text = "Hue: +0"
+	_tint_h_label.add_theme_font_size_override("font_size", 11)
+	_tint_h_label.custom_minimum_size = Vector2(66, 0)
+	hue_row.add_child(_tint_h_label)
+	_tint_h_slider = _make_tint_slider("Hue ±  (cool ← 0 → warm)")
+	_tint_h_slider.value_changed.connect(_on_tint_h_changed)
+	hue_row.add_child(_tint_h_slider)
+	# Brightness row.
+	var br_row := HBoxContainer.new()
+	br_row.add_theme_constant_override("separation", 6)
+	vb.add_child(br_row)
+	_tint_v_label = Label.new()
+	_tint_v_label.text = "Bright: +0"
+	_tint_v_label.add_theme_font_size_override("font_size", 11)
+	_tint_v_label.custom_minimum_size = Vector2(66, 0)
+	br_row.add_child(_tint_v_label)
+	_tint_v_slider = _make_tint_slider("Bright ±  (dark ← 0 → light)")
+	_tint_v_slider.value_changed.connect(_on_tint_v_changed)
+	br_row.add_child(_tint_v_slider)
+	# Preview swatch + reset. Shows the tint math applied to a mid-grey
+	# reference tile so the admin knows what to expect BEFORE clicking.
+	var preview_row := HBoxContainer.new()
+	preview_row.add_theme_constant_override("separation", 6)
+	vb.add_child(preview_row)
+	var pv_lbl := Label.new()
+	pv_lbl.text = "Preview:"
+	pv_lbl.add_theme_color_override("font_color", UITheme.DIM)
+	pv_lbl.add_theme_font_size_override("font_size", 11)
+	preview_row.add_child(pv_lbl)
+	_tint_preview = ColorRect.new()
+	_tint_preview.custom_minimum_size = Vector2(28, 20)
+	_tint_preview.color = Color(0.5, 0.5, 0.5)
+	preview_row.add_child(_tint_preview)
+	var reset_btn := Button.new()
+	reset_btn.text = "Reset tint"
+	reset_btn.tooltip_text = "Set sliders back to (0, 0) — click on a tile after to CLEAR its tint."
+	reset_btn.pressed.connect(_on_tint_reset)
+	preview_row.add_child(reset_btn)
+
+	# ── Collapsible How-To. ──
+	_help_toggle_btn = Button.new()
+	_help_toggle_btn.text = "▸ How to edit tiles"
+	_help_toggle_btn.add_theme_stylebox_override("normal", UITheme.sb(UITheme.BTN_N, UITheme.BORDER, 1))
+	_help_toggle_btn.add_theme_stylebox_override("hover",  UITheme.sb(UITheme.BTN_H, UITheme.GOLD, 1))
+	_help_toggle_btn.pressed.connect(_on_help_toggle)
+	vb.add_child(_help_toggle_btn)
+	_help_body = VBoxContainer.new()
+	_help_body.add_theme_constant_override("separation", 3)
+	_help_body.visible = false   # collapsed by default
+	vb.add_child(_help_body)
+	for line: String in [
+			"Tile — click/drag to paint the selected biome.",
+			"Flood — single click floods all connected tiles of the same biome.",
+			"Tint — paints hue/brightness shifts (see sliders) onto tiles.",
+			"Pass — toggles walkability of a tile (impassable = blocked).",
+			"Brush — 1/3/5/7 = odd-side square stamp centered on the cursor.",
+			"Walls (wall_wood/wall_stone) auto-block; no need to toggle Pass.",
+		]:
+		var l := Label.new()
+		l.text = "• " + line
+		l.add_theme_color_override("font_color", UITheme.DIM)
+		l.add_theme_font_size_override("font_size", 11)
+		l.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		l.custom_minimum_size = Vector2(240, 0)
+		_help_body.add_child(l)
+
+	# Highlight the initial selection.
+	_apply_swatch_highlight(_selected_biome)
+	return vb
+
+func _on_swatch_picked(name_str: String) -> void:
+	_selected_biome = name_str
+	_apply_swatch_highlight(name_str)
+
+
+## Builds one swatch Button. Prefers the real baked atlas thumbnail when
+## available (`Ground.get_biome_thumbnail`) — the button carries a child
+## TextureRect showing the actual tile art. Falls back to a flat color
+## chip via _biome_base_color if the atlas hasn't finished baking yet;
+## _refresh_swatches_with_atlas() swaps the fallbacks for thumbnails
+## when the atlas_ready signal fires.
+func _make_swatch_button(name_str: String, cat_name: String,
+		ground: Node) -> Button:
+	var b := Button.new()
+	b.custom_minimum_size = Vector2(28, 28)
+	b.tooltip_text = "%s\n(%s)" % [name_str, cat_name]
+	_populate_swatch_visual(b, name_str, ground)
+	return b
+
+
+## Applies either the atlas thumbnail (as a child TextureRect) or the
+## flat-color stylebox to a swatch. Extracted so the fallback swap
+## on atlas_ready can reuse the same code path.
+func _populate_swatch_visual(b: Button, name_str: String, ground: Node) -> void:
+	# Try the real thumbnail first.
+	var thumb: Texture2D = null
+	if ground != null and ground.has_method("get_biome_thumbnail"):
+		var v: Variant = ground.call("get_biome_thumbnail", name_str)
+		if v is Texture2D:
+			thumb = v
+	if thumb != null:
+		# Clear any color stylebox from the fallback path.
+		b.remove_theme_stylebox_override("normal")
+		b.remove_theme_stylebox_override("hover")
+		b.remove_theme_stylebox_override("pressed")
+		# Remove old thumbnail child if we're re-populating.
+		for child in b.get_children():
+			if child is TextureRect:
+				child.queue_free()
+		var trect := TextureRect.new()
+		trect.texture = thumb
+		trect.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		trect.stretch_mode = TextureRect.STRETCH_SCALE
+		trect.custom_minimum_size = Vector2(28, 28)
+		trect.set_anchors_preset(Control.PRESET_FULL_RECT)
+		trect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		b.add_child(trect)
+		return
+	# Fallback: flat color chip.
+	var col := Color(0.5, 0.5, 0.5)
+	if ground != null and ground.has_method("_biome_base_color"):
+		var bv: Variant = ground.call("_biome_base_color", name_str)
+		if typeof(bv) == TYPE_COLOR:
+			col = bv
+	b.add_theme_stylebox_override("normal", UITheme.sb(col, UITheme.BORDER, 1))
+	b.add_theme_stylebox_override("hover",  UITheme.sb(col.lightened(0.15), UITheme.GOLD, 2))
+	b.add_theme_stylebox_override("pressed",UITheme.sb(col.darkened(0.10), UITheme.GOLD, 2))
+
+
+## Called once via CONNECT_ONE_SHOT when Ground's atlas bake completes.
+## Walks the swatch registry and swaps every flat-color chip for its real
+## baked-atlas thumbnail. Selected highlight is reapplied after so the
+## gold border still shows on the currently picked biome.
+func _refresh_swatches_with_atlas() -> void:
+	var ground := get_tree().get_first_node_in_group("ground")
+	if ground == null:
+		return
+	for name_v in _swatch_buttons.keys():
+		var name_str: String = str(name_v)
+		var b: Button = _swatch_buttons[name_v]
+		if b == null or not is_instance_valid(b):
+			continue
+		_populate_swatch_visual(b, name_str, ground)
+	_apply_swatch_highlight(_selected_biome)
+
+## Redraws the swatch borders so the currently-picked biome stands out.
+## Non-selected swatches revert to a thin BORDER-color outline; the selected
+## one gets a gold 2-px border.
+func _apply_swatch_highlight(pick: String) -> void:
+	for name_v in _swatch_buttons.keys():
+		var name_str: String = str(name_v)
+		var b: Button = _swatch_buttons[name_v]
+		if b == null:
+			continue
+		var col := Color(0.5, 0.5, 0.5)
+		var ground := get_tree().get_first_node_in_group("ground")
+		if ground != null and ground.has_method("_biome_base_color"):
+			var v: Variant = ground.call("_biome_base_color", name_str)
+			if typeof(v) == TYPE_COLOR:
+				col = v
+		var border_col: Color = UITheme.GOLD if name_str == pick else UITheme.BORDER
+		var border_w: int = 2 if name_str == pick else 1
+		b.add_theme_stylebox_override("normal", UITheme.sb(col, border_col, border_w))
+
+func _on_help_toggle() -> void:
+	if _help_body == null or _help_toggle_btn == null:
+		return
+	_help_body.visible = not _help_body.visible
+	_help_toggle_btn.text = ("▾ How to edit tiles" if _help_body.visible
+			else "▸ How to edit tiles")
+
+
+func _on_tint_h_changed(v: float) -> void:
+	if _tint_h_label != null:
+		var iv: int = int(v)
+		_tint_h_label.text = "Hue: %+d" % iv
+	_refresh_tint_preview()
+
+func _on_tint_v_changed(v: float) -> void:
+	if _tint_v_label != null:
+		var iv: int = int(v)
+		_tint_v_label.text = "Bright: %+d" % iv
+	_refresh_tint_preview()
+
+func _on_tint_reset() -> void:
+	if _tint_h_slider != null: _tint_h_slider.value = 0
+	if _tint_v_slider != null: _tint_v_slider.value = 0
+	# value_changed callbacks refresh the labels + preview.
+
+## Mirrors the shader's tint math (terrain_blend.gdshader:315-333) on a
+## mid-grey reference color so the preview matches what an actual tile
+## painted with the current sliders will end up looking like.
+func _refresh_tint_preview() -> void:
+	if _tint_preview == null:
+		return
+	var h: int = int(_tint_h_slider.value) if _tint_h_slider != null else 0
+	var v: int = int(_tint_v_slider.value) if _tint_v_slider != null else 0
+	var warm: float = (float(h) / 100.0) * 0.2
+	var bright: float = (float(v) / 100.0) * 0.2
+	var col := Color(0.5, 0.5, 0.5)
+	col.r = clampf(col.r * (1.0 + warm * 0.30), 0.0, 1.0)
+	col.g = clampf(col.g * (1.0 + warm * 0.05), 0.0, 1.0)
+	col.b = clampf(col.b * (1.0 - warm * 0.30), 0.0, 1.0)
+	col.r = clampf(col.r * (1.0 + bright), 0.0, 1.0)
+	col.g = clampf(col.g * (1.0 + bright), 0.0, 1.0)
+	col.b = clampf(col.b * (1.0 + bright), 0.0, 1.0)
+	_tint_preview.color = col
+
+## Builds the Structures tab — categorized picker for all 18 Construction
+## buildables + wood/metal tier selectors. Click STRUCTURE mode button →
+## click in the world to place. Reuses the existing admin_place plumbing
+## from AdminCatalog walls (kind="resource" + type_str=<kind>).
+func _build_structures_section() -> VBoxContainer:
+	var vb := VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 6)
+
+	# ── Mode row — only STRUCTURE + OFF here. ──
+	var mode_row := HBoxContainer.new()
+	mode_row.add_theme_constant_override("separation", 4)
+	vb.add_child(mode_row)
+	mode_row.add_child(_mode_button("Structure", Mode.STRUCTURE))
+	mode_row.add_child(_mode_button("Off", Mode.OFF))
+
+	# ── Kind picker: categorized OptionButton. ──
+	var kind_lbl := Label.new()
+	kind_lbl.text = "Structure:"
+	kind_lbl.add_theme_color_override("font_color", UITheme.DIM)
+	kind_lbl.add_theme_font_size_override("font_size", 11)
+	vb.add_child(kind_lbl)
+	_structure_kind_opt = OptionButton.new()
+	_structure_kind_opt.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	# Populate as flat list with category markers. First entry per category
+	# is the category header (disabled), then the buildables underneath.
+	var opt_idx: int = 0
+	for cat: Array in _STRUCTURE_CATEGORIES:
+		var cat_name: String = str(cat[0])
+		# Disabled header entry (visual only).
+		_structure_kind_opt.add_item("── %s ──" % cat_name)
+		_structure_kind_opt.set_item_disabled(opt_idx, true)
+		opt_idx += 1
+		for kind_v in cat[1]:
+			var kind_str: String = str(kind_v)
+			var label: String = str(_STRUCTURE_LABELS.get(kind_str, kind_str))
+			_structure_kind_opt.add_item(label)
+			_structure_kind_opt.set_item_metadata(opt_idx, kind_str)
+			opt_idx += 1
+	_structure_kind_opt.item_selected.connect(_on_structure_kind_picked)
+	vb.add_child(_structure_kind_opt)
+	# Skip the first disabled header on init so the picker starts on a real
+	# buildable (the "wall" entry).
+	if _structure_kind_opt.item_count > 1:
+		_structure_kind_opt.select(1)
+		_on_structure_kind_picked(1)
+
+	# ── Wood tier picker. ──
+	var wood_lbl := Label.new()
+	wood_lbl.text = "Wood tier:"
+	wood_lbl.add_theme_color_override("font_color", UITheme.DIM)
+	wood_lbl.add_theme_font_size_override("font_size", 11)
+	vb.add_child(wood_lbl)
+	_structure_wood_opt = OptionButton.new()
+	for wt: Array in _WOOD_TIERS:
+		_structure_wood_opt.add_item(str(wt[1]))
+	_structure_wood_opt.item_selected.connect(_on_wood_tier_picked)
+	vb.add_child(_structure_wood_opt)
+
+	# ── Metal (bar) tier picker — only visible for bar-consuming kinds. ──
+	_structure_bar_row = HBoxContainer.new()
+	_structure_bar_row.add_theme_constant_override("separation", 4)
+	vb.add_child(_structure_bar_row)
+	var bar_lbl := Label.new()
+	bar_lbl.text = "Metal:"
+	bar_lbl.add_theme_color_override("font_color", UITheme.DIM)
+	bar_lbl.add_theme_font_size_override("font_size", 11)
+	_structure_bar_row.add_child(bar_lbl)
+	_structure_bar_opt = OptionButton.new()
+	for bt: Array in _BAR_TIERS:
+		_structure_bar_opt.add_item(str(bt[1]))
+	_structure_bar_opt.item_selected.connect(_on_bar_tier_picked)
+	_structure_bar_row.add_child(_structure_bar_opt)
+	# Visibility updates whenever the kind changes (see _on_structure_kind_picked).
+	_structure_bar_row.visible = false
+
+	var hint := Label.new()
+	hint.text = "STRUCTURE mode + click in world → place. Persists server-side."
+	hint.add_theme_color_override("font_color", UITheme.DIM)
+	hint.add_theme_font_size_override("font_size", 11)
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	hint.custom_minimum_size = Vector2(240, 0)
+	vb.add_child(hint)
+	return vb
+
+
+func _on_structure_kind_picked(idx: int) -> void:
+	if _structure_kind_opt == null:
+		return
+	var meta: Variant = _structure_kind_opt.get_item_metadata(idx)
+	if meta == null:
+		return
+	var kind_str: String = str(meta)
+	_selected_structure_kind = kind_str
+	# Show or hide the bar-tier picker based on whether this kind consumes bars.
+	if _structure_bar_row != null:
+		_structure_bar_row.visible = bool(_STRUCTURE_USES_BAR.get(kind_str, false))
+
+func _on_wood_tier_picked(idx: int) -> void:
+	if idx < 0 or idx >= _WOOD_TIERS.size():
+		return
+	_selected_wood_tier = str((_WOOD_TIERS[idx] as Array)[0])
+
+func _on_bar_tier_picked(idx: int) -> void:
+	if idx < 0 or idx >= _BAR_TIERS.size():
+		return
+	_selected_bar_tier = str((_BAR_TIERS[idx] as Array)[0])
+
+
+## Called by _on_overlay_input when in Mode.STRUCTURE and the admin
+## left-clicks in the world. Composes the entity data dict and sends
+## admin_place with kind="resource" (walls' existing pattern).
+func _place_structure_at(wpos: Vector2) -> void:
+	# Look up the wood color for the picked tier — used as the entity's
+	# `color` for downstream Interactable draws.
+	var wood_color := Color(0.55, 0.36, 0.18)
+	for wt: Array in _WOOD_TIERS:
+		if str(wt[0]) == _selected_wood_tier:
+			wood_color = wt[2] as Color
+			break
+	var label: String = str(_STRUCTURE_LABELS.get(_selected_structure_kind,
+			_selected_structure_kind))
+	var data := {
+		"type_str":     _selected_structure_kind,
+		"display_name": "%s %s" % [_selected_wood_tier.capitalize(), label],
+		"skill":        "construction",
+		"level":        1,
+		"action":       "Inspect",
+		"color":        [wood_color.r, wood_color.g, wood_color.b, wood_color.a],
+		"wood":         _selected_wood_tier,
+	}
+	if bool(_STRUCTURE_USES_BAR.get(_selected_structure_kind, false)):
+		data["bar"] = _selected_bar_tier
+	NetworkManager.send_admin_place("resource", _selected_structure_kind,
+		wpos.x, wpos.y, data)
+
 
 ## Builds the new Items tab: player dropdown + refresh, give-by-id form, boat
 ## dropdown + give-boat button, take form, view-inventory + restore-last-loss.
@@ -396,12 +924,16 @@ func _tab_button(text: String, active: bool) -> Button:
 	return b
 
 func _show_tab(which: String) -> void:
-	if _world_section != null:    _world_section.visible    = which == "world"
-	if _items_section != null:    _items_section.visible    = which == "items"
-	if _accounts_section != null: _accounts_section.visible = which == "accounts"
-	_paint_tab(_tab_world_btn,    which == "world")
-	_paint_tab(_tab_items_btn,    which == "items")
-	_paint_tab(_tab_accounts_btn, which == "accounts")
+	if _world_section != null:      _world_section.visible      = which == "world"
+	if _tiles_section != null:      _tiles_section.visible      = which == "tiles"
+	if _structures_section != null: _structures_section.visible = which == "structures"
+	if _items_section != null:      _items_section.visible      = which == "items"
+	if _accounts_section != null:   _accounts_section.visible   = which == "accounts"
+	_paint_tab(_tab_world_btn,      which == "world")
+	_paint_tab(_tab_tiles_btn,      which == "tiles")
+	_paint_tab(_tab_structures_btn, which == "structures")
+	_paint_tab(_tab_items_btn,      which == "items")
+	_paint_tab(_tab_accounts_btn,   which == "accounts")
 	# Lazy first-fetches per tab so the admin doesn't have to hit a manual
 	# refresh after opening it.
 	if which == "items" and _items_player_opt != null \
@@ -726,6 +1258,7 @@ func _update_mode_label() -> void:
 		Mode.DELETE:       _mode_lbl.text = "Mode: DELETE — click entity"
 		Mode.MOVE:         _mode_lbl.text = "Mode: MOVE — drag entity"
 		Mode.TILE:         _mode_lbl.text = "Mode: TILE — drag to paint"
+		Mode.STRUCTURE:    _mode_lbl.text = "Mode: STRUCTURE — click to place"
 		Mode.TINT:         _mode_lbl.text = "Mode: TINT — drag to color"
 		Mode.PASSABILITY:  _mode_lbl.text = "Mode: PASS — drag to block / unblock"
 		_:                 _mode_lbl.text = "Mode: off"
@@ -779,6 +1312,8 @@ func _on_overlay_input(event: InputEvent) -> void:
 				if mb.pressed:
 					_last_tile = Vector2i(-9999, -9999)
 					_paint_at(wpos)
+			Mode.STRUCTURE:
+				if mb.pressed: _place_structure_at(wpos)
 		_overlay.accept_event()
 	elif event is InputEventMouseMotion:
 		var wpos := _screen_to_world((event as InputEventMouseMotion).position)
@@ -876,6 +1411,12 @@ func _update_brush_preview() -> void:
 	_ensure_brush_preview()
 	if _brush_preview == null:
 		return
+	# Structure mode — show the pending structure's actual footprint under
+	# the cursor. Green when placement is valid; red when it would overlap
+	# an existing structure (client-side hint; server still enforces).
+	if _mode == Mode.STRUCTURE:
+		_update_structure_preview()
+		return
 	var painting_mode := _mode in [Mode.TILE, Mode.TINT, Mode.PASSABILITY]
 	if not painting_mode or _brush_size <= 1 or _flood_mode:
 		_brush_preview.visible = false
@@ -901,6 +1442,77 @@ func _update_brush_preview() -> void:
 	_brush_preview.position = screen_pos
 	_brush_preview.size = screen_size
 	_brush_preview.visible = true
+
+
+## Draws a footprint-sized rect at the cursor for STRUCTURE mode. Green
+## when placement is valid, red when it would overlap another structure.
+## Client-side check only — server enforces authoritatively — but this
+## gives instant feedback so the admin doesn't spam-click into rejections.
+func _update_structure_preview() -> void:
+	if _brush_preview == null:
+		return
+	var size := _structure_size_for_kind(_selected_structure_kind)
+	if size == Vector2.ZERO:
+		_brush_preview.visible = false
+		return
+	# Convert cursor world pos → footprint origin (top-left corner).
+	var origin_world: Vector2 = _last_mouse_world - size * 0.5
+	var xform := get_viewport().get_canvas_transform()
+	var screen_pos := xform * origin_world
+	var screen_size := size * xform.get_scale()
+	# Overlap check — walk the world's admin_registry (if reachable) and
+	# AABB against each existing structure.
+	var overlap := _placement_would_overlap_client(size, _last_mouse_world)
+	_brush_preview.color = (Color(0.95, 0.25, 0.25, 0.35)
+			if overlap else Color(0.30, 0.85, 0.35, 0.30))
+	_brush_preview.position = screen_pos
+	_brush_preview.size = screen_size
+	_brush_preview.visible = true
+
+
+## Look up the structure size table on the World-scoped Interactable
+## script. Falls back to Vector2(32, 32) for unknown kinds.
+func _structure_size_for_kind(kind: String) -> Vector2:
+	# Match server-side _STRUCTURE_SIZES exactly (walls small, stations
+	# medium, towers/houses large).
+	match kind:
+		"wall", "fortified_wall", "fence", "gate":
+			return Vector2(32, 32)
+		"workbench", "smith_station", "bank_chest", "armory_rack", \
+		"well", "altar", "market_stall", "site_marker", "plant_bed", \
+		"portal_shrine":
+			return Vector2(64, 64)
+		"watchtower", "guard_tower", "house_frame", "large_house", \
+		"grand_hall", "clan_hall", "dock":
+			return Vector2(128, 128)
+	return Vector2.ZERO
+
+
+## Client-side AABB pre-check. Walks every Interactable in the world's
+## "interactable" group whose type is a structure and tests footprint
+## intersection against the pending placement. Not authoritative — the
+## server re-checks and rejects on any race.
+func _placement_would_overlap_client(new_size: Vector2, wpos: Vector2) -> bool:
+	var new_min := wpos - new_size * 0.5
+	var new_max := wpos + new_size * 0.5
+	for node in get_tree().get_nodes_in_group("interactable"):
+		if not is_instance_valid(node):
+			continue
+		var n := node as Node2D
+		if n == null:
+			continue
+		var kind := str(n.get("interactable_type_str"))
+		var other_size := _structure_size_for_kind(kind)
+		if other_size == Vector2.ZERO:
+			continue
+		var other_pos: Vector2 = n.global_position
+		var other_min := other_pos - other_size * 0.5
+		var other_max := other_pos + other_size * 0.5
+		if (new_min.x < other_max.x and new_max.x > other_min.x
+				and new_min.y < other_max.y and new_max.y > other_min.y):
+			return true
+	return false
+
 
 ## Compute the brush footprint as an Array of Vector2i tile coordinates,
 ## centered on `t`. Out-of-bounds tiles are clipped.
@@ -958,7 +1570,9 @@ func _paint_at(wpos: Vector2) -> void:
 		return
 
 	# ── Tile (biome) paint ──
-	var biome := str(PAINT_BIOMES[_biome_opt.get_selected_id()])
+	# Reads the swatch grid's current selection (Tiles tab). The old
+	# `_biome_opt` OptionButton was retired when the tab was split.
+	var biome := _selected_biome
 	# Flood fill is a single-seed action regardless of brush size.
 	if _flood_mode:
 		if biome == "(erase)":

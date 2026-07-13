@@ -129,6 +129,22 @@ var current_boat: String = ""
 var current_boat_hp:     int = 0
 var current_boat_max_hp: int = 0
 
+## True when the local player is currently in a boat. Set by Player.gd
+## on _launch_boat / _dock_boat so other systems (NetworkManager's shark
+## bite handler, HUD, etc.) can gate boat-specific behavior without
+## reaching into the Player node's private state.
+var is_sailing: bool = false
+
+## Deduct `dmg` from the current boat's hull. When HP hits 0 the boat
+## sinks — Player.gd handles the actual dock transition on its next
+## _process tick since it polls current_boat_hp for the HP-bar draw.
+func apply_boat_damage(dmg: int) -> void:
+	if current_boat_hp <= 0 or dmg <= 0:
+		return
+	current_boat_hp = max(0, current_boat_hp - dmg)
+	Events.chat_message.emit("[Boat] Hull takes %d damage (%d/%d)."
+			% [dmg, current_boat_hp, current_boat_max_hp])
+
 const BOOT_SPEED_BONUS: Dictionary = {
 	"leather_boots": 0.10,
 	"iron_boots":    0.20,

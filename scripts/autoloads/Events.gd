@@ -119,6 +119,12 @@ extends Node
 ## troll") but never used for XP eligibility.
 @warning_ignore("unused_signal") signal mob_died(entity_id: String, killer: String, xp_each: int, participants: Array, xp_recipients: Array)
 @warning_ignore("unused_signal") signal mob_respawned(entity_id: String)
+
+## Structure HP + destruction — emitted when the server broadcasts
+## structure_hp_changed / structure_destroyed. Interactable nodes listen
+## for their own id and update HP bars + kill the collision body.
+@warning_ignore("unused_signal") signal structure_hp_changed(entity_id: String, hp: int, max_hp: int, alive: bool)
+@warning_ignore("unused_signal") signal structure_destroyed(entity_id: String)
 @warning_ignore("unused_signal") signal mob_dead_on_join(entity_id: String, respawn_in: float)
 @warning_ignore("unused_signal") signal mob_full(entity_id: String)
 @warning_ignore("unused_signal") signal mob_states_received(nodes: Array)

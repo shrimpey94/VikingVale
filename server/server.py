@@ -1259,11 +1259,33 @@ def _migrate_v16(conn) -> None:
         conn.execute("ALTER TABLE players ADD COLUMN interior_return_y REAL DEFAULT 0")
 
 
+def _migrate_v17(conn) -> None:
+    """Structure HP persistence. Previously RAM-only — restarting the
+    server reset every damaged structure back to full HP. New
+    structure_state table mirrors monsters_state's partial-persist
+    pattern: hp/max_hp/alive/subtype/owner/wood survive restart. The
+    entity's world_entities row remains the source of truth for
+    position + type; this table just carries combat state."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS structure_state (
+            entity_id TEXT PRIMARY KEY,
+            hp        INTEGER NOT NULL,
+            max_hp    INTEGER NOT NULL,
+            alive     INTEGER NOT NULL DEFAULT 1,
+            subtype   TEXT NOT NULL,
+            x         REAL NOT NULL,
+            y         REAL NOT NULL,
+            owner     TEXT NOT NULL DEFAULT '',
+            wood      TEXT NOT NULL DEFAULT 'oak'
+        )
+    """)
+
+
 _MIGRATIONS = [
     _migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4,
     _migrate_v5, _migrate_v6, _migrate_v7, _migrate_v8,
     _migrate_v9, _migrate_v10, _migrate_v11, _migrate_v12, _migrate_v13,
-    _migrate_v14, _migrate_v15, _migrate_v16,
+    _migrate_v14, _migrate_v15, _migrate_v16, _migrate_v17,
 ]
 
 
@@ -3046,6 +3068,48 @@ def _is_owner(session: dict) -> bool:
     return _admin_rank(session.get("username", "")) == "owner"
 
 
+async def _handle_admin_wipemonsters(ws, session: dict) -> None:
+    """Wipe every monster from the world in one shot. Removes all admin-placed
+    monsters from world_entities, purges every entry from the live AI dict +
+    monster_state DB via _purge_monster_state (which also broadcasts a
+    monster_died so all clients free their local visuals), and reports the
+    count back to the invoker.
+
+    Any-admin (not owner-only): the world can be repopulated from the admin
+    panel afterward, so a stray misuse is recoverable. Procedural chunk
+    monsters are already disabled in World.gd via PROCEDURAL_MONSTERS=false,
+    so nothing repopulates the world after the wipe."""
+    if not _is_admin(session):
+        await _admin_confirm(ws, "Only an admin can run /wipemonsters.")
+        return
+    # Snapshot every monster the server is currently tracking. Two sources:
+    #   1. world_entities rows with kind='monster' (admin-placed, persisted).
+    #   2. monsters_state RAM entries (procedural + admin, live AI).
+    admin_ids: list = []
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT id FROM world_entities WHERE kind='monster'").fetchall()
+        admin_ids = [str(r["id"]) for r in rows]
+        conn.execute("DELETE FROM world_entities WHERE kind='monster'")
+        conn.commit()
+    # Union — some monsters have RAM state but no world_entities row (e.g.
+    # procedural chunk monsters that were seeded before the wipe flag was
+    # flipped). Purge them too so no phantoms tick.
+    all_ids = set(admin_ids) | set(monsters_state.keys())
+    for mid in all_ids:
+        _purge_monster_state(mid)
+    # world_entity_remove broadcast for the admin-placed rows so client
+    # world state matches (monster_died already dispatched by _purge, which
+    # covers the visual despawn; world_entity_remove keeps the admin
+    # entity registry consistent too).
+    for eid in admin_ids:
+        _broadcast({"type": "world_entity_remove", "id": eid})
+    total = len(all_ids)
+    await _admin_confirm(ws, f"Wiped {total} monster(s) from the world.")
+    print(f"[wipemonsters] {session['username']} wiped {total} monster(s) "
+          f"({len(admin_ids)} admin-placed, {total - len(admin_ids)} live AI)")
+
+
 async def _handle_admin_rank_command(ws, session: dict, text: str) -> None:
     """Parses /promote <name> and /demote <name>. Owner-only. The owner row
     is immutable — any /demote targeting Busterrdust is rejected, and a
@@ -3109,7 +3173,18 @@ def _load_world_entities() -> list:
             data = json.loads(r["data"] or "{}")
         except Exception:
             data = {}
-        out.append({"id": r["id"], "kind": r["kind"], "subtype": r["subtype"],
+        # For structures, overlay the live (or rehydrated) HP so the
+        # client's initial world_entity_add carries current combat state.
+        # Without this, a client logging in mid-battle would see a
+        # damaged wall spawn at full HP visually until the next combat
+        # broadcast — the HP bar would flash on the first hit.
+        eid = str(r["id"])
+        if eid in structures_state:
+            sst = structures_state[eid]
+            data["hp"]     = int(sst.get("hp", 0))
+            data["max_hp"] = int(sst.get("max_hp", 1))
+            data["alive"]  = bool(sst.get("alive", True))
+        out.append({"id": eid, "kind": r["kind"], "subtype": r["subtype"],
                     "x": float(r["x"]), "y": float(r["y"]), "data": data})
     return out
 
@@ -3128,6 +3203,13 @@ async def _handle_admin_place(ws, session: dict, msg: dict) -> None:
         return
     x = float(msg.get("x", session["x"]))
     y = float(msg.get("y", session["y"]))
+    # Structure placement overlap check — two structures can't share space.
+    # Only enforced for structure subtypes; monsters/NPCs/trees stay free.
+    if subtype in _STRUCTURE_SIZES:
+        if _placement_would_overlap(subtype, x, y):
+            await _admin_confirm(ws,
+                f"Cannot place {subtype} — overlaps existing structure.")
+            return
     data = msg.get("data", {})
     if not isinstance(data, dict):
         data = {}
@@ -3138,6 +3220,24 @@ async def _handle_admin_place(ws, session: dict, msg: dict) -> None:
             (eid, kind, subtype, x, y, json.dumps(data)))
         conn.commit()
     _known_admin_entity_ids.add(eid)
+    # Structure HP seed — track live HP for combat damage. Non-structure
+    # resources (trees, rocks) don't get this — they use the existing
+    # per-node depletion / respawn flow.
+    if subtype in _STRUCTURE_SIZES:
+        wood = str(data.get("wood", "oak"))
+        max_hp_s = _structure_max_hp(subtype, wood)
+        structures_state[eid] = {
+            "hp": max_hp_s, "max_hp": max_hp_s, "alive": True,
+            "subtype": subtype, "x": x, "y": y,
+            "owner": str(data.get("owner", session["username"])),
+            "wood": wood,
+        }
+        _mark_structure_dirty(eid)
+        # Reflect the seed HP into the entity's data dict so the client
+        # gets it in the world_entity_add broadcast below.
+        data["hp"] = max_hp_s
+        data["max_hp"] = max_hp_s
+        data["alive"] = True
     entity = {"id": eid, "kind": kind, "subtype": subtype, "x": x, "y": y, "data": data}
     _broadcast({"type": "world_entity_add", "entity": entity})
     await _admin_confirm(ws, f"Placed {kind} '{subtype}'.")
@@ -4280,6 +4380,183 @@ async def _handle_shop_close(ws, session: dict, msg: dict) -> None:
 
 DOOR_INTERACT_RANGE = 64.0   # px — generous so misclicks still register
 
+# ── Structure sizing + placement helpers ─────────────────────────────────────
+# Mirror of scripts/Interactable.gd _STRUCTURE_SIZES. Kept as a Python dict so
+# the server can enforce non-overlap AABB placement + monster-blocked-attack
+# range checks without a client roundtrip. If the client version changes both
+# must be updated in lockstep — a single-source-of-truth would be a client
+# push at boot; for MVP we hand-mirror.
+_STRUCTURE_SIZES = {
+    # Small
+    "wall":            (32, 32),
+    "fortified_wall":  (32, 32),
+    "fence":           (32, 32),
+    "gate":            (32, 32),
+    # Medium
+    "workbench":       (64, 64),
+    "smith_station":   (64, 64),
+    "bank_chest":      (64, 64),
+    "armory_rack":     (64, 64),
+    "well":            (64, 64),
+    "altar":           (64, 64),
+    "market_stall":    (64, 64),
+    "site_marker":     (64, 64),
+    "plant_bed":       (64, 64),
+    "portal_shrine":   (64, 64),
+    # Large
+    "watchtower":      (128, 128),
+    "guard_tower":     (128, 128),
+    "house_frame":     (128, 128),
+    "large_house":     (128, 128),
+    "grand_hall":      (128, 128),
+    "clan_hall":       (128, 128),
+    "dock":            (128, 128),
+}
+
+
+# Per-tier HP multipliers matching Construction wood tiers.
+_STRUCTURE_TIER_MULT = {
+    "oak": 1.0, "pine": 1.1, "cherry": 1.3,
+    "ironwood": 1.6, "frost": 2.0, "ancient": 2.6,
+}
+
+
+def _structure_max_hp(subtype: str, wood: str) -> int:
+    """HP scales by size class × wood tier. Small=40, Medium=120, Large=320
+    baseline; fortified_wall gets a bonus ×1.5."""
+    size = _STRUCTURE_SIZES.get(subtype)
+    if size is None:
+        return 40
+    w = size[0]
+    if w >= 128:
+        base = 320
+    elif w >= 64:
+        base = 120
+    else:
+        base = 40
+    mult = _STRUCTURE_TIER_MULT.get(wood, 1.0)
+    if subtype == "fortified_wall":
+        mult *= 1.5
+    return max(1, int(base * mult))
+
+
+# Live structure state — populated at server boot from world_entities + a new
+# structure_state SQLite table. Same partial-persist shape as monsters_state:
+# HP + alive flag survive restart; combat participants are combat-only.
+structures_state: dict = {}   # eid → {"hp": int, "max_hp": int, "alive": bool,
+                              #         "subtype": str, "x": float, "y": float,
+                              #         "owner": str, "wood": str}
+
+
+# Banner territory radius — a warband's claim extends this many px from
+# each of their banners. Chosen large enough that a single banner covers
+# a small keep (~32-tile diameter) but small enough that a couple banners
+# don't blanket the whole map. Tune once we ship warband raids at scale.
+BANNER_TERRITORY_RADIUS = 512.0
+
+
+def _territory_gate_for_player(session: dict, x: float, y: float):
+    """Return None if `session`'s player can build at (x, y). Otherwise
+    return a chat-back reason string.
+
+    Rules (MVP — full no-man's-land shading is deferred):
+      1. The point must be within BANNER_TERRITORY_RADIUS of at least one
+         banner owned by the player's warband.
+      2. The point must NOT be within any rival warband's banner radius.
+         Rival territory OR "contested overlap" both reject.
+      3. A player with no warband can't build anywhere via this path.
+    """
+    try:
+        with _db() as conn:
+            cid = _clan_id_for_player(conn, session["id"])
+            if cid is None:
+                return "You need a warband to build here."
+            rows = conn.execute(
+                "SELECT x, y, data FROM world_entities WHERE kind='resource' "
+                "AND subtype='banner'"
+            ).fetchall()
+    except Exception:
+        # Territory tables missing / DB error → fail-open for MVP so a
+        # broken banner table doesn't hard-block all building.
+        return None
+    r2 = BANNER_TERRITORY_RADIUS * BANNER_TERRITORY_RADIUS
+    inside_own = False
+    inside_rival = False
+    for row in rows:
+        try:
+            bdata = json.loads(row["data"] or "{}")
+        except Exception:
+            bdata = {}
+        wb_id = str(bdata.get("warband_id", ""))
+        if not wb_id:
+            continue
+        bx, by = float(row["x"]), float(row["y"])
+        dx = x - bx
+        dy = y - by
+        if dx * dx + dy * dy > r2:
+            continue
+        if wb_id == cid:
+            inside_own = True
+        else:
+            inside_rival = True
+    if inside_rival:
+        return ("Contested / rival territory."
+                if inside_own else "Enemy territory.")
+    if not inside_own:
+        return "Outside your warband's territory."
+    return None
+
+
+def _structure_at_edge(mx: float, my: float, reach: float):
+    """Return (eid, dist_to_edge) for the ALIVE structure whose hitbox edge
+    is within `reach` of (mx, my). Nearest wins. Used by the monster AI:
+    when a chase step is blocked, the monster attacks the closest structure
+    it can reach instead of stalling."""
+    best_eid = None
+    best_d = reach + 0.1
+    for eid, st in structures_state.items():
+        if not st.get("alive", True):
+            continue
+        size = _STRUCTURE_SIZES.get(st["subtype"], (32, 32))
+        half_w = size[0] / 2.0
+        half_h = size[1] / 2.0
+        dx = max(0.0, abs(mx - st["x"]) - half_w)
+        dy = max(0.0, abs(my - st["y"]) - half_h)
+        d = (dx * dx + dy * dy) ** 0.5
+        if d <= reach and d < best_d:
+            best_d = d
+            best_eid = eid
+    return (best_eid, best_d)
+
+
+def _placement_would_overlap(subtype: str, x: float, y: float) -> bool:
+    """Return True if placing a `subtype` structure at (x, y) would overlap
+    ANY existing structure's AABB. Rejects hitbox overlap only; a structure
+    can still sit next to (touching) another one, which is the expected
+    "connectable" behavior the user asked for."""
+    if subtype not in _STRUCTURE_SIZES:
+        return False
+    w, h = _STRUCTURE_SIZES[subtype]
+    new_min_x, new_min_y = x - w / 2.0, y - h / 2.0
+    new_max_x, new_max_y = x + w / 2.0, y + h / 2.0
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT subtype, x, y FROM world_entities WHERE kind='resource'"
+        ).fetchall()
+    for r in rows:
+        other_sub = str(r["subtype"])
+        if other_sub not in _STRUCTURE_SIZES:
+            continue
+        ow, oh = _STRUCTURE_SIZES[other_sub]
+        ox, oy = float(r["x"]), float(r["y"])
+        omin_x, omin_y = ox - ow / 2.0, oy - oh / 2.0
+        omax_x, omax_y = ox + ow / 2.0, oy + oh / 2.0
+        # AABB overlap test.
+        if (new_min_x < omax_x and new_max_x > omin_x
+                and new_min_y < omax_y and new_max_y > omin_y):
+            return True
+    return False
+
 
 # Interiors live FAR outside the exterior 300×300 tile grid (which ends
 # at 9600 px). The exterior shader clips there, so anywhere past ~y=10000
@@ -4832,6 +5109,23 @@ async def _handle_build_wall(ws, session: dict, msg: dict) -> None:
         return
     x = float(msg.get("x", session.get("x", 0.0)))
     y = float(msg.get("y", session.get("y", 0.0)))
+    # Placement guards — apply BEFORE the SQL insert so we don't have to
+    # rollback on rejection.
+    # 1. Non-overlap: two structures can't occupy the same footprint.
+    if _placement_would_overlap(subtype, x, y):
+        await _send(ws, {"type": "chat", "username": "System",
+                         "text": "Can't build there — overlaps another structure."})
+        return
+    # 2. Territory gate: banner-radius check unless the player is an admin.
+    #    Non-admin players must be within one of their own warband's banner
+    #    radii AND outside every enemy warband's banner radius. Enforces
+    #    "build in your own turf only" and blocks rival encroachment.
+    if not _is_admin(session):
+        gate_err = _territory_gate_for_player(session, x, y)
+        if gate_err:
+            await _send(ws, {"type": "chat", "username": "System",
+                             "text": gate_err})
+            return
     wood = str(msg.get("wood", "oak"))
     display_name = str(msg.get("display_name", "Wall")).strip() or "Wall"
     color_arr = msg.get("color", [0.55, 0.36, 0.18, 1.0])
@@ -4854,6 +5148,17 @@ async def _handle_build_wall(ws, session: dict, msg: dict) -> None:
             "VALUES (?,?,?,?,?,?)",
             (eid, "resource", subtype, x, y, json.dumps(data)))
         conn.commit()
+    # Seed HP state so damage flow works from tick 1 (same as admin_place).
+    max_hp_s = _structure_max_hp(subtype, wood)
+    structures_state[eid] = {
+        "hp": max_hp_s, "max_hp": max_hp_s, "alive": True,
+        "subtype": subtype, "x": x, "y": y,
+        "owner": session["username"], "wood": wood,
+    }
+    _mark_structure_dirty(eid)
+    data["hp"] = max_hp_s
+    data["max_hp"] = max_hp_s
+    data["alive"] = True
     entity = {"id": eid, "kind": "resource", "subtype": subtype,
               "x": x, "y": y, "data": data}
     _broadcast({"type": "world_entity_add", "entity": entity})
@@ -6829,6 +7134,98 @@ async def _monster_state_flush_loop() -> None:
         await asyncio.sleep(5.0)
         _flush_monster_state()
 
+
+# ── Structure state persistence (v17 migration) ──────────────────────────────
+# Same partial-persist shape as monsters_state. `structures_state` is the
+# authoritative RAM copy; the SQLite table survives restarts so damaged
+# walls don't magically go back to full HP whenever the server bounces.
+_structure_state_dirty: set = set()
+
+
+def _mark_structure_dirty(eid: str) -> None:
+    if eid:
+        _structure_state_dirty.add(eid)
+
+
+def _load_structure_state_from_db() -> None:
+    """Rehydrate `structures_state` from SQLite at boot. Runs AFTER the
+    orphan-monster purge so all entity_ids being loaded are still backed
+    by world_entities rows. Silently skips any row whose parent entity
+    was deleted (broadcast + local cleanup handled by prior admin_delete)."""
+    try:
+        with _db() as conn:
+            rows = conn.execute(
+                "SELECT entity_id, hp, max_hp, alive, subtype, x, y, owner, wood "
+                "FROM structure_state").fetchall()
+            # Look up which entity_ids still exist so we can skip orphans.
+            existing = {
+                str(r["id"]) for r in conn.execute(
+                    "SELECT id FROM world_entities").fetchall()
+            }
+        loaded = 0
+        for r in rows:
+            eid = str(r["entity_id"])
+            if eid not in existing:
+                continue
+            structures_state[eid] = {
+                "hp":      int(r["hp"]),
+                "max_hp":  int(r["max_hp"]),
+                "alive":   bool(int(r["alive"] or 1)),
+                "subtype": str(r["subtype"]),
+                "x":       float(r["x"]),
+                "y":       float(r["y"]),
+                "owner":   str(r["owner"] or ""),
+                "wood":    str(r["wood"] or "oak"),
+            }
+            loaded += 1
+        if loaded:
+            print(f"[boot] loaded {loaded} structure_state row(s) from SQLite")
+    except Exception as e:
+        print(f"[boot] structure_state load failed: {e}")
+
+
+def _flush_structure_state() -> int:
+    """Drain _structure_state_dirty and UPSERT each entry. Any entry whose
+    RAM record is gone (admin-deleted) is DELETEd from the mirror too."""
+    if not _structure_state_dirty:
+        return 0
+    ids = list(_structure_state_dirty)
+    _structure_state_dirty.clear()
+    wrote = 0
+    try:
+        with _db() as conn:
+            for eid in ids:
+                st = structures_state.get(eid)
+                if st is None:
+                    conn.execute(
+                        "DELETE FROM structure_state WHERE entity_id=?", (eid,))
+                    continue
+                conn.execute(
+                    "INSERT OR REPLACE INTO structure_state "
+                    "(entity_id, hp, max_hp, alive, subtype, x, y, owner, wood) "
+                    "VALUES (?,?,?,?,?,?,?,?,?)",
+                    (eid,
+                     int(st.get("hp", 0)),
+                     int(st.get("max_hp", 1)),
+                     1 if st.get("alive", True) else 0,
+                     str(st.get("subtype", "")),
+                     float(st.get("x", 0.0)),
+                     float(st.get("y", 0.0)),
+                     str(st.get("owner", "")),
+                     str(st.get("wood", "oak"))))
+                wrote += 1
+            conn.commit()
+    except Exception as e:
+        print(f"[structure_state] flush failed: {e}")
+    return wrote
+
+
+async def _structure_state_flush_loop() -> None:
+    """5s batched flush, mirroring _monster_state_flush_loop."""
+    while True:
+        await asyncio.sleep(5.0)
+        _flush_structure_state()
+
 # ── Monster AI tuning (server-side wander / aggro / chase / attack) ───────────
 # Tick rate sets the server-side cadence AND the client-side tween duration in
 # Stage 2. Keep them equal so movement looks smooth (no perceived jitter).
@@ -6891,6 +7288,24 @@ def _default_size(monster_type: str) -> int:
 # these sets defaults hostile=True / passive_flee=False.
 _PASSIVE_MONSTER_TYPES = {"chicken", "rat"}
 _FLEEING_MONSTER_TYPES = {"chicken", "rat"}
+# Water-only monsters can ONLY step onto tiles the terrain bitmap reports as
+# impassable — i.e., water. They also can't step onto land. Everything else
+# is inverse: passable-only. If the bitmap isn't loaded, the check is a no-op
+# and water-only monsters wander freely (initial-server behavior).
+WATER_ONLY_MONSTERS = {"shark"}
+
+
+def _monster_can_step(monster_type: str, x: float, y: float) -> bool:
+    """Terrain gate for monster movement. Land monsters accept passable
+    tiles; water-only monsters (WATER_ONLY_MONSTERS) accept impassable
+    tiles (which are the water ones under our bitmap convention). No
+    bitmap loaded → both classes are unrestricted."""
+    if not terrain.is_loaded():
+        return True
+    passable = terrain.is_passable(x, y)
+    if monster_type in WATER_ONLY_MONSTERS:
+        return not passable
+    return passable
 
 
 def _default_hostile(monster_type: str) -> bool:
@@ -7038,7 +7453,13 @@ async def _handle_monster_join(ws, session: dict, msg: dict) -> None:
         }
         _seed_monster_ai(st, x, y, monster_type, level, attack)
         monsters_state[mid] = st
-        _mark_monster_dirty(mid)
+        # Only persist to SQLite when this is a REAL combat engagement (Attack
+        # click). seed_only joins are ephemeral client-visibility registrations
+        # — dirtying them would resurrect ghost rows across restarts. If this
+        # monster later engages combat (seed_only=False), the aggro-flip path
+        # dirties it then.
+        if not bool(msg.get("seed_only", False)):
+            _mark_monster_dirty(mid)
     else:
         # Existing entry — could be an admin-placed monster whose AI is
         # already running, or a same-session re-join from another player.
@@ -7095,12 +7516,94 @@ async def _handle_monster_join(ws, session: dict, msg: dict) -> None:
     # aggro chase mode pointed at THIS player so it starts walking toward
     # them, even if they're 600+ px away. `last_attack_at` is left alone so
     # an already-aggroed monster doesn't get its swing timer reset.
-    if _is_ai_seeded(st) and st.get("alive", True):
+    #
+    # `seed_only` = the caller is chunk-load / login-burst AI registration,
+    # NOT a combat engagement. Skip the aggro flip so login and interior
+    # exit don't drag every monster in the area toward the player.
+    seed_only = bool(msg.get("seed_only", False))
+    if not seed_only and _is_ai_seeded(st) and st.get("alive", True):
         st["state"] = "aggro"
         st["target_player"] = session["username"]
         st.setdefault("last_attack_at", 0.0)
     await _send(ws, {"type": "monster_state", "id": mid,
                      "hp": st["hp"], "max_hp": st["max_hp"], "alive": True})
+
+
+async def _handle_structure_repair(ws, session: dict, msg: dict) -> None:
+    """Owner + warband-member repair. Consumes materials proportional to
+    missing HP: 1 wood per 20 HP restored (rounded up). For v1 we don't
+    verify inventory materials — that's on the client's honor. Ships as a
+    quality-of-life MVP; balance is a live-play question."""
+    eid = str(msg.get("id", ""))
+    st = structures_state.get(eid)
+    if st is None or not st.get("alive", True):
+        return
+    if st.get("hp", 0) >= st.get("max_hp", 0):
+        return
+    # Owner OR warband-member gate. Admins bypass.
+    is_admin = _is_admin(session) if "_is_admin" in globals() else False
+    same_owner = st.get("owner", "") == session.get("username", "")
+    # Warband membership check — reuse clan_members table if it exists.
+    same_warband = False
+    if not same_owner and not is_admin:
+        try:
+            with _db() as conn:
+                cid = _clan_id_for_player(conn, session["id"])
+                if cid is not None:
+                    owner_row = conn.execute(
+                        "SELECT id FROM players WHERE username=?",
+                        (st.get("owner", ""),)).fetchone()
+                    if owner_row is not None:
+                        owner_cid = _clan_id_for_player(conn, owner_row["id"])
+                        same_warband = (owner_cid == cid)
+        except Exception:
+            pass
+    if not (same_owner or same_warband or is_admin):
+        await _send(ws, {"type": "chat", "username": "System",
+                         "text": "Only the owner or warband can repair."})
+        return
+    # Restore HP — full heal for MVP. A future tuning pass can prorate.
+    st["hp"] = st["max_hp"]
+    _mark_structure_dirty(eid)
+    _broadcast({"type": "structure_hp_changed", "id": eid,
+                "hp": st["hp"], "max_hp": st["max_hp"], "alive": True})
+    print(f"[structure] {session['username']} repaired {st['subtype']} "
+          f"({eid}) to full HP")
+
+
+async def _handle_structure_damage(ws, session: dict, msg: dict) -> None:
+    """Player-dealt damage against a placed structure. Range check + HP
+    deduction + destroy broadcast. Follows the monster_damage shape but
+    without participants/xp — structures give no XP for v1."""
+    eid = str(msg.get("id", ""))
+    amt = max(0, int(msg.get("amount", 0)))
+    st = structures_state.get(eid)
+    if st is None or not st.get("alive", True) or amt <= 0:
+        return
+    # Range gate — the player must be at the hitbox edge. Server-side check
+    # mirrors the client-side "must be at edge" requirement so a fast-clicker
+    # can't strike from across the map.
+    size = _STRUCTURE_SIZES.get(st["subtype"], (32, 32))
+    half_w = size[0] / 2.0
+    half_h = size[1] / 2.0
+    p_x = float(session.get("x", 0.0))
+    p_y = float(session.get("y", 0.0))
+    reach = MELEE_HIT_RANGE if "MELEE_HIT_RANGE" in globals() else 60.0
+    # Distance to nearest hitbox edge (0 if inside, positive if outside).
+    dx = max(0.0, abs(p_x - st["x"]) - half_w)
+    dy = max(0.0, abs(p_y - st["y"]) - half_h)
+    if dx * dx + dy * dy > reach * reach:
+        return
+    st["hp"] = max(0, st["hp"] - amt)
+    _mark_structure_dirty(eid)
+    _broadcast({"type": "structure_hp_changed", "id": eid,
+                "hp": st["hp"], "max_hp": st["max_hp"], "alive": st["alive"]})
+    if st["hp"] <= 0 and st.get("alive", True):
+        st["alive"] = False
+        _mark_structure_dirty(eid)
+        _broadcast({"type": "structure_destroyed", "id": eid})
+        print(f"[structure] {session['username']} destroyed "
+              f"{st['subtype']} ({eid}) at ({st['x']:.0f},{st['y']:.0f})")
 
 
 async def _handle_monster_damage(ws, session: dict, msg: dict) -> None:
@@ -7470,12 +7973,15 @@ def _tick_monster_ai(mid: str, st: dict, now: float, attack_msgs: list) -> None:
         leash2 = MONSTER_HOME_LEASH * MONSTER_HOME_LEASH
         dx, dy = cur_x - home_x, cur_y - home_y
         if dx * dx + dy * dy > leash2:
-            st["x"], st["y"] = home_x, home_y
+            # WALK back to home instead of teleporting. Setting the wander
+            # target lets _step_toward move the monster incrementally on
+            # subsequent ticks — respects terrain, animates smoothly, and
+            # avoids the "monster snapped from mid-chase back to spawn" bug
+            # the user reported on Flee / de-aggro.
             st["state"] = "idle"
             st["target_player"] = None
             st["wander_x"], st["wander_y"] = home_x, home_y
-            st["next_wander_at"] = now + random.uniform(
-                *_wander_interval_for(st.get("monster_type", "")))
+            st["next_wander_at"] = now
             return
 
     # ── Aggro / chase / attack ──
@@ -7504,8 +8010,14 @@ def _tick_monster_ai(mid: str, st: dict, now: float, attack_msgs: list) -> None:
         # combined with the 1200 px de-aggro leash it eventually gives
         # up. A future pass can layer perpendicular slide attempts here.
         step = MONSTER_CHASE_SPEED * MONSTER_AI_TICK
+        # Sharks (and any future water-only monster) get a small chase-speed
+        # boost — they surge fast through water while the pathing check
+        # keeps them off land. Land monsters use the standard multiplier.
+        if st.get("monster_type", "") in WATER_ONLY_MONSTERS:
+            step *= 1.2
         candidate_x, candidate_y = _step_toward(cur_x, cur_y, tx, ty, step)
-        if terrain.is_passable(candidate_x, candidate_y):
+        m_type = st.get("monster_type", "")
+        if _monster_can_step(m_type, candidate_x, candidate_y):
             new_x, new_y = candidate_x, candidate_y
         else:
             # Try a 1-axis slide so corners/coastlines don't fully wall
@@ -7516,16 +8028,42 @@ def _tick_monster_ai(mid: str, st: dict, now: float, attack_msgs: list) -> None:
             tried = False
             if abs(dx) >= abs(dy):
                 sx, sy = _step_toward(cur_x, cur_y, tx, cur_y, step)
-                if terrain.is_passable(sx, sy):
+                if _monster_can_step(m_type, sx, sy):
                     new_x, new_y = sx, sy
                     tried = True
             if not tried:
                 sx, sy = _step_toward(cur_x, cur_y, cur_x, ty, step)
-                if terrain.is_passable(sx, sy):
+                if _monster_can_step(m_type, sx, sy):
                     new_x, new_y = sx, sy
                     tried = True
             if not tried:
                 new_x, new_y = cur_x, cur_y
+                # Fully blocked — check if there's a structure right in
+                # front of us. If so, attack it instead of stalling.
+                s_reach = MONSTER_ATTACK_RANGE + float(
+                    st.get("size", _MONSTER_SIZE_DEFAULT))
+                s_eid, _s_dist = _structure_at_edge(cur_x, cur_y, s_reach)
+                if s_eid is not None and \
+                        now - st["last_attack_at"] >= MONSTER_ATTACK_COOLDOWN:
+                    st["last_attack_at"] = now
+                    s_st = structures_state.get(s_eid)
+                    if s_st is not None:
+                        s_st["hp"] = max(0, s_st["hp"] - int(st["attack"]))
+                        _mark_structure_dirty(s_eid)
+                        _broadcast({
+                            "type": "structure_hp_changed",
+                            "id": s_eid,
+                            "hp": s_st["hp"],
+                            "max_hp": s_st["max_hp"],
+                            "alive": s_st.get("alive", True),
+                        })
+                        if s_st["hp"] <= 0 and s_st.get("alive", True):
+                            s_st["alive"] = False
+                            _mark_structure_dirty(s_eid)
+                            _broadcast({
+                                "type": "structure_destroyed",
+                                "id": s_eid,
+                            })
         st["x"], st["y"] = new_x, new_y
         # Attack if in range and cooldown elapsed. Range = ATTACK_RANGE
         # (20px tight) + the monster's `size` (its body radius), so a
@@ -7537,29 +8075,51 @@ def _tick_monster_ai(mid: str, st: dict, now: float, attack_msgs: list) -> None:
         if d2 <= reach * reach \
                 and now - st["last_attack_at"] >= MONSTER_ATTACK_COOLDOWN:
             st["last_attack_at"] = now
+            # `monster_type` tag lets the client apply damage-routing rules
+            # (e.g. shark bites route to boat HP when target is sailing).
             attack_msgs.append((new_x, new_y, {
                 "type": "monster_attack",
                 "id": mid,
                 "target": tgt["username"],
                 "damage": int(st["attack"]),
+                "monster_type": st.get("monster_type", ""),
             }))
         return
 
-    # ── Proximity aggro: DISABLED ─────────────────────────────────────
-    # The new combat flow is strictly player-initiated: the player must
-    # left-click the monster (which opens the unified panel) and then
-    # press Attack to engage. There is no scenario where a monster should
-    # decide on its own to attack a player — chickens, rats, draugr,
-    # bears, everything stays passive until provoked. `_handle_monster_join`
-    # is the only path that sets state=aggro; the rest of this tick body
-    # below handles wandering, which is correct for unprovoked monsters.
+    # ── Proximity aggro: HOSTILE MONSTERS ONLY ────────────────────────
+    # Hostile monsters (server-side flag; passives are chickens + rats)
+    # auto-engage when a player walks into `aggro_radius`. Player still has
+    # to click Attack to open the combat panel; the AI just starts walking
+    # toward them so pursuit isn't purely player-initiated.
     #
-    # Removed (was the "Proximity aggro trigger (hostile only)" block):
-    #   - scanned every session within aggro_radius
-    #   - force-set state=aggro + target_player on the nearest one
-    # That made every hostile monster autoaggressive, including some that
-    # had been incorrectly flagged hostile (chickens / rats with stale
-    # SQLite rows from before the _PASSIVE_MONSTER_TYPES table existed).
+    # De-aggro: handled by the aggro branch above via the leash — once the
+    # player leaves `aggro_radius * 1.5` (measured as distance from monster
+    # home > MONSTER_HOME_LEASH), the monster drops back to idle and walks
+    # home via the wander target (Fix 3). No teleport.
+    if st.get("hostile", False):
+        aggro_r = float(st.get("aggro_radius", 0.0))
+        if aggro_r > 0.0:
+            best_ws = None
+            best_dsq = aggro_r * aggro_r
+            for ows, s in sessions.items():
+                # Skip players inside interiors — they're not physically
+                # near any exterior monster, even if their session x/y is
+                # stale from before they entered.
+                if str(s.get("interior_id", "")) != "":
+                    continue
+                dx = cur_x - float(s.get("x", 0.0))
+                dy = cur_y - float(s.get("y", 0.0))
+                dsq = dx * dx + dy * dy
+                if dsq < best_dsq:
+                    best_dsq = dsq
+                    best_ws = ows
+            if best_ws is not None:
+                st["state"] = "aggro"
+                st["target_player"] = sessions[best_ws]["username"]
+                st.setdefault("last_attack_at", 0.0)
+                # Dirty since we're transitioning to a real combat state.
+                _mark_monster_dirty(mid)
+                return
 
     # ── Wander ──
     # The timer is the ONLY trigger that pulls a monster out of idle. The old
@@ -7579,9 +8139,10 @@ def _tick_monster_ai(mid: str, st: dict, now: float, attack_msgs: list) -> None:
     if st["state"] == "wander":
         step = MONSTER_WALK_SPEED * MONSTER_AI_TICK
         cx, cy = _step_toward(cur_x, cur_y, st["wander_x"], st["wander_y"], step)
-        # Terrain gate — same rule as the chase step. A monster wandering
-        # into water just stops at the edge instead of swimming.
-        if terrain.is_passable(cx, cy):
+        # Terrain gate — same rule as the chase step. A land monster
+        # wandering into water just stops at the edge; a water-only monster
+        # wandering onto land does the same.
+        if _monster_can_step(st.get("monster_type", ""), cx, cy):
             new_x, new_y = cx, cy
         else:
             new_x, new_y = cur_x, cur_y
@@ -7706,6 +8267,9 @@ async def _route_message(ws, session, mtype: str, msg: dict) -> None:
                 return
             if text.startswith("/ally ") or text == "/unally":
                 await _handle_ally_command(ws, session, text)
+                return
+            if text == "/wipemonsters":
+                await _handle_admin_wipemonsters(ws, session)
                 return
             text = profanity.censor(text)
             _broadcast({"type": "chat",
@@ -7840,6 +8404,10 @@ async def _route_message(ws, session, mtype: str, msg: dict) -> None:
         await _handle_monster_join(ws, session, msg)
     elif mtype == "monster_damage":
         await _handle_monster_damage(ws, session, msg)
+    elif mtype == "structure_damage":
+        await _handle_structure_damage(ws, session, msg)
+    elif mtype == "structure_repair":
+        await _handle_structure_repair(ws, session, msg)
     elif mtype == "monster_leave":
         await _handle_monster_leave(ws, session, msg)
     elif mtype == "monster_states":
@@ -7949,7 +8517,6 @@ async def main() -> None:
     # monster_state cleanup. Both run synchronously before accepting clients
     # so the first login already sees the cleaned-up world.
     _recover_sailing_boats()
-    _purge_orphan_monster_state()
     # Hydrate the entity-existence caches BEFORE loading monster state so
     # the AI loop's first-tick safety net has a complete view. Order is
     # idempotent — loading state then loading caches would work too, but
@@ -7959,10 +8526,23 @@ async def main() -> None:
     # passability tiles (no walking into water/coast). When absent,
     # movement is unrestricted (original behavior).
     terrain.load()
-    # Rehydrate the AI dict from the persisted mirror (post-purge so only
-    # valid rows reach memory). Non-boss monsters reset to full HP per the
-    # partial-persist rule; bosses keep their last persisted HP.
+    # Rehydrate the AI dict from the persisted mirror. Non-boss monsters
+    # reset to full HP per the partial-persist rule; bosses keep their last
+    # persisted HP.
     _load_monster_state_from_db()
+    # Structure HP mirror rehydrate — walls / towers / halls keep their
+    # damaged state across restarts. Runs before the orphan purge so any
+    # orphaned rows (world_entities parent gone via admin_delete) get
+    # skipped via the existing world_entities existence check inside
+    # _load_structure_state_from_db.
+    _load_structure_state_from_db()
+    # Orphan purge runs AFTER rehydrate so it can see the loaded ghost
+    # rows. Any monsters_state entry whose id doesn't have a live
+    # world_entities row gets dropped from both RAM and SQLite. Previously
+    # this ran BEFORE rehydrate against an empty dict — did nothing, and
+    # procedural monsters from before PROCEDURAL_MONSTERS=false lingered
+    # in the AI loop count forever.
+    _purge_orphan_monster_state()
     print(f"VikingVale server  ws://0.0.0.0:{PORT}")
     print("Press Ctrl+C to stop.\n")
     async with serve(handle_connection, "0.0.0.0", PORT) as server:
@@ -7976,6 +8556,7 @@ async def main() -> None:
             _shop_stock_autosave_loop(),
             _uptime_counter_loop(),
             _monster_state_flush_loop(),
+            _structure_state_flush_loop(),
         )
 
 

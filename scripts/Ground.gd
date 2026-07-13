@@ -8,6 +8,13 @@ extends Node2D
 @warning_ignore("unused_signal")
 signal tile_changed(tx: int, ty: int, biome_id: int)
 
+## Fired once when the SubViewport atlas bake completes (`_atlas_ready` flips
+## true). Consumers that need the real 32×32 baked texture per biome
+## (e.g. the admin swatch grid) listen for this to swap their placeholder
+## color chips for real thumbnails. Never emitted again — a one-shot.
+@warning_ignore("unused_signal")
+signal atlas_ready
+
 const TILE := 32
 const COLS := 300
 # ROWS covers BOTH the exterior playable area (rows 0..EXTERIOR_ROWS-1) and
@@ -50,7 +57,7 @@ var _impassable_tiles:  Dictionary = {}    # idx → true   (only stored when bl
 # startup via SubViewport, then handed to the terrain_blend shader as a uniform.
 var _biome_atlas_img: Image       = null
 var _biome_atlas_tex: ImageTexture = null
-const BIOME_COUNT := 26
+const BIOME_COUNT := 50
 
 # True once the atlas bake has finished AND terrain_blend.gdshader is bound to
 # this node. Before that, _draw() falls back to the CPU per-tile dispatch so the
@@ -87,6 +94,41 @@ const B_SAND          := 22
 const B_DIRT_PATH     := 23
 const B_SHALLOW_WATER := 24  # walkable water (unlike ocean/coast)
 const B_FARM_CROPS    := 25
+# Grass-family exterior additions — IDs 26..36 kept CONTIGUOUS so the shader's
+# is_grass predicate can use a range test (b >= 26 && b <= 36) alongside the
+# original 0..5 block. Hills variants + transition tiles + meadow/tundra/
+# clearing all belong here.
+const B_PLAINS_HILLS  := 26
+const B_OAK_HILLS     := 27
+const B_PINE_HILLS    := 28
+const B_SNOW_HILLS    := 29
+const B_FOREST_EDGE   := 30
+const B_SWAMP_EDGE    := 31
+const B_SHORE_GRASS   := 32
+const B_SNOW_LINE     := 33
+const B_MEADOW        := 34
+const B_TUNDRA        := 35
+const B_CLEARING      := 36
+# Non-grass-family additions — IDs 37..47. Rocky / desert / hellish hills,
+# variety terrains, and beach/water extras. `reef` and `tidepool` participate
+# in the shader's is_water predicate; the rest stay outside category groups.
+const B_ASHLANDS_HILLS  := 37
+const B_HELHEIM_HILLS   := 38
+const B_ROCKY_HILLS     := 39
+const B_SAND_HILLS      := 40
+const B_CLIFF_SCREE     := 41
+const B_MOSS_ROCK       := 42
+const B_VOLCANIC_GLASS  := 43
+const B_REEF            := 44  # walkable shallow water variant
+const B_TIDEPOOL        := 45  # walkable shallow water variant
+const B_WET_SAND        := 46
+const B_DRIFTWOOD_SHORE := 47
+# Bridges — walkable tiles that sit ON water. Painted over water tiles for
+# river crossings. Not in is_water/is_grass so the shader treats them as
+# ordinary land — the water ripples showing at the tile's north/south
+# edges are drawn in the _draw_*_bridge functions themselves.
+const B_WOOD_BRIDGE   := 48
+const B_STONE_BRIDGE  := 49
 
 const _BIOME_NAMES := [
 	"plains", "plains", "oak_forest", "pine_forest", "dark_forest",
@@ -95,6 +137,16 @@ const _BIOME_NAMES := [
 	"wood_floor", "stone_floor", "red_carpet", "hearth_stone",
 	"wall_wood", "wall_stone",
 	"sand", "dirt_path", "shallow_water", "farm_crops",
+	# Grass-family block (26..36) — contiguous so is_grass stays a cheap range test.
+	"plains_hills", "oak_hills", "pine_hills", "snow_hills",
+	"forest_edge", "swamp_edge", "shore_grass", "snow_line",
+	"meadow", "tundra", "clearing",
+	# Non-grass block (37..47).
+	"ashlands_hills", "helheim_hills", "rocky_hills", "sand_hills",
+	"cliff_scree", "moss_rock", "volcanic_glass",
+	"reef", "tidepool", "wet_sand", "driftwood_shore",
+	# Bridges (48..49) — walkable-over-water.
+	"wood_bridge", "stone_bridge",
 ]
 
 func _ready() -> void:
@@ -202,24 +254,80 @@ func _bid_at(tx: int, ty: int) -> int:
 	return _biome_cache[idx]
 
 func _is_impassable_bid(bid: int) -> bool:
+	# Water + walls + cliffs block. All hill biomes (both grass-family and
+	# non-grass block) also block — hills read as elevated terrain that the
+	# player has to path around, matching how cliffs work. Server terrain
+	# bitmap must be re-baked (admin panel → Bake Terrain Bitmap) for
+	# monster AI to also route around hills; without a re-bake, the client
+	# blocks but the server keeps chasing straight through.
 	return (bid == B_OCEAN or bid == B_COAST or bid == B_CLIFF
-		or bid == B_WALL_WOOD or bid == B_WALL_STONE)
+		or bid == B_WALL_WOOD or bid == B_WALL_STONE
+		or bid == B_PLAINS_HILLS or bid == B_OAK_HILLS
+		or bid == B_PINE_HILLS or bid == B_SNOW_HILLS
+		or bid == B_ASHLANDS_HILLS or bid == B_HELHEIM_HILLS
+		or bid == B_ROCKY_HILLS or bid == B_SAND_HILLS)
+
+## Public wrapper on _is_impassable_bid + biome_name_to_id. Single source
+## of truth for what blocks movement across client collision + server-side
+## terrain bake. TerrainBaker.bake() calls this so the passability bitmap
+## uploaded to the server matches Ground's live collision exactly.
+func is_biome_impassable(biome_name: String) -> bool:
+	return _is_impassable_bid(biome_name_to_id(biome_name))
+
+## Cache of 32×32 ImageTextures keyed by biome name. Populated lazily by
+## get_biome_thumbnail so the crop + wrap cost only pays on first call
+## per biome. Cleared automatically if _biome_atlas_img is rebaked.
+var _biome_thumb_cache: Dictionary = {}
+
+## Returns a 32×32 Texture2D of the biome's baked atlas cell, or null if
+## the atlas hasn't finished baking yet. Used by the admin panel's tile
+## swatch grid to show the actual tile art rather than a flat color chip.
+##
+## Layout matches _bake_biome_atlas: cells are stacked vertically, one
+## 32×32 cell per biome id from top (id 0) down. Crop = Rect2i(0, bid*32,
+## 32, 32) from the cached _biome_atlas_img.
+func get_biome_thumbnail(biome_name: String) -> Texture2D:
+	if not _atlas_ready or _biome_atlas_img == null:
+		return null
+	if _biome_thumb_cache.has(biome_name):
+		return _biome_thumb_cache[biome_name]
+	var bid := biome_name_to_id(biome_name)
+	if bid < 0 or bid >= BIOME_COUNT:
+		return null
+	var region := Rect2i(0, bid * TILE, TILE, TILE)
+	var cell_img := _biome_atlas_img.get_region(region)
+	if cell_img == null or cell_img.is_empty():
+		return null
+	var tex := ImageTexture.create_from_image(cell_img)
+	_biome_thumb_cache[biome_name] = tex
+	return tex
 
 ## Rebuild the single combined collision body from the effective (override-aware)
 ## biome map. Called once at startup and again whenever a tile is painted —
 ## handles both adding and removing impassable tiles cleanly.
+##
+## A tile is considered impassable when EITHER the biome id blocks (water,
+## cliffs, walls, hills — see _is_impassable_bid) OR the admin has explicitly
+## flipped its passability via the Pass tile button (stored in
+## _impassable_tiles). Previously this only looked at the biome — the Pass
+## button wrote to the dict but no collision was ever rebuilt from it, so
+## clicking Pass had no effect on player movement.
 func _rebuild_impassable_collision() -> void:
 	if _collision_body != null and is_instance_valid(_collision_body):
 		_collision_body.queue_free()
 	var body := StaticBody2D.new()
-	body.collision_layer = 2   # blocks on-foot movement (water + cliffs)
+	body.collision_layer = 2   # blocks on-foot movement (water + cliffs + walls + hills + Pass overrides)
 	body.collision_mask  = 0
 	add_child(body)
 	_collision_body = body
 	for ty in range(ROWS):
 		var run_start := -1
 		for tx in range(COLS + 1):
-			var imp := tx < COLS and _is_impassable_bid(_bid_at(tx, ty))
+			var imp := false
+			if tx < COLS:
+				var idx := ty * COLS + tx
+				imp = (_is_impassable_bid(_bid_at(tx, ty))
+					or _impassable_tiles.has(idx))
 			if imp and run_start < 0:
 				run_start = tx
 			elif not imp and run_start >= 0:
@@ -297,6 +405,7 @@ func _activate_terrain_shader() -> void:
 	_atlas_ready = true
 	set_process(false)
 	queue_redraw()
+	atlas_ready.emit()
 
 ## Dispatcher used by the atlas baker — same routing as _draw_tile but no
 ## edge-blend post pass (the shader will handle inter-biome blending later).
@@ -331,6 +440,30 @@ func _draw_biome_cell(ci: CanvasItem, bid: int, x: int, y: int) -> void:
 		"dirt_path":     _draw_dirt_path(ci, hv, x, y, cx, cy)
 		"shallow_water": _draw_shallow_water(ci, hv, x, y, cx, cy)
 		"farm_crops":    _draw_farm_crops(ci, hv, x, y, cx, cy)
+		"plains_hills":    _draw_plains_hills(ci, hv, x, y, cx, cy)
+		"oak_hills":       _draw_oak_hills(ci, hv, x, y, cx, cy)
+		"pine_hills":      _draw_pine_hills(ci, hv, x, y, cx, cy)
+		"snow_hills":      _draw_snow_hills(ci, hv, x, y, cx, cy)
+		"forest_edge":     _draw_forest_edge(ci, hv, x, y, cx, cy)
+		"swamp_edge":      _draw_swamp_edge(ci, hv, x, y, cx, cy)
+		"shore_grass":     _draw_shore_grass(ci, hv, x, y, cx, cy)
+		"snow_line":       _draw_snow_line(ci, hv, x, y, cx, cy)
+		"meadow":          _draw_meadow(ci, hv, x, y, cx, cy)
+		"tundra":          _draw_tundra(ci, hv, x, y, cx, cy)
+		"clearing":        _draw_clearing(ci, hv, x, y, cx, cy)
+		"ashlands_hills":  _draw_ashlands_hills(ci, hv, x, y, cx, cy)
+		"helheim_hills":   _draw_helheim_hills(ci, hv, x, y, cx, cy)
+		"rocky_hills":     _draw_rocky_hills(ci, hv, x, y, cx, cy)
+		"sand_hills":      _draw_sand_hills(ci, hv, x, y, cx, cy)
+		"cliff_scree":     _draw_cliff_scree(ci, hv, x, y, cx, cy)
+		"moss_rock":       _draw_moss_rock(ci, hv, x, y, cx, cy)
+		"volcanic_glass":  _draw_volcanic_glass(ci, hv, x, y, cx, cy)
+		"reef":            _draw_reef(ci, hv, x, y, cx, cy)
+		"tidepool":        _draw_tidepool(ci, hv, x, y, cx, cy)
+		"wet_sand":        _draw_wet_sand(ci, hv, x, y, cx, cy)
+		"driftwood_shore": _draw_driftwood_shore(ci, hv, x, y, cx, cy)
+		"wood_bridge":     _draw_wood_bridge(ci, hv, x, y, cx, cy)
+		"stone_bridge":    _draw_stone_bridge(ci, hv, x, y, cx, cy)
 		_:             _draw_plains(ci, hv, x, y, cx, cy)
 
 ## THE single entry point for mutating a tile. Nothing else (editor, network,
@@ -427,6 +560,10 @@ func apply_tile_overrides(overrides: Array) -> void:
 	# Auto-refresh the minimap so it reflects the server's saved overrides
 	# right after the login burst, without the admin needing to click Save Map.
 	Events.minimap_refresh.emit()
+	# Sentinel emit so HillOverlay (and any future listeners) know a bulk
+	# ingest just happened. The bulk sentinel skips per-tile echoes, so this
+	# is a single wake-up, not per-override chatter.
+	tile_changed.emit(-1, -1, -1)
 
 
 ## Pack the editor's int-100..100 hue/brightness shift into the RG8 lookup
@@ -685,6 +822,30 @@ func _biome_base_color(biome: String) -> Color:
 		"dirt_path":     return Color(0.42, 0.32, 0.20)
 		"shallow_water": return Color(0.45, 0.65, 0.85)
 		"farm_crops":    return Color(0.35, 0.22, 0.10)
+		"plains_hills":    return Color(0.34, 0.58, 0.24)
+		"oak_hills":       return Color(0.22, 0.48, 0.16)
+		"pine_hills":      return Color(0.14, 0.34, 0.16)
+		"snow_hills":      return Color(0.86, 0.94, 0.98)
+		"forest_edge":     return Color(0.28, 0.52, 0.22)
+		"swamp_edge":      return Color(0.26, 0.36, 0.20)
+		"shore_grass":     return Color(0.60, 0.66, 0.42)
+		"snow_line":       return Color(0.62, 0.75, 0.62)
+		"meadow":          return Color(0.44, 0.68, 0.30)
+		"tundra":          return Color(0.50, 0.55, 0.46)
+		"clearing":        return Color(0.36, 0.58, 0.24)
+		"ashlands_hills":  return Color(0.42, 0.20, 0.08)
+		"helheim_hills":   return Color(0.32, 0.08, 0.42)
+		"rocky_hills":     return Color(0.44, 0.42, 0.38)
+		"sand_hills":      return Color(0.82, 0.72, 0.50)
+		"cliff_scree":     return Color(0.38, 0.34, 0.30)
+		"moss_rock":       return Color(0.34, 0.42, 0.28)
+		"volcanic_glass":  return Color(0.12, 0.10, 0.14)
+		"reef":            return Color(0.48, 0.72, 0.78)
+		"tidepool":        return Color(0.40, 0.60, 0.72)
+		"wet_sand":        return Color(0.62, 0.54, 0.38)
+		"driftwood_shore": return Color(0.78, 0.70, 0.52)
+		"wood_bridge":     return Color(0.55, 0.38, 0.20)
+		"stone_bridge":    return Color(0.62, 0.60, 0.56)
 		_:             return Color(0.30, 0.52, 0.20)
 
 func _draw_tile(biome: String, hv: int, tx: int, ty: int, x: int, y: int) -> void:
@@ -718,6 +879,30 @@ func _draw_tile(biome: String, hv: int, tx: int, ty: int, x: int, y: int) -> voi
 		"dirt_path":     _draw_dirt_path(self, hv, x, y, cx, cy)
 		"shallow_water": _draw_shallow_water(self, hv, x, y, cx, cy)
 		"farm_crops":    _draw_farm_crops(self, hv, x, y, cx, cy)
+		"plains_hills":    _draw_plains_hills(self, hv, x, y, cx, cy)
+		"oak_hills":       _draw_oak_hills(self, hv, x, y, cx, cy)
+		"pine_hills":      _draw_pine_hills(self, hv, x, y, cx, cy)
+		"snow_hills":      _draw_snow_hills(self, hv, x, y, cx, cy)
+		"forest_edge":     _draw_forest_edge(self, hv, x, y, cx, cy)
+		"swamp_edge":      _draw_swamp_edge(self, hv, x, y, cx, cy)
+		"shore_grass":     _draw_shore_grass(self, hv, x, y, cx, cy)
+		"snow_line":       _draw_snow_line(self, hv, x, y, cx, cy)
+		"meadow":          _draw_meadow(self, hv, x, y, cx, cy)
+		"tundra":          _draw_tundra(self, hv, x, y, cx, cy)
+		"clearing":        _draw_clearing(self, hv, x, y, cx, cy)
+		"ashlands_hills":  _draw_ashlands_hills(self, hv, x, y, cx, cy)
+		"helheim_hills":   _draw_helheim_hills(self, hv, x, y, cx, cy)
+		"rocky_hills":     _draw_rocky_hills(self, hv, x, y, cx, cy)
+		"sand_hills":      _draw_sand_hills(self, hv, x, y, cx, cy)
+		"cliff_scree":     _draw_cliff_scree(self, hv, x, y, cx, cy)
+		"moss_rock":       _draw_moss_rock(self, hv, x, y, cx, cy)
+		"volcanic_glass":  _draw_volcanic_glass(self, hv, x, y, cx, cy)
+		"reef":            _draw_reef(self, hv, x, y, cx, cy)
+		"tidepool":        _draw_tidepool(self, hv, x, y, cx, cy)
+		"wet_sand":        _draw_wet_sand(self, hv, x, y, cx, cy)
+		"driftwood_shore": _draw_driftwood_shore(self, hv, x, y, cx, cy)
+		"wood_bridge":     _draw_wood_bridge(self, hv, x, y, cx, cy)
+		"stone_bridge":    _draw_stone_bridge(self, hv, x, y, cx, cy)
 		_:             _draw_plains(self, hv, x, y, cx, cy)
 
 	# Biome edge transitions — width / intensity / dither scale vary per biome PAIR:
@@ -1345,6 +1530,551 @@ func _draw_farm_crops(ci: CanvasItem, hv: int, x: int, y: int, _cx: float, _cy: 
 		var sx := x + 4 + ((hv >> (i * 2)) % 22)
 		var sy := y + 6 + ((hv >> (i * 3)) % 20)
 		ci.draw_rect(Rect2(sx, sy, 1, 3), sprout)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ── Hills / transitions / variety / beach biomes (Track 2 expansion) ─────────
+# All follow the same signature (ci, hv, x, y, cx, cy). Hills draw a top
+# highlight band + bottom shadow band to fake a ridge silhouette without
+# breaking the tileable atlas grid. Transitions blend two source biomes'
+# base colors with hv-scattered patches so painted seams read as gradual
+# rather than a hard line.
+
+# ── Hill tiles — SEAMLESS heavy-texture surfaces. ─────────────────────────
+# Same principle as the red_carpet fix: NO edge trim, NO directional
+# strips, NO features that stop at tile boundaries. Every mark uses
+# world-coordinate (`x + local_offset`) sampling so the pattern flows
+# across seams — a 3×3 patch of hill tiles reads as one continuous
+# rocky mountain region, not nine bordered squares.
+#
+# Individual tiles get elevation cues from:
+#   1. Dense rock/scree scatter across the full tile face
+#   2. Muted-tone base colors darker than the surrounding terrain
+#   3. Small highlight dots (bright rocks catching light) placed
+#      independently of tile boundaries via `(x, y)` hashing
+
+func _draw_plains_hills(ci: CanvasItem, hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	# Grass-topped rocky rise. Base is a mottled darker grass than plains
+	# so a cluster of hills reads as "high grass ridge" against surrounding
+	# meadow. Rocks poke through everywhere — dense scree makes the tile
+	# feel elevated + weighty.
+	var base := Color(0.30, 0.48, 0.20) if hv % 3 != 0 else Color(0.26, 0.44, 0.18)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Rock outcrops — 6 rocks per tile, positions seeded from WORLD coords
+	# so adjacent tiles don't line up their rocks into visible grid rows.
+	var rock := Color(0.55, 0.50, 0.42)
+	var rock_shadow := Color(0.36, 0.32, 0.26)
+	for i in range(6):
+		var nh := (x * 73856 + y * 19349) ^ (i * 83492)
+		var sx := x + ((nh >> 3) & 27)
+		var sy := y + ((nh >> 8) & 27)
+		var sz := 2 + ((nh >> 12) & 2)
+		ci.draw_rect(Rect2(sx, sy, sz, sz), rock)
+		ci.draw_rect(Rect2(sx, sy + sz - 1, sz, 1), rock_shadow)
+	# Sparse grass tufts filling gaps.
+	for i in range(3):
+		var nh2 := (x * 47143 + y * 65867) ^ (i * 24029)
+		var sx2 := x + ((nh2 >> 3) & 29)
+		var sy2 := y + ((nh2 >> 9) & 29)
+		ci.draw_rect(Rect2(sx2, sy2, 1, 2), base.darkened(0.35))
+
+
+func _draw_oak_hills(ci: CanvasItem, hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	# Wooded rocky slope. Darker forest-floor base with big moss-covered
+	# stones. Adjacent tiles read as one forested ridge.
+	var base := Color(0.20, 0.38, 0.14) if hv % 3 == 0 else Color(0.17, 0.34, 0.12)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Big moss-covered boulders (2-3 per tile).
+	var moss := Color(0.30, 0.44, 0.20)
+	var stone := Color(0.42, 0.40, 0.36)
+	for i in range(2):
+		var nh := (x * 82471 + y * 39847) ^ (i * 91201)
+		var cxx := x + 4 + ((nh >> 3) & 23)
+		var cyy := y + 4 + ((nh >> 8) & 23)
+		ci.draw_circle(Vector2(float(cxx), float(cyy)), 4.0, stone)
+		ci.draw_circle(Vector2(float(cxx - 1), float(cyy - 2)), 2.5, moss)
+	# Small pebbles filling.
+	for i in range(4):
+		var nh2 := (x * 17389 + y * 42107) ^ (i * 55403)
+		var px := x + ((nh2 >> 3) & 29)
+		var py := y + ((nh2 >> 9) & 29)
+		ci.draw_rect(Rect2(px, py, 2, 2), stone.darkened(0.15))
+
+
+func _draw_pine_hills(ci: CanvasItem, hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	# Steep pine slopes — very dark forest floor with jagged rocks.
+	var base := Color(0.12, 0.28, 0.14) if hv % 3 == 0 else Color(0.10, 0.24, 0.12)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Jagged dark rocks scattered densely.
+	var rock := Color(0.32, 0.30, 0.28)
+	for i in range(7):
+		var nh := (x * 63151 + y * 24631) ^ (i * 47921)
+		var sx := x + ((nh >> 3) & 27)
+		var sy := y + ((nh >> 8) & 27)
+		var sz := 2 + ((nh >> 12) & 2)
+		ci.draw_rect(Rect2(sx, sy, sz, sz), rock)
+	# Fallen needles as short brown lines — random direction per world pos.
+	var needle_dark := Color(0.22, 0.14, 0.08)
+	for i in range(4):
+		var nh2 := (x * 12583 + y * 96731) ^ (i * 28471)
+		var nx := x + ((nh2 >> 3) & 29)
+		var ny := y + ((nh2 >> 9) & 29)
+		var dx := 2 - int((nh2 >> 15) & 5)
+		var dy := 1 + int((nh2 >> 18) & 3)
+		ci.draw_line(Vector2(float(nx), float(ny)),
+				Vector2(float(nx + dx), float(ny + dy)),
+				needle_dark, 1.0)
+
+
+func _draw_snow_hills(ci: CanvasItem, hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	# Frozen peaks — bright white base with dark cold rock poking through.
+	var base := Color(0.90, 0.94, 0.98) if hv % 3 != 0 else Color(0.85, 0.90, 0.96)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Exposed rock outcrops — grey-blue stones.
+	var stone := Color(0.55, 0.60, 0.68)
+	var stone_dark := Color(0.42, 0.48, 0.58)
+	for i in range(4):
+		var nh := (x * 78493 + y * 21073) ^ (i * 59217)
+		var sx := x + 2 + ((nh >> 3) & 25)
+		var sy := y + 2 + ((nh >> 8) & 25)
+		var sz := 3 + ((nh >> 12) & 2)
+		ci.draw_rect(Rect2(sx, sy, sz, sz), stone)
+		ci.draw_rect(Rect2(sx, sy + sz - 1, sz, 1), stone_dark)
+	# Powdery snow bumps highlight.
+	for i in range(3):
+		var nh2 := (x * 33871 + y * 84109) ^ (i * 71203)
+		var px := x + ((nh2 >> 3) & 29)
+		var py := y + ((nh2 >> 9) & 29)
+		ci.draw_circle(Vector2(float(px), float(py)), 1.5, Color(1.0, 1.0, 1.0))
+
+
+func _draw_forest_edge(ci: CanvasItem, hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	# Plains ↔ oak_forest blend — grass base with scattered saplings.
+	var base := Color(0.28, 0.52, 0.22) if hv % 3 != 0 else Color(0.24, 0.48, 0.20)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Sapling — a small dark triangle + trunk line.
+	for i in range(2):
+		var sx := x + 6 + ((hv >> (i * 3)) % 20)
+		var sy := y + 8 + ((hv >> (i * 2)) % 18)
+		ci.draw_line(Vector2(float(sx), float(sy)), Vector2(float(sx), float(sy + 4)),
+				Color(0.30, 0.20, 0.10), 1.0)
+		ci.draw_circle(Vector2(float(sx), float(sy - 1)), 2.0, Color(0.14, 0.34, 0.12))
+	# Grass tufts.
+	for i in range(2):
+		var sx2 := x + 3 + ((hv >> (i * 2)) % 24)
+		var sy2 := y + 20 + ((hv >> (i * 3)) % 8)
+		ci.draw_rect(Rect2(sx2, sy2, 1, 2), base.darkened(0.30))
+
+
+func _draw_swamp_edge(ci: CanvasItem, hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	# Plains ↔ swamp blend — patchy wet grass + mud spots.
+	var base := Color(0.26, 0.36, 0.20) if hv % 3 == 0 else Color(0.22, 0.32, 0.16)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Mud patches.
+	for i in range(2):
+		var mx := x + 4 + ((hv >> (i * 3)) % 20)
+		var my := y + 6 + ((hv >> (i * 2)) % 18)
+		ci.draw_circle(Vector2(float(mx), float(my)), 3.0, Color(0.20, 0.16, 0.10))
+	# Reed sprigs.
+	if hv % 4 == 0:
+		ci.draw_line(Vector2(float(x + 10), float(y + 22)),
+				Vector2(float(x + 10), float(y + 16)),
+				Color(0.42, 0.48, 0.20), 1.0)
+
+
+func _draw_shore_grass(ci: CanvasItem, hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	# Plains ↔ sand blend — coarse grass over sandy soil.
+	var base := Color(0.60, 0.66, 0.42) if hv % 3 != 0 else Color(0.56, 0.62, 0.38)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Sand patches.
+	for i in range(3):
+		var sx := x + ((hv >> (i * 2)) % TILE)
+		var sy := y + ((hv >> (i * 3)) % TILE)
+		ci.draw_circle(Vector2(float(sx), float(sy)), 2.0, Color(0.82, 0.74, 0.54, 0.85))
+	# Grass blades.
+	for i in range(3):
+		var sx2 := x + 6 + ((hv >> (i * 2)) % 20)
+		var sy2 := y + 10 + ((hv >> (i * 3)) % 14)
+		ci.draw_rect(Rect2(sx2, sy2, 1, 3), Color(0.34, 0.50, 0.22))
+
+
+func _draw_snow_line(ci: CanvasItem, hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	# Plains ↔ snow blend — patchy snow on grass.
+	var base := Color(0.62, 0.75, 0.62) if hv % 3 != 0 else Color(0.56, 0.70, 0.56)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Snow drifts.
+	for i in range(3):
+		var sx := x + ((hv >> (i * 2)) % TILE)
+		var sy := y + ((hv >> (i * 3)) % TILE)
+		ci.draw_circle(Vector2(float(sx), float(sy)), 3.0, Color(0.90, 0.94, 0.98, 0.85))
+	# Grass poking through.
+	for i in range(2):
+		var sx2 := x + 8 + ((hv >> (i * 3)) % 16)
+		var sy2 := y + 18 + ((hv >> (i * 2)) % 10)
+		ci.draw_rect(Rect2(sx2, sy2, 1, 2), Color(0.32, 0.50, 0.22))
+
+
+func _draw_meadow(ci: CanvasItem, hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	# Flower-strewn plains — brighter grass base with 4-5 flower dots.
+	var base := Color(0.44, 0.68, 0.30) if hv % 3 != 0 else Color(0.40, 0.64, 0.28)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Flowers — cycle through colors for variety.
+	var flowers := [Color(0.95, 0.85, 0.30), Color(0.92, 0.42, 0.58),
+					Color(0.72, 0.42, 0.88), Color(0.98, 0.98, 0.94)]
+	for i in range(4):
+		var fx := x + 4 + ((hv >> (i * 2)) % 24)
+		var fy := y + 4 + ((hv >> (i * 3)) % 24)
+		var fc: Color = flowers[(hv + i) % 4]
+		ci.draw_circle(Vector2(float(fx), float(fy)), 1.4, fc)
+
+
+func _draw_tundra(ci: CanvasItem, hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	# Cold plains — muted olive-brown with frost specks.
+	var base := Color(0.50, 0.55, 0.46) if hv % 3 == 0 else Color(0.46, 0.51, 0.42)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Lichen patches.
+	for i in range(2):
+		var lx := x + 6 + ((hv >> (i * 3)) % 20)
+		var ly := y + 8 + ((hv >> (i * 2)) % 16)
+		ci.draw_circle(Vector2(float(lx), float(ly)), 3.0, Color(0.60, 0.66, 0.48, 0.85))
+	# Frost specks.
+	for i in range(3):
+		var sx := x + ((hv >> (i * 2)) % TILE)
+		var sy := y + ((hv >> (i * 3)) % TILE)
+		ci.draw_rect(Rect2(sx, sy, 1, 1), Color(0.82, 0.88, 0.90))
+
+
+func _draw_clearing(ci: CanvasItem, hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	# Forest opening — grass with tree stumps.
+	var base := Color(0.36, 0.58, 0.24) if hv % 3 != 0 else Color(0.32, 0.54, 0.20)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Central stump — one per tile.
+	if hv % 3 != 0:
+		var sx := x + 12 + ((hv >> 2) % 8)
+		var sy := y + 12 + ((hv >> 5) % 8)
+		ci.draw_circle(Vector2(float(sx), float(sy)), 4.0, Color(0.42, 0.28, 0.14))
+		ci.draw_circle(Vector2(float(sx), float(sy)), 3.0, Color(0.62, 0.44, 0.22))
+		ci.draw_circle(Vector2(float(sx), float(sy)), 1.0, Color(0.34, 0.22, 0.10))
+	# Grass tufts.
+	for i in range(2):
+		var gx := x + 4 + ((hv >> (i * 2)) % 24)
+		var gy := y + 4 + ((hv >> (i * 3)) % 24)
+		ci.draw_rect(Rect2(gx, gy, 1, 2), Color(0.24, 0.42, 0.16))
+
+
+func _draw_ashlands_hills(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	# Volcanic slope — dark charred rock, cracks, ember flecks. Seamless
+	# (world-coord seeded) so a cluster reads as one lava plateau.
+	var base := Color(0.34, 0.16, 0.08)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Dark charred rock chunks.
+	var rock := Color(0.20, 0.10, 0.06)
+	for i in range(6):
+		var nh := (x * 91129 + y * 42421) ^ (i * 33619)
+		var sx := x + ((nh >> 3) & 27)
+		var sy := y + ((nh >> 8) & 27)
+		var sz := 2 + ((nh >> 12) & 2)
+		ci.draw_rect(Rect2(sx, sy, sz, sz), rock)
+	# Lava cracks — glowing orange lines.
+	var lava := Color(0.98, 0.42, 0.10)
+	for i in range(2):
+		var nh2 := (x * 24631 + y * 78493) ^ (i * 62983)
+		var sx2 := x + 2 + ((nh2 >> 3) & 25)
+		var sy2 := y + 2 + ((nh2 >> 8) & 25)
+		var dx := 3 - int((nh2 >> 12) & 5)
+		var dy := 2 + int((nh2 >> 15) & 3)
+		ci.draw_line(Vector2(float(sx2), float(sy2)),
+				Vector2(float(sx2 + dx), float(sy2 + dy)), lava, 1.0)
+	# Ember specks.
+	for i in range(3):
+		var nh3 := (x * 55927 + y * 14713) ^ (i * 88129)
+		var ex := x + ((nh3 >> 3) & 29)
+		var ey := y + ((nh3 >> 9) & 29)
+		ci.draw_rect(Rect2(ex, ey, 1, 1), Color(1.0, 0.55, 0.15))
+
+
+func _draw_helheim_hills(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	# Otherworldly purple ridge — dark stones + wisp glows. Seamless.
+	var base := Color(0.28, 0.08, 0.38)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Rock chunks in a darker hue.
+	var rock := Color(0.16, 0.04, 0.24)
+	for i in range(6):
+		var nh := (x * 38491 + y * 61283) ^ (i * 47927)
+		var rx := x + ((nh >> 3) & 27)
+		var ry := y + ((nh >> 8) & 27)
+		var sz := 2 + ((nh >> 12) & 2)
+		ci.draw_rect(Rect2(rx, ry, sz, sz), rock)
+	# Wisp glow specks.
+	for i in range(3):
+		var nh2 := (x * 71203 + y * 29473) ^ (i * 54781)
+		var sx := x + ((nh2 >> 3) & 29)
+		var sy := y + ((nh2 >> 9) & 29)
+		ci.draw_circle(Vector2(float(sx), float(sy)), 1.4,
+				Color(0.72, 0.60, 0.95, 0.65))
+
+
+func _draw_rocky_hills(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	# Grey stone mountain terrain. Dense scree covers the whole tile so
+	# adjacent tiles blend into one big rocky region. Seamless.
+	var base := Color(0.42, 0.40, 0.36)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Dense scree stones — 8 per tile.
+	for i in range(8):
+		var nh := (x * 17389 + y * 82471) ^ (i * 26981)
+		var sx := x + ((nh >> 3) & 27)
+		var sy := y + ((nh >> 8) & 27)
+		var sz := 2 + ((nh >> 12) & 2)
+		var stone_shade: Color = base.darkened(0.25) if ((nh >> 16) & 1) == 0 else base.darkened(0.40)
+		ci.draw_rect(Rect2(sx, sy, sz, sz), stone_shade)
+		# Small shadow on the south edge.
+		ci.draw_rect(Rect2(sx, sy + sz - 1, sz, 1), Color(0.22, 0.20, 0.18))
+	# Occasional bright highlight (rock catching light).
+	for i in range(2):
+		var nh2 := (x * 33871 + y * 92401) ^ (i * 51119)
+		var hx := x + ((nh2 >> 3) & 29)
+		var hy := y + ((nh2 >> 9) & 29)
+		ci.draw_rect(Rect2(hx, hy, 1, 1), Color(0.72, 0.68, 0.62))
+
+
+func _draw_sand_hills(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	# Dune slopes — tan sand with continuous ripple lines that flow across
+	# tile seams. Ripple phase uses world x (not local i) so a cluster of
+	# sand_hills tiles forms one big undulating dune field.
+	var base := Color(0.80, 0.70, 0.48)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Ripple crests — sinusoidal, phase indexed by world x for seam-free flow.
+	var crest := base.darkened(0.18)
+	var trough := base.darkened(0.10)
+	for row in range(4):
+		var yy: float = float(y + 4 + row * 7)
+		for i in range(0, TILE, 1):
+			var wx: int = x + i
+			# Continuous phase — every tile picks up where the previous left off.
+			var phase: float = float(wx) * 0.42 + float(row) * 1.1
+			var wave: float = sin(phase)
+			var col: Color = crest if wave > 0.0 else trough
+			ci.draw_rect(Rect2(wx, int(yy + wave * 1.4), 1, 1), col)
+	# Scattered sand grains for texture.
+	for i in range(4):
+		var nh := (x * 63151 + y * 47921) ^ (i * 12583)
+		var gx := x + ((nh >> 3) & 29)
+		var gy := y + ((nh >> 9) & 29)
+		ci.draw_rect(Rect2(gx, gy, 1, 1), base.darkened(0.22))
+
+
+func _draw_cliff_scree(ci: CanvasItem, hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	# Cliff ↔ plains — rocky scree with grass tufts.
+	var base := Color(0.38, 0.34, 0.30) if hv % 3 == 0 else Color(0.34, 0.30, 0.26)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Rock chunks.
+	for i in range(3):
+		var sx := x + 3 + ((hv >> (i * 2)) % 24)
+		var sy := y + 3 + ((hv >> (i * 3)) % 24)
+		var sz := 2 + int((hv >> (i * 4)) % 3)
+		ci.draw_rect(Rect2(sx, sy, sz, sz), base.lightened(0.15))
+	# Sparse grass poking through.
+	if hv % 5 == 0:
+		ci.draw_rect(Rect2(x + 20, y + 22, 1, 2), Color(0.28, 0.44, 0.16))
+
+
+func _draw_moss_rock(ci: CanvasItem, hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	var base := Color(0.34, 0.42, 0.28) if hv % 3 != 0 else Color(0.30, 0.38, 0.24)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Rock patches showing through the moss.
+	for i in range(2):
+		var rx := x + 4 + ((hv >> (i * 3)) % 22)
+		var ry := y + 6 + ((hv >> (i * 2)) % 20)
+		ci.draw_circle(Vector2(float(rx), float(ry)), 4.0, Color(0.42, 0.40, 0.36))
+		ci.draw_circle(Vector2(float(rx - 1), float(ry - 1)), 2.0, Color(0.52, 0.50, 0.44))
+	# Moss speckle.
+	for i in range(4):
+		var sx := x + ((hv >> (i * 2)) % TILE)
+		var sy := y + ((hv >> (i * 3)) % TILE)
+		ci.draw_rect(Rect2(sx, sy, 1, 1), Color(0.42, 0.58, 0.28))
+
+
+func _draw_volcanic_glass(ci: CanvasItem, hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	# Obsidian shards over dark rock.
+	var base := Color(0.12, 0.10, 0.14) if hv % 3 == 0 else Color(0.08, 0.06, 0.10)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Sharp glass shards — triangles with sharp highlight.
+	for i in range(3):
+		var sx := x + 4 + ((hv >> (i * 3)) % 22)
+		var sy := y + 6 + ((hv >> (i * 2)) % 20)
+		ci.draw_colored_polygon(PackedVector2Array([
+			Vector2(float(sx), float(sy - 3)),
+			Vector2(float(sx + 3), float(sy + 2)),
+			Vector2(float(sx - 2), float(sy + 3))]),
+			Color(0.24, 0.18, 0.28))
+		# Highlight edge.
+		ci.draw_line(Vector2(float(sx), float(sy - 3)),
+				Vector2(float(sx + 3), float(sy + 2)),
+				Color(0.72, 0.65, 0.80, 0.75), 1.0)
+
+
+func _draw_reef(ci: CanvasItem, hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	# Shallow water with coral specks.
+	var base := Color(0.48, 0.72, 0.78) if hv % 3 != 0 else Color(0.44, 0.68, 0.74)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Coral clusters.
+	var coral := [Color(0.95, 0.55, 0.45), Color(0.98, 0.72, 0.32),
+				  Color(0.85, 0.42, 0.62)]
+	for i in range(3):
+		var cx2 := x + 6 + ((hv >> (i * 3)) % 20)
+		var cy2 := y + 6 + ((hv >> (i * 2)) % 20)
+		var cc: Color = coral[(hv + i) % 3]
+		ci.draw_circle(Vector2(float(cx2), float(cy2)), 2.0, cc)
+	# Water ripple line.
+	var t: float = float(Time.get_ticks_msec()) / 1000.0
+	var ripple := base.lightened(0.15)
+	for i in range(0, TILE, 4):
+		var xx: float = float(x + i)
+		var wy: float = float(y + 20) + sin(t * 2.0 + float(i) * 0.5) * 1.0
+		ci.draw_circle(Vector2(xx, wy), 0.8, ripple)
+
+
+func _draw_tidepool(ci: CanvasItem, hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	# Water pockets ringed by rock.
+	var rock := Color(0.42, 0.40, 0.36)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), rock)
+	# Central water pool.
+	var water := Color(0.40, 0.60, 0.72) if hv % 3 != 0 else Color(0.36, 0.56, 0.68)
+	ci.draw_circle(Vector2(float(x) + 16.0, float(y) + 16.0), 10.0, water)
+	# Wet edge highlight.
+	ci.draw_arc(Vector2(float(x) + 16.0, float(y) + 16.0), 10.0,
+			0.0, TAU, 24, Color(0.32, 0.30, 0.26), 1.0)
+	# Small critter dot.
+	if hv % 7 == 0:
+		ci.draw_circle(Vector2(float(x) + 14.0, float(y) + 14.0), 1.0,
+				Color(0.95, 0.55, 0.30))
+
+
+func _draw_wet_sand(ci: CanvasItem, hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	# Darker sand — water table just below.
+	var base := Color(0.62, 0.54, 0.38) if hv % 3 == 0 else Color(0.58, 0.50, 0.34)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Wet reflection specks.
+	for i in range(4):
+		var sx := x + ((hv >> (i * 2)) % TILE)
+		var sy := y + ((hv >> (i * 3)) % TILE)
+		ci.draw_rect(Rect2(sx, sy, 1, 1), base.lightened(0.20))
+	# Occasional shell.
+	if hv % 8 == 0:
+		ci.draw_circle(Vector2(float(x) + 18.0, float(y) + 12.0), 1.5,
+				Color(0.98, 0.92, 0.85))
+
+
+func _draw_driftwood_shore(ci: CanvasItem, hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	# Sand with a driftwood plank.
+	var base := Color(0.78, 0.70, 0.52) if hv % 3 != 0 else Color(0.74, 0.66, 0.48)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Driftwood log — angle varies by hv.
+	var wood := Color(0.42, 0.30, 0.18)
+	if hv % 2 == 0:
+		ci.draw_rect(Rect2(x + 4, y + 14, 24, 5), wood)
+		ci.draw_line(Vector2(float(x + 4), float(y + 15)),
+				Vector2(float(x + 28), float(y + 15)),
+				wood.lightened(0.20), 1.0)
+	else:
+		ci.draw_rect(Rect2(x + 12, y + 4, 5, 24), wood)
+		ci.draw_line(Vector2(float(x + 13), float(y + 4)),
+				Vector2(float(x + 13), float(y + 28)),
+				wood.lightened(0.20), 1.0)
+	# Sand specks.
+	for i in range(3):
+		var sx := x + ((hv >> (i * 2)) % TILE)
+		var sy := y + ((hv >> (i * 3)) % TILE)
+		ci.draw_rect(Rect2(sx, sy, 1, 1), base.darkened(0.15))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ── Bridge tiles — walkable-over-water. ──────────────────────────────────────
+# North + south edges (4 px each) draw animated blue water ripples so adjacent
+# bridge tiles form a continuous span with water visible above and below the
+# deck. Interior 24 px is the plank/brick deck itself, seamlessly tileable
+# via world-coord seeded detail (same technique as the hills rewrite).
+
+func _draw_wood_bridge(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	# North-edge water band (0..4 px).
+	_draw_bridge_water_band(ci, x, y, 4)
+	# South-edge water band (TILE-4..TILE).
+	_draw_bridge_water_band(ci, x, y + TILE - 4, 4)
+	# Middle 24 px: wood plank deck.
+	var deck_top: int = y + 4
+	var deck_h: int = TILE - 8
+	var base := Color(0.55, 0.38, 0.20)
+	ci.draw_rect(Rect2(x, deck_top, TILE, deck_h), base)
+	# Longitudinal plank seams — 3 running the full tile width so multiple
+	# adjacent bridge tiles form a continuous plank floor.
+	var dark := Color(0.36, 0.24, 0.12)
+	ci.draw_line(Vector2(float(x), float(deck_top + 5)),
+			Vector2(float(x + TILE), float(deck_top + 5)), dark, 1.0)
+	ci.draw_line(Vector2(float(x), float(deck_top + 12)),
+			Vector2(float(x + TILE), float(deck_top + 12)), dark, 1.0)
+	ci.draw_line(Vector2(float(x), float(deck_top + 19)),
+			Vector2(float(x + TILE), float(deck_top + 19)), dark, 1.0)
+	# Cross-planks — vertical dividers every ~10 px, phase indexed on world
+	# X so adjacent tiles line up without seams.
+	var plank_col := base.darkened(0.20)
+	var i: int = 0
+	while i < TILE:
+		var xx: int = x + ((i + x) % 12) + 2
+		if xx < x + TILE - 1:
+			ci.draw_line(Vector2(float(xx), float(deck_top)),
+					Vector2(float(xx), float(deck_top + deck_h)),
+					plank_col, 1.0)
+		i += 12
+	# Metal support nails at the plank endpoints.
+	var nail := Color(0.20, 0.20, 0.22)
+	ci.draw_rect(Rect2(x + 3, deck_top + 5, 1, 1), nail)
+	ci.draw_rect(Rect2(x + TILE - 4, deck_top + 5, 1, 1), nail)
+	ci.draw_rect(Rect2(x + 3, deck_top + deck_h - 6, 1, 1), nail)
+	ci.draw_rect(Rect2(x + TILE - 4, deck_top + deck_h - 6, 1, 1), nail)
+
+
+func _draw_stone_bridge(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	_draw_bridge_water_band(ci, x, y, 4)
+	_draw_bridge_water_band(ci, x, y + TILE - 4, 4)
+	# Stone deck.
+	var deck_top: int = y + 4
+	var deck_h: int = TILE - 8
+	var base := Color(0.62, 0.60, 0.56)
+	ci.draw_rect(Rect2(x, deck_top, TILE, deck_h), base)
+	# Running-bond brick pattern. Two rows of 4 bricks each, offset by half.
+	var mortar := base.darkened(0.35)
+	# Row 1 (top half) — full-tile brick divisions at 0, 8, 16, 24.
+	var row1_y: int = deck_top + deck_h / 2
+	ci.draw_line(Vector2(float(x), float(row1_y)),
+			Vector2(float(x + TILE), float(row1_y)), mortar, 1.0)
+	# Row 2 verticals (offset by 4 px).
+	for j in range(1, 4):
+		var vx: int = x + j * 8
+		ci.draw_line(Vector2(float(vx), float(deck_top)),
+				Vector2(float(vx), float(row1_y)), mortar, 1.0)
+		var vx2: int = x + j * 8 - 4
+		ci.draw_line(Vector2(float(vx2), float(row1_y)),
+				Vector2(float(vx2), float(deck_top + deck_h)), mortar, 1.0)
+	# Highlight strip along the top of the deck (catches light).
+	ci.draw_rect(Rect2(x, deck_top, TILE, 1), base.lightened(0.15))
+	# Occasional darker weathered brick.
+	var weathered := base.darkened(0.15)
+	ci.draw_rect(Rect2(x + ((x * 7 + y * 13) % 20), deck_top + 2, 6, 3), weathered)
+
+
+## Shared helper for the north/south water band on both bridge biomes.
+## Ripples animate off Time.get_ticks_msec and phase across tile boundaries
+## via world x, so adjacent tiles' ripples line up seamlessly.
+func _draw_bridge_water_band(ci: CanvasItem, x: int, y: int, h: int) -> void:
+	var water := Color(0.42, 0.60, 0.78)
+	ci.draw_rect(Rect2(x, y, TILE, h), water)
+	var ripple := water.lightened(0.20)
+	var t: float = float(Time.get_ticks_msec()) / 1000.0
+	for i in range(0, TILE, 2):
+		var wx: int = x + i
+		var phase: float = float(wx) * 0.42 + t * 2.0
+		var wy: float = float(y + h / 2) + sin(phase) * float(h) * 0.35
+		ci.draw_rect(Rect2(wx, int(wy), 1, 1), ripple)
+
 
 # ── Atlas bake helper ─────────────────────────────────────────────────────────
 # Inner Node2D used once at startup as the SubViewport bake target. Its _draw()

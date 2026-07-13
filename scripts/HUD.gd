@@ -5513,9 +5513,31 @@ func _action_menu_options(node: Node) -> Array:
 		"stronghold", "outpost":
 			return [{"label": "Inspect", "cb": func() -> void:
 				Events.player_interacted.emit(node)}]
-		"wall", "fortified_wall":
-			return [{"label": "Inspect", "cb": func() -> void:
-				Events.player_interacted.emit(node)}]
+		"wall", "fortified_wall", "fence", "gate", \
+		"watchtower", "guard_tower", "house_frame", "large_house", \
+		"grand_hall", "clan_hall", "well", "altar", "dock", \
+		"market_stall", "site_marker", "portal_shrine", "workbench", \
+		"smith_station", "bank_chest", "armory_rack", "plant_bed":
+			var opts: Array = []
+			var alive: bool = bool(node.get("structure_alive"))
+			var s_hp: int = int(node.get("structure_hp"))
+			var s_max: int = int(node.get("structure_max_hp"))
+			# Attack fires the left-click damage flow via Events.player_interacted.
+			if alive:
+				opts.append({"label": "Attack", "cb": func() -> void:
+					Events.player_interacted.emit(node)})
+			# Repair only shows when damaged. Server enforces owner/warband
+			# gate; the client shows the option regardless of who owns it,
+			# so a non-eligible player gets a "Only the owner..." chat back.
+			if alive and s_max > 0 and s_hp < s_max and s_hp > 0:
+				var eid: String = str(node.get("entity_id"))
+				opts.append({"label": "Repair", "cb": func() -> void:
+					NetworkManager.send_structure_repair(eid)})
+			opts.append({"label": "Inspect", "cb": func() -> void:
+				Events.chat_message.emit("You inspect the %s. (%d/%d HP)"
+					% [str(node.get("display_name")),
+					   max(0, s_hp), max(1, s_max)])})
+			return opts
 		"seal_statue":
 			# The seal's action depends on its current state, which is
 			# stored on the entity's meta. 'charged' → Awaken (gated

@@ -14,6 +14,11 @@ const CHUNK_PX      := 512   # CHUNK_SIZE * TILE
 const ACTIVE_RADIUS := 3     # chunks in each direction (= 48 tiles)
 const RES_ATTEMPTS  := 8     # resource spawn attempts per chunk
 const MON_ATTEMPTS  := 4     # monster spawn attempts per chunk
+# Kill switch for the deterministic chunk monster generator + bridge-monster
+# rolls. When false, only admin-placed monsters exist. Flip back to true to
+# restore the original procedural population. Kept as code (not deleted) so
+# the world-populate math is preserved for future use.
+const PROCEDURAL_MONSTERS := false
 
 const _Interactable := preload("res://scenes/Interactable.tscn")
 const _Monster      := preload("res://scripts/Monster.gd")
@@ -545,6 +550,17 @@ func _spawn_admin_entity(entity: Dictionary) -> void:
 			node.action_label          = str(data.get("action", "Interact"))
 			node.color                 = _arr_to_color(data.get("color"))
 			node.entity_id             = id
+			# Seed structure HP mirror from the login-burst / add payload so
+			# the HP bar draws correctly for damaged structures on first
+			# frame (server overlays these fields from structures_state at
+			# _load_world_entities time).
+			if data.has("max_hp"):
+				node.set("structure_max_hp", int(data.get("max_hp", 1)))
+				node.set("structure_hp",     int(data.get("hp", data.get("max_hp", 1))))
+				node.set("structure_alive",  bool(data.get("alive", true)))
+				# If already destroyed at spawn, apply the death visual.
+				if not bool(data.get("alive", true)) and node.has_method("destroy_structure_visual"):
+					node.call("destroy_structure_visual")
 			_node_registry[id]  = node
 			_admin_registry[id] = node
 			c.add_child(node)
@@ -568,7 +584,7 @@ func _spawn_admin_entity(entity: Dictionary) -> void:
 			NetworkManager.send_monster_join(id, pos.x, pos.y,
 				int(m.get("max_hp")), int(m.get("xp_reward")),
 				str(m.get("monster_type")), int(m.get("level")),
-				int(m.get("attack")))
+				int(m.get("attack")), true)   # seed_only: AI register, no aggro
 		"npc":
 			var n := Area2D.new()
 			n.set_script(_NPC)
@@ -972,7 +988,12 @@ func _load_chunk(cx: int, cy: int) -> void:
 	var is_interior_chunk := cy * CHUNK_PX >= EXTERIOR_ROWS * TILE
 	if not is_interior_chunk:
 		_spawn_chunk_resources(cx, cy, nodes)
-		_spawn_chunk_monsters(cx, cy, nodes)
+		if PROCEDURAL_MONSTERS:
+			_spawn_chunk_monsters(cx, cy, nodes)
+		# Ambient life — cheap non-interactable creatures per chunk. Skipped
+		# for interior chunks since interiors have no biome creatures. Freed
+		# with the rest of the chunk nodes on unload (added to `nodes`).
+		_spawn_chunk_ambient_life(cx, cy, nodes)
 	_active_chunks[key] = nodes
 	# Ask the server for the current shared state of this chunk's entities.
 	var node_ids: Array = []
@@ -1046,7 +1067,36 @@ func _spawn_chunk_resources(cx: int, cy: int, out: Array) -> void:
 		c.add_child(node)
 		out.append(node)
 
+## Instance one AmbientLife node per active chunk. The node picks its
+## creature list from the chunk-center biome via Ground.biome_at_world.
+## Added to `out` so _unload_chunk queue_frees it automatically when the
+## player wanders out of range. Purely client-visual — no server sync.
+func _spawn_chunk_ambient_life(cx: int, cy: int, out: Array) -> void:
+	var ground := get_node_or_null("Ground")
+	if ground == null:
+		return
+	var center := Vector2(float(cx) * CHUNK_PX + CHUNK_PX * 0.5,
+			float(cy) * CHUNK_PX + CHUNK_PX * 0.5)
+	var biome := ground.call("biome_at_world", center) as String
+	var script := load("res://scripts/AmbientLife.gd")
+	if script == null:
+		return
+	var node: Node2D = script.new() as Node2D
+	node.name = "AmbientLife_%d_%d" % [cx, cy]
+	# Position at chunk origin — creature coords are chunk-local (0..CHUNK_PX).
+	node.global_position = Vector2(float(cx) * CHUNK_PX, float(cy) * CHUNK_PX)
+	node.set("chunk_key", Vector2i(cx, cy))
+	add_child(node)
+	node.call("setup", biome)
+	out.append(node)
+
+
 func _spawn_chunk_monsters(cx: int, cy: int, out: Array) -> void:
+	# Kill switch — defence in depth. The call site in _load_chunk is already
+	# gated on PROCEDURAL_MONSTERS, but any future caller (bridge fill, quest
+	# hooks, etc.) that misses the gate still short-circuits here.
+	if not PROCEDURAL_MONSTERS:
+		return
 	var ground := get_node_or_null("Ground")
 	var c      := $Interactables
 	var rng    := RandomNumberGenerator.new()
@@ -1084,7 +1134,7 @@ func _spawn_chunk_monsters(cx: int, cy: int, out: Array) -> void:
 		NetworkManager.send_monster_join(m.entity_id, m.position.x, m.position.y,
 			int(m.get("max_hp")), int(m.get("xp_reward")),
 			str(m.get("monster_type")), int(m.get("level")),
-			int(m.get("attack")))
+			int(m.get("attack")), true)   # seed_only: chunk load, no aggro
 		out.append(m)
 	# Bridge monster — spawn one per border chunk (30% chance)
 	if ground != null and rng.randi() % 10 < 3:
@@ -1121,7 +1171,7 @@ func _spawn_chunk_monsters(cx: int, cy: int, out: Array) -> void:
 							bm2.position.x, bm2.position.y,
 							int(bm2.get("max_hp")), int(bm2.get("xp_reward")),
 							str(bm2.get("monster_type")), int(bm2.get("level")),
-							int(bm2.get("attack")))
+							int(bm2.get("attack")), true)   # seed_only: bridge fill, no aggro
 						out.append(bm2)
 
 # ── Static entity spawning (called once after first login) ───────────────────

@@ -124,16 +124,27 @@ game works without internet at all (great for mobile).
 
 ---
 
-## Starting State
+## Starting State — Max Everything, Ephemeral
 
-- **Fresh character every match** — no carry over of gear/levels.
-- Max level all skills instantly.
-- Full best-tier armor and weapons equipped.
+Quick Play is the end-game showpiece. Everyone's dropped in maxed and
+fully geared — no MMO progression matters here. Skill and tactics are
+the only variables. Fresh identical character every match; nothing
+carries in.
+
+- **Fresh character every match** — no MMO reads at match start. The
+  server allocates a max-level ephemeral character; no inventory,
+  levels, or gear from the MMO character is consulted.
+- Max level (99) all skills instantly.
+- Full best-tier armor and weapons equipped (top-tier by default).
 - No food, no ammo, no runes — find them in chests.
 - **Chests scattered across map** containing:
   - Arrow bundles, rune essence, food ingredients
   - Some pre-cooked food and pre-made ammo too
   - Rare chests with better quantities near map center
+
+Contrast with **Endless**: Endless snapshots your MMO character
+(current levels, only your crafted/earned items). QP does the
+opposite — everyone equalised at max, competitive skill test.
 
 ---
 
@@ -244,6 +255,14 @@ third section at the top of the HUD during Quick Play matches:
 
 - New character each match (no carryover gear/levels).
 - BUT a **stat card** carries forward (see Expansion 5).
+- **Cosmetics unlocked anywhere show up in Quick Play too.** A skin
+  unlocked from an Endless wave-20 milestone or an MMO achievement is
+  wearable on your QP character. Cosmetics are the only cross-mode
+  carry — they're purely visual, so they don't affect the "everyone
+  equalised" competitive baseline.
+- **Achievements** earnable during QP fire against the MMO account —
+  a "kill 100 players" achievement counts whether you did it in MMO
+  PvP or QP matches.
 
 ### Expansion 5 — Stat card detail
 
@@ -329,3 +348,45 @@ server-side work; structure destruction is the biggest client-side
 piece. Everything else is well-bounded. The territory system that
 already exists is the foundation — Quick Play extends it with the
 match lifecycle around the top.
+
+---
+
+## Entry Points
+
+Two ways in, both ship:
+
+1. **Main menu button** — the login screen grows a "⚡ Quick Play"
+   button next to "Enter World" and "Endless". Clicking opens the
+   lobby browser (see Expansion 4). Pick post-authentication so the
+   account exists before mode selection.
+2. **In-world altar** — a `quickplay_altar` interactable (warband
+   banner monument visual) admin-placed in MMO towns. Right-click →
+   "Enter Quick Play" opens the same lobby browser. Clicking it
+   cleanly ends the MMO session with zero gear transfer — QP never
+   reads anything from the MMO character regardless of entry path.
+   Coming back = a normal relog.
+
+Both entry paths open the same lobby browser and hit the same match
+lifecycle. The altar is a convenience shortcut for players already
+inside the MMO; neither is mechanically different.
+
+---
+
+## What Crosses Between Modes
+
+| Thing | MMO | Endless | Quick Play |
+|---|---|---|---|
+| Cosmetics unlocked | earnable + visible | earnable + visible | earnable + visible |
+| Levels / XP | primary source | snapshot IN (read-only) | max-everything |
+| Crafted items | primary source | snapshot IN (read-only) | ignored |
+| Achievements | earnable | earnable | earnable |
+| Stat card / leaderboard | MMO leaderboard | Endless leaderboard | Quick Play leaderboard |
+| Meta-progression unlocks | — | Endless-only | — |
+
+**Cosmetics** and **achievements** cross freely across all three modes.
+
+**Stat cards stay independent** — three separate leaderboards.
+
+**QP reads nothing from MMO** — the "snapshot IN" column above only
+applies to Endless. QP starts every match at max, ignoring your MMO
+progression entirely.

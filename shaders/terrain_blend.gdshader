@@ -55,12 +55,16 @@ vec4 sample_biome(int b, vec2 local_px) {
 	return texture(atlas, atlas_uv);
 }
 
-bool is_water(int b) { return b == 8 || b == 9 || b == 24; }  // coast, ocean, shallow_water
+// coast, ocean, shallow_water, reef, tidepool
+bool is_water(int b) { return b == 8 || b == 9 || b == 24 || b == 44 || b == 45; }
 bool is_path (int b) { return b == 13 || b == 14; }  // town, road
 // Grass-family biomes that get the per-blade detail pass (yellowing, dirt
 // patches, pebbles). PLAINS/PLAINS2/forests/swamp — anything where the
 // player walks on actual ground vegetation.
-bool is_grass(int b) { return b >= 0 && b <= 5; }
+// Grass-family: original plains..swamp block (0..5) PLUS the Track-2 hills +
+// transitions + meadow/tundra/clearing block (26..36). Both blocks blend
+// against each other naturally through the shader's per-blade detail pass.
+bool is_grass(int b) { return (b >= 0 && b <= 5) || (b >= 26 && b <= 36); }
 
 // ── Deterministic per-tile hashes ────────────────────────────────────────────
 // Three uncorrelated [0,1) values seeded from integer tile coords so a tile's

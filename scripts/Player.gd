@@ -293,6 +293,12 @@ func _physics_process(delta: float) -> void:
 
 	if velocity.x != 0.0:
 		_facing = signf(velocity.x)
+	# AmbientLife reads this to decide whether the player counts as "active"
+	# (creatures flee) vs "idle for 30s+" (creatures approach). We only
+	# bump it when actually moving so a player standing still lets the
+	# timestamp age past IDLE_THRESHOLD.
+	if velocity != Vector2.ZERO:
+		set_meta("ambient_last_move_ms", Time.get_ticks_msec())
 
 	# Movement / terrain rules: on foot you can't enter water; in a boat you can
 	# only travel on water (never beach onto land).
@@ -394,6 +400,7 @@ func _launch_boat() -> void:
 	GameManager.current_boat_max_hp = hp_max
 	GameManager.current_boat_hp     = hp_max
 	_sailing = true
+	GameManager.is_sailing = true
 	_boat_id = bid
 	set_collision_mask_value(2, false)   # stop colliding with the water body
 	global_position = water
@@ -429,6 +436,7 @@ func _dock_boat() -> void:
 	GameManager.current_boat_hp     = 0
 	GameManager.current_boat_max_hp = 0
 	_sailing = false
+	GameManager.is_sailing = false
 	set_collision_mask_value(2, true)
 	global_position = land
 	_target_pos     = land

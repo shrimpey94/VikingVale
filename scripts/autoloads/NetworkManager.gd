@@ -609,21 +609,39 @@ func send_node_states(ids: Array) -> void:
 		_send({"type": "node_states", "ids": ids})
 
 func send_monster_join(entity_id: String, x: float, y: float, max_hp: int, xp_reward: int,
-		monster_type: String = "", level: int = 0, attack: int = 0) -> void:
+		monster_type: String = "", level: int = 0, attack: int = 0,
+		seed_only: bool = false) -> void:
 	# Stage 1 of server-side AI — the new monster_type / level / attack
 	# fields let the server seed hostility defaults (`chicken` / `rat` are
 	# passive, everything else hostile), scale the aggro radius by level,
 	# and pick a damage value for monster-initiated attacks. All three
 	# parameters default to safe values so older callers still work; the
 	# server falls back to a `rat`-ish entry when they're absent.
+	#
+	# `seed_only` disambiguates the two meanings of monster_join:
+	#   - seed_only=false (default) → the caller is engaging combat (Attack
+	#     click). Server aggros the monster onto the sender.
+	#   - seed_only=true → the caller is just registering AI (chunk load,
+	#     admin-entity rehydrate on login burst). Server sets up state
+	#     without flipping the monster into aggro/chase mode. Fixes the
+	#     "all monsters swarm the player on login / interior exit" glitch.
 	if state == NetState.LOGGED_IN:
 		_send({"type": "monster_join", "id": entity_id, "x": x, "y": y,
 			   "max_hp": max_hp, "xp_reward": xp_reward,
-			   "monster_type": monster_type, "level": level, "attack": attack})
+			   "monster_type": monster_type, "level": level, "attack": attack,
+			   "seed_only": seed_only})
 
 func send_monster_damage(entity_id: String, amount: int) -> void:
 	if state == NetState.LOGGED_IN:
 		_send({"type": "monster_damage", "id": entity_id, "amount": amount})
+
+func send_structure_damage(entity_id: String, amount: int) -> void:
+	if state == NetState.LOGGED_IN:
+		_send({"type": "structure_damage", "id": entity_id, "amount": amount})
+
+func send_structure_repair(entity_id: String) -> void:
+	if state == NetState.LOGGED_IN:
+		_send({"type": "structure_repair", "id": entity_id})
 
 func send_monster_leave(entity_id: String) -> void:
 	if state == NetState.LOGGED_IN:
@@ -976,6 +994,16 @@ func _handle(msg: Dictionary) -> void:
 		"monster_respawned":
 			Events.mob_respawned.emit(str(msg.get("id", "")))
 
+		"structure_hp_changed":
+			Events.structure_hp_changed.emit(
+				str(msg.get("id", "")),
+				int(msg.get("hp", 0)),
+				int(msg.get("max_hp", 1)),
+				bool(msg.get("alive", true)))
+
+		"structure_destroyed":
+			Events.structure_destroyed.emit(str(msg.get("id", "")))
+
 		"monster_dead":
 			Events.mob_dead_on_join.emit(str(msg.get("id", "")), float(msg.get("respawn_in", 0.0)))
 
@@ -1011,7 +1039,18 @@ func _handle(msg: Dictionary) -> void:
 			if target_uname != "" and target_uname == my_username:
 				var dmg := int(msg.get("damage", 0))
 				if dmg > 0:
-					GameManager.take_damage(dmg)
+					var m_type := str(msg.get("monster_type", ""))
+					# Sharks damage the boat hull first when the player is
+					# sailing. Player still takes HALF damage (bites over
+					# the gunwale). When boat HP hits 0 the sailing HUD
+					# handles the sinking transition on its own.
+					var sailing := bool(GameManager.get("is_sailing"))
+					if m_type == "shark" and sailing \
+							and GameManager.has_method("apply_boat_damage"):
+						GameManager.apply_boat_damage(dmg)
+						GameManager.take_damage(int(ceil(dmg * 0.5)))
+					else:
+						GameManager.take_damage(dmg)
 					# Match the local-fight path so AudioManager hears it
 					# in server mode too (down-pitched melee_hit).
 					Events.monster_attack_landed.emit()

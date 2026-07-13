@@ -8,7 +8,10 @@ class_name TerrainBaker
 ## Format the server expects (see server/terrain.py):
 ##   GRID_W × GRID_H bits, row-major, MSB-first in each byte
 ##   bit=1 → passable
-##   "ocean" and "coast" biomes are impassable; everything else is passable.
+##   Impassability is defined by Ground.is_biome_impassable — currently
+##   ocean, coast, cliff, walls, and all 8 hill biomes. Bake reads that
+##   single source of truth so client collision + server monster AI agree
+##   on what blocks movement.
 
 const GRID_W := 300
 const GRID_H := 300
@@ -32,7 +35,11 @@ static func bake(ground: Node) -> String:
 			var wy := float(ty) * float(TILE) + float(TILE) * 0.5
 			var biome: String = ground.call("biome_at_world",
 				Vector2(wx, wy)) as String
-			var passable: bool = biome != "ocean" and biome != "coast"
+			# Single source of truth: Ground's biome-impassable predicate.
+			# Previously this hardcoded "ocean" and "coast", missing the
+			# hill biomes + walls + cliff — so monsters chased through
+			# mountains. Now the bake matches client collision exactly.
+			var passable: bool = not bool(ground.call("is_biome_impassable", biome))
 			if passable:
 				var bit_index := ty * GRID_W + tx
 				var byte_index := bit_index / 8

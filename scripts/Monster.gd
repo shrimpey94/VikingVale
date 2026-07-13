@@ -171,6 +171,12 @@ func _apply_type_stats() -> void:
 			display_name = "Spectral Warrior"; level = 80; max_hp = 220; attack = 72; defense = 30; xp_reward = 450
 			loot = [{"id":"spectral_essence","name":"Spectral Essence","qty":1,"color":Color(0.55,0.75,0.95)}]
 			gold_min = 3000; gold_max = 10000
+		# ── Water monsters (water-only pathing, semi-transparent) ──────────────
+		"shark":
+			display_name = "Shark";           level = 30; max_hp = 110; attack = 14; defense = 8;  xp_reward = 95
+			loot = [{"id":"shark_tooth","name":"Shark Tooth","qty":1,"color":Color(0.95,0.94,0.88)},
+				{"id":"raw_shark","name":"Raw Shark","qty":1,"color":Color(0.55,0.60,0.68)}]
+			gold_min = 40; gold_max = 180
 		# ── Bridge monsters (variable-level, zone transition) ──────────────────
 		"dire_wolf":
 			display_name = "Dire Wolf";       level = 15; max_hp = 40;  attack = 12; defense = 5;  xp_reward = 55
@@ -424,6 +430,7 @@ func _draw() -> void:
 		"ancient_troll":    _draw_ancient_troll()
 		"frost_wyrm":       _draw_frost_wyrm()
 		"magma_elemental":  _draw_magma_elemental()
+		"shark":            _draw_shark()
 	# Hover indication is delivered via self_modulate (see mouse_entered
 	# callback) — no yellow halo circle. White hit-flash still draws as
 	# before because it's a distinct combat signal, not a hover state.
@@ -478,6 +485,8 @@ func _shadow_footprint() -> Vector2:
 		"frost_wyrm":                    return Vector2(22.0, 7.0)
 		# Magma elemental — round ball, near-circular shadow
 		"magma_elemental":               return Vector2(14.0, 10.0)
+		# Water — long silhouette, thin body
+		"shark":                         return Vector2(18.0, 5.0)
 		# Boss — winged dragon, very wide
 		"nidhogg":                       return Vector2(25.0, 10.0)
 		_:
@@ -512,6 +521,7 @@ func _radius() -> float:
 		"spider":                     return 14.0
 		"ice_draugr", "shadow_draugr", "death_knight": return 15.0
 		"spectral_warrior":           return 14.0
+		"shark":                      return 18.0
 		"wolf", "bandit":             return 12.0
 		"fire_imp":                   return 10.0
 		"chicken":                    return 7.0
@@ -851,34 +861,58 @@ func _draw_nidhogg() -> void:
 	draw_circle(Vector2( 0.0,-10.0), 1.0, Color(1.0, 0.90, 0.30, 0.60))
 
 func _draw_chicken() -> void:
-	var white := Color(0.95, 0.94, 0.90)
-	var cream := Color(0.88, 0.86, 0.80)
-	# Body — round white blob
-	draw_circle(Vector2(0, 2), 7, white)
-	draw_circle(Vector2(0, 0), 5, cream)
-	# Head
-	draw_circle(Vector2(0, -8), 4, white)
-	# Red comb — three bumps on top
-	draw_circle(Vector2(-2, -13), 2.0, Color(0.85, 0.12, 0.12))
-	draw_circle(Vector2( 0, -14), 2.5, Color(0.85, 0.12, 0.12))
-	draw_circle(Vector2( 2, -13), 2.0, Color(0.85, 0.12, 0.12))
-	# Red wattle
-	draw_circle(Vector2(0, -5), 1.8, Color(0.80, 0.10, 0.10))
-	# Yellow beak
-	draw_colored_polygon(PackedVector2Array([Vector2(-2, -9), Vector2(2, -9), Vector2(0, -6)]),
-		Color(0.95, 0.78, 0.10))
-	# Eye
-	draw_circle(Vector2(-1.5, -9), 1.2, Color(0.05, 0.05, 0.05))
-	draw_circle(Vector2(-1.0, -9.4), 0.5, Color(1, 1, 1, 0.6))
-	# Stick legs
-	draw_line(Vector2(-2, 8), Vector2(-3, 16), Color(0.95, 0.75, 0.20), 1.5)
-	draw_line(Vector2( 2, 8), Vector2( 3, 16), Color(0.95, 0.75, 0.20), 1.5)
-	draw_line(Vector2(-3, 16), Vector2(-6, 18), Color(0.95, 0.75, 0.20), 1.5)
-	draw_line(Vector2(-3, 16), Vector2(-2, 19), Color(0.95, 0.75, 0.20), 1.5)
-	draw_line(Vector2( 3, 16), Vector2( 6, 18), Color(0.95, 0.75, 0.20), 1.5)
-	draw_line(Vector2( 3, 16), Vector2( 2, 19), Color(0.95, 0.75, 0.20), 1.5)
-	# Wing hint
-	draw_arc(Vector2(3, 1), 5, -0.6, 1.0, 8, Color(0.78, 0.76, 0.70), 1.5)
+	var white := Color(0.98, 0.96, 0.92)
+	var cream := Color(0.90, 0.86, 0.78)
+	var shadow := Color(0.68, 0.65, 0.60)
+	var beak := Color(0.98, 0.72, 0.15)
+	var comb := Color(0.88, 0.15, 0.15)
+	# Body — egg-shape rather than a plain circle. Wider at the rear,
+	# tapered toward the neck. Layered darker underbelly for depth.
+	draw_colored_polygon(PackedVector2Array([
+		Vector2(-8, 2), Vector2(-6, -2), Vector2(-2, -4),
+		Vector2(4, -3), Vector2(7, 1), Vector2(6, 6), Vector2(2, 9),
+		Vector2(-4, 8), Vector2(-8, 5)]), white)
+	# Underbelly shadow.
+	draw_colored_polygon(PackedVector2Array([
+		Vector2(-6, 4), Vector2(-2, 8), Vector2(4, 7), Vector2(6, 4)]),
+		shadow)
+	# Wing detail — a folded wing on the side.
+	draw_colored_polygon(PackedVector2Array([
+		Vector2(-1, -1), Vector2(4, -1), Vector2(5, 4), Vector2(1, 5)]),
+		cream)
+	draw_line(Vector2(-1, -1), Vector2(5, 4), shadow, 1.0)
+	draw_line(Vector2(1, 5), Vector2(4, 0), shadow, 0.8)
+	# Tail feathers — three pointed tips sweeping back.
+	draw_colored_polygon(PackedVector2Array([
+		Vector2(-8, 2), Vector2(-14, -2), Vector2(-13, 3),
+		Vector2(-9, 5)]), white)
+	draw_colored_polygon(PackedVector2Array([
+		Vector2(-8, 5), Vector2(-13, 6), Vector2(-12, 8),
+		Vector2(-9, 7)]), cream)
+	# Head — round with a small beak point.
+	draw_circle(Vector2(5, -6), 4.5, white)
+	# Red comb — three bumps on top.
+	draw_circle(Vector2(3, -11), 1.8, comb)
+	draw_circle(Vector2(5, -12), 2.2, comb)
+	draw_circle(Vector2(7, -11), 1.6, comb)
+	# Red wattle under the beak.
+	draw_circle(Vector2(3, -3), 1.5, comb.darkened(0.15))
+	# Yellow beak — pointed forward.
+	draw_colored_polygon(PackedVector2Array([
+		Vector2(8, -6), Vector2(12, -5), Vector2(8, -4)]), beak)
+	# Eye + highlight.
+	draw_circle(Vector2(6, -7), 1.0, Color(0.05, 0.05, 0.05))
+	draw_circle(Vector2(6.3, -7.4), 0.4, Color(1, 1, 1, 0.85))
+	# Stick legs — thin orange, with a clear 3-toe foot.
+	draw_line(Vector2(-1, 8), Vector2(-2, 15), beak.darkened(0.20), 1.5)
+	draw_line(Vector2(3, 8), Vector2(3, 15), beak.darkened(0.20), 1.5)
+	# Toes.
+	draw_line(Vector2(-2, 15), Vector2(-5, 17), beak.darkened(0.20), 1.2)
+	draw_line(Vector2(-2, 15), Vector2(-1, 17), beak.darkened(0.20), 1.2)
+	draw_line(Vector2(-2, 15), Vector2(1, 17), beak.darkened(0.20), 1.2)
+	draw_line(Vector2(3, 15), Vector2(0, 17), beak.darkened(0.20), 1.2)
+	draw_line(Vector2(3, 15), Vector2(3, 17), beak.darkened(0.20), 1.2)
+	draw_line(Vector2(3, 15), Vector2(6, 17), beak.darkened(0.20), 1.2)
 
 func _draw_wolf() -> void:
 	var grey  := Color(0.52, 0.50, 0.46)
@@ -1656,3 +1690,54 @@ func _draw_magma_elemental() -> void:
 	draw_circle(Vector2( 10, 4),  4, c)
 	draw_circle(Vector2(-6, 10),  3, cd)
 	draw_circle(Vector2( 6,  9),  3, cd)
+
+
+func _draw_shark() -> void:
+	# Sleek underwater silhouette. Semi-transparent so the water tile
+	# shows through, reinforcing the "swimming below the surface" read.
+	# ALPHA on every fill: 0.75 (body) / 0.60 (belly/fins) — combat hit
+	# flashes still show correctly because white modulate stacks on top.
+	var top := Color(0.20, 0.28, 0.38, 0.75)      # dark grey-blue back
+	var side := Color(0.42, 0.50, 0.60, 0.75)     # mid-grey side
+	var belly := Color(0.75, 0.80, 0.85, 0.60)    # pale underbelly
+	var edge := Color(0.10, 0.15, 0.22, 0.85)     # sharp outline
+	# Elongated body — draw as a series of overlapping ellipses growing
+	# toward the head. Faces LEFT by default; _facing sign flip happens
+	# via the Monster parent transform.
+	draw_colored_polygon(PackedVector2Array([
+		Vector2(-16, 0), Vector2(-12, -4), Vector2(4, -6),
+		Vector2(14, -1), Vector2(14, 3), Vector2(4, 5), Vector2(-12, 3)]),
+		side)
+	# Dark top stripe.
+	draw_colored_polygon(PackedVector2Array([
+		Vector2(-15, -1), Vector2(-12, -4), Vector2(4, -6),
+		Vector2(14, -1), Vector2(4, -2), Vector2(-12, -1)]),
+		top)
+	# Pale underbelly.
+	draw_colored_polygon(PackedVector2Array([
+		Vector2(-15, 1), Vector2(-12, 3), Vector2(4, 5),
+		Vector2(14, 3), Vector2(4, 2), Vector2(-12, 1)]),
+		belly)
+	# Dorsal fin — triangular peak on the back.
+	draw_colored_polygon(PackedVector2Array([
+		Vector2(-6, -4), Vector2(-2, -12), Vector2(2, -4)]),
+		top)
+	# Pectoral fins — angled down/back.
+	draw_colored_polygon(PackedVector2Array([
+		Vector2(0, 3), Vector2(-4, 8), Vector2(2, 5)]),
+		side)
+	# Tail fluke.
+	draw_colored_polygon(PackedVector2Array([
+		Vector2(-16, 0), Vector2(-22, -5), Vector2(-19, 0),
+		Vector2(-22, 5)]),
+		side)
+	# Eye and mouth line.
+	draw_circle(Vector2(10, -2), 1.2, Color(0.05, 0.05, 0.05, 0.9))
+	draw_line(Vector2(8, 2), Vector2(14, 0), edge, 1.2)
+	# Silhouette outline for readability against water.
+	draw_line(Vector2(-16, 0), Vector2(-12, -4), edge, 1.0)
+	draw_line(Vector2(-12, -4), Vector2(4, -6), edge, 1.0)
+	draw_line(Vector2(4, -6), Vector2(14, -1), edge, 1.0)
+	draw_line(Vector2(14, 3), Vector2(4, 5), edge, 1.0)
+	draw_line(Vector2(4, 5), Vector2(-12, 3), edge, 1.0)
+	draw_line(Vector2(-12, 3), Vector2(-16, 0), edge, 1.0)

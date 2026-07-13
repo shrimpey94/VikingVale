@@ -144,6 +144,8 @@ static func entries() -> Array:
 		_mon("death_knight",     "Death Knight",      75),
 		_mon("magma_elemental",  "Magma Elemental",   76),
 		_mon("spectral_warrior", "Spectral Warrior",  80),
+		# Water — water-only pathing, semi-transparent, targets boats.
+		_mon("shark",            "Shark",             30),
 		# ── NPCs ────────────────────────────────────────────────────────────────
 		_npc("worker",     "Villager"),
 		_npc("shopkeeper", "Merchant"),      # generic — no shop_id, opens no shop

@@ -29,6 +29,16 @@ var _xp_cooldown     := 0.0   # cooldown for archery/runestone training
 
 # Server-authoritative shared state (set by World on chunk resource nodes).
 var entity_id        := ""
+# Structure HP mirror — set by Events.structure_hp_changed for the 18
+# buildable subtypes. Drives the HP bar draw + attack/repair gating.
+var structure_hp: int     = -1  # -1 = unknown / not a structure
+var structure_max_hp: int = -1
+var structure_alive: bool = true
+# Floating damage popups spawned when structure_hp drops. Each is
+# {amount: int, age: float, x_offset: float}. Life = 0.9s; move upward
+# + fade out. Ticked in _process, drawn in _draw_structure_hp_bar.
+var _dmg_popups: Array = []
+const _DMG_POPUP_LIFE := 0.9
 var _i_am_gathering  := false   # this client's player is the one gathering
 var _remote_gathering := false  # another player is gathering this node
 var _remote_anim_t   := 0.0
@@ -57,6 +67,10 @@ func _ready() -> void:
 	mouse_exited.connect(_on_hover_exit)
 	Events.player_interacted.connect(_on_player_interacted)
 	Events.player_stop_action.connect(_on_player_stop_action)
+	# Structures listen for their own HP updates + destruction broadcasts.
+	if interactable_type_str in _STRUCTURE_SIZES:
+		Events.structure_hp_changed.connect(_on_structure_hp_changed)
+		Events.structure_destroyed.connect(_on_structure_destroyed)
 
 # ── Per-type stats ───────────────────────────────────────────────────────────
 # Tiers (shared by tree / rock / fish / herb) use required_level ranges.
@@ -127,6 +141,13 @@ func _set_stats() -> void:
 			# via an added StaticBody2D (see _setup_collision). Right-click
 			# option is "Inspect" only in v1; not depletable.
 			_max_hp = 9999; _swing_interval = 1.0; _success_at_req = 1.0; _success_at_99 = 1.0; _regen_delay = 0.0
+		"fence", "gate", "watchtower", "guard_tower", \
+		"house_frame", "large_house", "grand_hall", "clan_hall", \
+		"well", "altar", "dock", "market_stall", "site_marker", \
+		"portal_shrine", "workbench", "smith_station", "bank_chest", \
+		"armory_rack", "plant_bed":
+			# Admin-placed Construction buildables. Right-click inspect only.
+			_max_hp = 9999; _swing_interval = 1.0; _success_at_req = 1.0; _success_at_99 = 1.0; _regen_delay = 0.0
 		_:
 			_max_hp = 1; _swing_interval = 5.0; _success_at_req = 0.80; _success_at_99 = 0.95; _regen_delay = 45.0
 	_hp = _max_hp
@@ -162,21 +183,70 @@ func _setup_collision() -> void:
 		# Interior exit door — big + tall so it's an easy tap-target when
 		# the player wants OUT of a room they can't otherwise leave.
 		"exit_door": rect.size = Vector2(48, 64)
-		"wall":            rect.size = Vector2(48, 20)
-		"fortified_wall":  rect.size = Vector2(48, 24)
+		"wall", "fence":
+			rect.size = _STRUCTURE_SIZES.get(interactable_type_str,
+					Vector2(32, 32))
+		"fortified_wall", "gate":
+			rect.size = _STRUCTURE_SIZES.get(interactable_type_str,
+					Vector2(32, 32))
+		"workbench", "smith_station", "bank_chest", "armory_rack", \
+		"well", "altar", "market_stall", "site_marker", "plant_bed", \
+		"portal_shrine":
+			rect.size = _STRUCTURE_SIZES.get(interactable_type_str,
+					Vector2(64, 64))
+		"watchtower", "guard_tower", "house_frame", "large_house", \
+		"grand_hall", "clan_hall", "dock":
+			rect.size = _STRUCTURE_SIZES.get(interactable_type_str,
+					Vector2(128, 128))
 		_:          rect.size = Vector2(32, 32)
 	cs.shape = rect
-	# Walls physically block the player. The base Area2D above handles clicks
-	# (right-click inspect); the StaticBody2D below handles movement collision.
-	if interactable_type_str == "wall" or interactable_type_str == "fortified_wall":
-		_add_wall_static_body(rect.size)
+	# Structures physically block the player. The base Area2D above handles
+	# clicks (right-click Attack/Inspect/Repair); the StaticBody2D below
+	# handles movement collision.
+	if interactable_type_str in _STRUCTURE_SIZES:
+		_add_structure_static_body(rect.size)
+
+## Size (px) per structure kind. Three classes:
+##   Small  32×32 — walls/fence/gate that tile as 1-tile
+##   Medium 64×64 — utility stations, ~2×2 tiles
+##   Large  128×128 — towers + buildings + halls, ~4×4 tiles
+## Same Vector2 drives BOTH the Area2D click hitbox (in _setup_collision)
+## AND the StaticBody2D collision rect (in _add_structure_static_body).
+const _STRUCTURE_SIZES: Dictionary = {
+	# Small
+	"wall":            Vector2(32, 32),
+	"fortified_wall":  Vector2(32, 32),
+	"fence":           Vector2(32, 32),
+	"gate":            Vector2(32, 32),
+	# Medium
+	"workbench":       Vector2(64, 64),
+	"smith_station":   Vector2(64, 64),
+	"bank_chest":      Vector2(64, 64),
+	"armory_rack":     Vector2(64, 64),
+	"well":            Vector2(64, 64),
+	"altar":           Vector2(64, 64),
+	"market_stall":    Vector2(64, 64),
+	"site_marker":     Vector2(64, 64),
+	"plant_bed":       Vector2(64, 64),
+	"portal_shrine":   Vector2(64, 64),
+	# Large
+	"watchtower":      Vector2(128, 128),
+	"guard_tower":     Vector2(128, 128),
+	"house_frame":     Vector2(128, 128),
+	"large_house":     Vector2(128, 128),
+	"grand_hall":      Vector2(128, 128),
+	"clan_hall":       Vector2(128, 128),
+	"dock":            Vector2(128, 128),
+}
 
 ## Add a StaticBody2D child that blocks player movement. Layer 2 = world
 ## collision, same layer the impassable-tile collision body uses in Ground.gd,
 ## so the player's KinematicBody-driven movement already tests against it.
-func _add_wall_static_body(size: Vector2) -> void:
+## Freed when the structure's HP hits 0 (destroyed) so the tile becomes
+## passable again.
+func _add_structure_static_body(size: Vector2) -> void:
 	var body := StaticBody2D.new()
-	body.name = "WallBody"
+	body.name = "StructureBody"
 	body.collision_layer = 2
 	body.collision_mask  = 0
 	add_child(body)
@@ -186,11 +256,141 @@ func _add_wall_static_body(size: Vector2) -> void:
 	cs2.shape = rect2
 	body.add_child(cs2)
 
+## Called when the structure's HP hits 0 (server broadcast structure_destroyed).
+## Removes the collision body so the tile becomes passable, tints the visual
+## darker so the "corpse" reads as ruined, and disables click-attacks on it.
+func destroy_structure_visual() -> void:
+	var body := get_node_or_null("StructureBody")
+	if body != null:
+		body.queue_free()
+	modulate = Color(0.35, 0.35, 0.35, 0.85)
+	_state = State.DEPLETED
+	structure_alive = false
+
+## Signal handler: update our HP mirror when the server broadcasts a change
+## for this structure. Spawn a floating damage popup for any HP drop so
+## players see the hit feedback. queue_redraw so the HP bar picks up the
+## new value on the next frame.
+func _on_structure_hp_changed(eid: String, hp: int, max_hp: int,
+		alive: bool) -> void:
+	if eid != entity_id or eid == "":
+		return
+	# Spawn popup for HP drops (skip repair heals — HP up is not a "hit").
+	if structure_hp >= 0 and hp < structure_hp:
+		var delta := structure_hp - hp
+		# Randomise horizontal offset so multi-hit stacks fan out instead
+		# of drawing on top of each other.
+		_dmg_popups.append({
+			"amount":   delta,
+			"age":      0.0,
+			"x_offset": randf_range(-12.0, 12.0),
+		})
+		# Cap the buffer so a long fight doesn't grow it unbounded.
+		if _dmg_popups.size() > 8:
+			_dmg_popups.pop_front()
+	structure_hp = hp
+	structure_max_hp = max_hp
+	structure_alive = alive
+	# `_process` is disabled for non-structure interactables — force enable
+	# so the popups tick + expire even when the node is otherwise idle.
+	set_process(true)
+	queue_redraw()
+
+## Signal handler: destroyed broadcast. Free the collision body + tint.
+func _on_structure_destroyed(eid: String) -> void:
+	if eid != entity_id or eid == "":
+		return
+	destroy_structure_visual()
+
+## Draw a small HP bar above the structure when it's been damaged. Placed
+## just above the top edge of the collision box so it doesn't obscure the
+## silhouette. Follows the monster HP-bar pattern (green→yellow→red).
+func _draw_structure_hp_bar() -> void:
+	# Popups draw regardless of HP-bar state (a repair could clear the bar
+	# but a stale damage popup from before it should still finish its life).
+	_draw_structure_dmg_popups()
+	if structure_max_hp <= 0 or not structure_alive:
+		return
+	if structure_hp >= structure_max_hp:
+		return
+	var size: Vector2 = _STRUCTURE_SIZES.get(interactable_type_str,
+			Vector2(32, 32))
+	var bar_w: float = maxf(24.0, size.x * 0.6)
+	var bar_h: float = 4.0
+	var bar_x: float = -bar_w * 0.5
+	var bar_y: float = -size.y * 0.5 - 10.0
+	var ratio: float = clampf(float(structure_hp) / float(structure_max_hp),
+			0.0, 1.0)
+	# Background.
+	draw_rect(Rect2(bar_x, bar_y, bar_w, bar_h),
+			Color(0.10, 0.10, 0.10, 0.85))
+	# Fill — color shifts green → yellow → red.
+	var fill_col: Color
+	if ratio > 0.6:
+		fill_col = Color(0.30, 0.85, 0.35)
+	elif ratio > 0.3:
+		fill_col = Color(0.95, 0.85, 0.25)
+	else:
+		fill_col = Color(0.90, 0.30, 0.25)
+	draw_rect(Rect2(bar_x, bar_y, bar_w * ratio, bar_h), fill_col)
+	# Outline.
+	draw_rect(Rect2(bar_x, bar_y, bar_w, bar_h),
+			Color(0.05, 0.05, 0.05), false, 1.0)
+
+
+## Draw the floating damage numbers above the structure. Each popup rises
+## ~24 px over its life and fades out toward the end. Deep red text with
+## a black outline for readability against any biome.
+func _draw_structure_dmg_popups() -> void:
+	if _dmg_popups.is_empty():
+		return
+	var size: Vector2 = _STRUCTURE_SIZES.get(interactable_type_str,
+			Vector2(32, 32))
+	var base_y: float = -size.y * 0.5 - 18.0
+	var font := ThemeDB.fallback_font
+	if font == null:
+		return
+	var font_size: int = 12
+	for pop_v: Variant in _dmg_popups:
+		var pop: Dictionary = pop_v as Dictionary
+		var t: float = float(pop["age"]) / _DMG_POPUP_LIFE
+		var y: float = base_y - t * 24.0  # rise 24 px over life
+		var x: float = float(pop["x_offset"])
+		# Fade to zero over the last 40% of life so the number lingers
+		# clearly during the "impact" moment before disappearing.
+		var alpha: float = 1.0
+		if t > 0.6:
+			alpha = 1.0 - (t - 0.6) / 0.4
+		var text := "-%d" % int(pop["amount"])
+		var text_size := font.get_string_size(text,
+				HORIZONTAL_ALIGNMENT_CENTER, -1, font_size)
+		var draw_x: float = x - text_size.x * 0.5
+		# Black shadow for legibility.
+		draw_string(font, Vector2(draw_x + 1.0, y + 1.0), text,
+				HORIZONTAL_ALIGNMENT_CENTER, -1, font_size,
+				Color(0.02, 0.02, 0.02, alpha * 0.9))
+		# Main red text.
+		draw_string(font, Vector2(draw_x, y), text,
+				HORIZONTAL_ALIGNMENT_CENTER, -1, font_size,
+				Color(0.98, 0.25, 0.20, alpha))
+
 # ── Process: action loop + regen + particles + shake ───────────────────────
 func _process(delta: float) -> void:
 	_time_elapsed += delta
 	if _xp_cooldown > 0.0:
 		_xp_cooldown -= delta
+
+	# Tick floating damage popups. Expire past their life; queue redraw
+	# each tick so the fade animation is smooth.
+	if not _dmg_popups.is_empty():
+		var alive_popups: Array = []
+		for pop_v: Variant in _dmg_popups:
+			var pop: Dictionary = pop_v as Dictionary
+			pop["age"] = float(pop["age"]) + delta
+			if float(pop["age"]) < _DMG_POPUP_LIFE:
+				alive_popups.append(pop)
+		_dmg_popups = alive_popups
+		queue_redraw()
 
 	# Waiting on the server to grant a gather — fall back to local after a timeout.
 	if _gather_pending:
@@ -552,10 +752,23 @@ func _on_player_interacted(node: Node) -> void:
 		# pledges + alliance status.
 		Events.chat_message.emit("You inspect the %s. (Coming soon.)" % display_name)
 		return
-	if interactable_type_str == "wall" or interactable_type_str == "fortified_wall":
-		# Walls are decorative + physical only in v1. Right-click inspect
-		# shows what it's made of. Future: warband damage / repair flow.
-		Events.chat_message.emit("You inspect the %s." % display_name)
+	if interactable_type_str in _STRUCTURE_SIZES:
+		# Left-click attack: fire one damage message. HUD's right-click
+		# menu supplies Inspect / Repair alternatives. Only alive
+		# structures can be attacked; destroyed ones show a chat message.
+		if not structure_alive:
+			Events.chat_message.emit("The %s is already destroyed."
+					% display_name)
+			return
+		# Baseline melee damage — pulled from Attack skill via existing
+		# GameManager if available, else fixed 5. Server enforces range +
+		# rate independently, so nothing bad happens if the client spams.
+		var dmg: int = 5
+		if GameManager.has_method("get_effective_attack_damage"):
+			dmg = int(GameManager.call("get_effective_attack_damage"))
+		if entity_id != "":
+			NetworkManager.send_structure_damage(entity_id, dmg)
+			Events.chat_message.emit("You strike the %s." % display_name)
 		return
 	if interactable_type_str in ["stick", "stone"]:
 		if _is_server_managed():
@@ -750,7 +963,16 @@ func _draw_body() -> void:
 		"outpost":      _draw_outpost()
 		"wall":            _draw_wall_segment(c, cd, false)
 		"fortified_wall":  _draw_wall_segment(c, cd, true)
+		"fence", "gate", "watchtower", "guard_tower", \
+		"house_frame", "large_house", "grand_hall", "clan_hall", \
+		"well", "altar", "dock", "market_stall", "site_marker", \
+		"portal_shrine", "workbench", "smith_station", "bank_chest", \
+		"armory_rack", "plant_bed":
+			_draw_structure_silhouette(interactable_type_str, c, cd)
 		_:              draw_rect(Rect2(-14, -14, 28, 28), c)
+	# HP bar overlay for structures — only draws when damaged.
+	if interactable_type_str in _STRUCTURE_SIZES:
+		_draw_structure_hp_bar()
 
 	# Directional shading overlay — top-down light from upper-left. Matches
 	# the terrain shader's directional pass so sprites read as part of the
@@ -1259,17 +1481,36 @@ func _hover_tint(col: Color) -> Color:
 ## Copper — chunky boulder. Multiple overlapping rounded lobes for a "bumpy
 ## potato" feel. Warm orange-brown with darker undersides and a few specks.
 func _draw_rock_copper() -> void:
+	# Rougher, more jagged outline than iron. 12-vertex outer polygon with
+	# irregular edges reads as "raw, unrefined copper deposit" — distinct
+	# from iron's cleaner faceted planes at a glance.
 	var base := _hover_tint(Color(0.65, 0.40, 0.20))
 	var dark := base.darkened(0.30)
 	var light := base.lightened(0.20)
-	draw_circle(Vector2(0, 4), 13, dark)
-	draw_circle(Vector2(-7, -1), 8, base)
-	draw_circle(Vector2(6, -2), 9, light)
-	draw_circle(Vector2(2, 6), 7, base.darkened(0.15))
-	draw_circle(Vector2(-3, -7), 5, base.lightened(0.25))
-	# Copper specks
-	draw_circle(Vector2(-4, 2), 1.2, Color(0.95, 0.55, 0.20))
-	draw_circle(Vector2(5, 4), 1.0, Color(0.85, 0.45, 0.15))
+	# Main jagged silhouette.
+	draw_colored_polygon(PackedVector2Array([
+		Vector2(-13, 0),  Vector2(-10, -6), Vector2(-4, -8),
+		Vector2(-6, -10), Vector2(-1, -11), Vector2(3, -9),
+		Vector2(8, -10),  Vector2(6, -6),   Vector2(12, -2),
+		Vector2(10, 4),   Vector2(13, 7),   Vector2(7, 10),
+		Vector2(2, 8),    Vector2(-4, 11),  Vector2(-7, 7),
+		Vector2(-11, 6)]), base)
+	# Dark shadow crescent on the lower side.
+	draw_colored_polygon(PackedVector2Array([
+		Vector2(-11, 6), Vector2(-7, 7), Vector2(-4, 11),
+		Vector2(2, 8), Vector2(7, 10), Vector2(13, 7),
+		Vector2(10, 11), Vector2(-6, 12)]), dark)
+	# Upper highlight.
+	draw_colored_polygon(PackedVector2Array([
+		Vector2(-10, -6), Vector2(-4, -8), Vector2(-1, -11),
+		Vector2(3, -9), Vector2(-2, -6), Vector2(-7, -4)]), light)
+	# Copper ore specks — bright orange/green tint (natural ore look).
+	draw_circle(Vector2(-4, 2), 1.4, Color(0.95, 0.55, 0.20))
+	draw_circle(Vector2(5, 4), 1.2, Color(0.85, 0.45, 0.15))
+	draw_circle(Vector2(-2, -3), 1.0, Color(0.30, 0.72, 0.55, 0.75))
+	# Rough crack lines to reinforce the "jagged" read.
+	draw_line(Vector2(-6, 0), Vector2(4, 3), dark, 1.0)
+	draw_line(Vector2(-2, -5), Vector2(2, 6), dark, 1.0)
 
 ## Iron — angular jagged polygon with faceted shadow/highlight planes.
 func _draw_rock_iron() -> void:
@@ -1421,6 +1662,48 @@ func _draw_fish(ratio: float, c: Color, _cd: Color) -> void:
 			Vector2(5, -1), Vector2(8, -4), Vector2(8, 2)]),
 			Color(0.28, 0.55, 0.75, 0.45))
 
+	# ── Per-tier marker so admins + players can tell fishing spots apart
+	# at a glance. All variants share the ripple base above; the marker
+	# hints at what's IN the spot.
+	match display_name:
+		"Salmon Spot":
+			# Orange fin flash — a curved tail poking out of the water.
+			var t: float = float(Time.get_ticks_msec()) / 1000.0
+			var flash: float = 0.75 + 0.25 * sin(t * 3.0)
+			var salmon := Color(0.95, 0.55, 0.30, flash)
+			draw_colored_polygon(PackedVector2Array([
+				Vector2(-2, -2), Vector2(6, -6), Vector2(2, 0)]),
+				salmon)
+			# Tiny scale dots.
+			draw_circle(Vector2(-4, 0), 1.0, salmon.darkened(0.15))
+		"Lobster Pot":
+			# Brown crescent claw at center + buoy floating above.
+			var claw := Color(0.62, 0.30, 0.12)
+			draw_arc(Vector2(0, 2), 5, PI * 0.2, PI * 0.8, 12, claw, 2.0)
+			# Claw pincer tips.
+			draw_circle(Vector2(-4, 4), 1.3, claw)
+			draw_circle(Vector2(4, 4), 1.3, claw)
+			# Buoy on a rope above.
+			draw_line(Vector2(0, -3), Vector2(0, -10),
+				Color(0.55, 0.44, 0.20), 1.0)
+			draw_circle(Vector2(0, -12), 2.0, Color(0.92, 0.20, 0.15))
+			draw_rect(Rect2(-2, -13, 4, 1), Color(0.98, 0.98, 0.90))
+		"Shark Waters":
+			# Dark grey triangular fin poking through — alternating in/out
+			# so the spot looks menacing at a glance.
+			var t2: float = float(Time.get_ticks_msec()) / 1000.0
+			var dive: float = sin(t2 * 1.5)
+			var fin_y: float = -4.0 + dive * 3.0
+			var alpha: float = 0.75 if dive > -0.5 else 0.35
+			var shark := Color(0.20, 0.24, 0.30, alpha)
+			draw_colored_polygon(PackedVector2Array([
+				Vector2(-3, fin_y + 2), Vector2(0, fin_y - 6),
+				Vector2(3, fin_y + 2)]),
+				shark)
+			# Ripple wake around the fin.
+			draw_arc(Vector2(0, fin_y + 3), 6, 0.0, PI, 10,
+				Color(1, 1, 1, 0.25 * alpha), 1.0)
+
 	# Bubbles
 	if ratio > 0.85:
 		draw_circle(Vector2(-5.0, -13.0), 2.5, Color(0.82, 0.95, 1.0, 0.55))
@@ -1441,9 +1724,11 @@ func _draw_herb(ratio: float, c: Color, cd: Color) -> void:
 		return
 	# Dispatch by name so each forageable can read distinct at a glance.
 	match display_name:
-		"Berry Bush":    _draw_berry_bush(ratio); return
-		"Ancient Root":  _draw_ancient_root(ratio); return
-		_:               pass
+		"Berry Bush":       _draw_berry_bush(ratio); return
+		"Ancient Root":     _draw_ancient_root(ratio); return
+		"Mushroom Patch":   _draw_mushroom_patch(ratio); return
+		"Herb Patch":       _draw_herb_patch(ratio); return
+		_:                  pass
 
 	# Soil patch
 	draw_rect(Rect2(-10, -1, 20, 12), cd.darkened(0.4))
@@ -1558,6 +1843,72 @@ func _draw_ancient_root(_ratio: float) -> void:
 	draw_line(Vector2(-2,  3), Vector2( 0,  1), rune_a, 1.6)
 	# Rune sparkle center dot
 	draw_circle(Vector2(0, -1), 0.8, Color(1.0, 0.92, 0.55, pulse))
+
+
+## Herb Patch — low-tier foraging. Green fan-cluster with feathery leaves
+## radiating from the base. Reads as "wild herbs growing in the dirt".
+func _draw_herb_patch(ratio: float) -> void:
+	# Soil patch (matches the generic base).
+	draw_rect(Rect2(-10, -1, 20, 12), Color(0.32, 0.24, 0.14))
+	draw_rect(Rect2(-8, -3, 16, 8), Color(0.48, 0.34, 0.16))
+	# Fan cluster — 5 feathery leaves radiating up + out.
+	var stem := Color(0.30, 0.48, 0.16)
+	var leaf := Color(0.42, 0.68, 0.22)
+	var leaf_hi := Color(0.55, 0.78, 0.30)
+	var count: int = 3 + int(ratio * 2.0)
+	for i in range(count):
+		var ang: float = -PI * 0.5 + (float(i) - float(count - 1) * 0.5) * 0.45
+		var tip := Vector2(cos(ang) * 11.0, sin(ang) * 12.0 - 2.0)
+		draw_line(Vector2(0, -1), tip, stem, 1.5)
+		# Feather leaflets on each side of the stem.
+		var mid := Vector2(cos(ang) * 6.0, sin(ang) * 6.0 - 2.0)
+		var perp := Vector2(-sin(ang), cos(ang)) * 3.0
+		draw_colored_polygon(PackedVector2Array([
+			mid - perp, tip, mid + perp]), leaf)
+	# Central tuft highlight.
+	draw_circle(Vector2(0, -3), 2.5, leaf_hi)
+	# Tiny yellow flower on top if fully grown.
+	if ratio > 0.75:
+		draw_circle(Vector2(0, -13), 2.0, Color(0.98, 0.92, 0.25))
+		draw_circle(Vector2(0, -13), 0.8, Color(0.92, 0.55, 0.05))
+
+
+## Mushroom Patch — red domed cap with white specks. Two mushrooms of
+## varying size for depth. Reads distinctly from herbs at a glance.
+func _draw_mushroom_patch(ratio: float) -> void:
+	# Mossy ground.
+	draw_rect(Rect2(-10, -1, 20, 12), Color(0.28, 0.22, 0.12))
+	draw_rect(Rect2(-8, -3, 16, 8), Color(0.30, 0.42, 0.18))
+	# Big mushroom — offset to the left.
+	var cap := Color(0.85, 0.20, 0.20)
+	var cap_dk := Color(0.62, 0.12, 0.12)
+	var stem := Color(0.95, 0.92, 0.85)
+	# Stem.
+	draw_rect(Rect2(-6, -2, 4, 6), stem)
+	draw_rect(Rect2(-6, 3, 4, 1), stem.darkened(0.15))
+	# Cap — dome via triangle fan.
+	draw_colored_polygon(PackedVector2Array([
+		Vector2(-11, -2), Vector2(-9, -8), Vector2(-4, -10),
+		Vector2(1, -8), Vector2(3, -2)]),
+		cap)
+	# Cap shadow underside.
+	draw_line(Vector2(-11, -2), Vector2(3, -2), cap_dk, 1.5)
+	# White specks on the cap.
+	draw_circle(Vector2(-7, -6), 1.2, stem)
+	draw_circle(Vector2(-3, -7), 1.0, stem)
+	draw_circle(Vector2(-9, -4), 0.8, stem)
+	# Smaller mushroom to the right.
+	if ratio > 0.4:
+		draw_rect(Rect2(5, 1, 2, 4), stem)
+		draw_colored_polygon(PackedVector2Array([
+			Vector2(3, 1), Vector2(6, -3), Vector2(9, 1)]),
+			cap)
+		draw_line(Vector2(3, 1), Vector2(9, 1), cap_dk, 1.0)
+		draw_circle(Vector2(6, -1), 0.6, stem)
+	# Third tiny sprout if fully grown.
+	if ratio > 0.8:
+		draw_circle(Vector2(9, 4), 1.4, cap)
+		draw_circle(Vector2(9, 4), 0.6, stem)
 
 func _draw_fire(_c: Color) -> void:
 	# Stone ring
@@ -2061,3 +2412,186 @@ func _draw_wall_segment(c: Color, cd: Color, fortified: bool) -> void:
 			var rx: float = -half_w + 6.0 + float(j) * 12.0
 			draw_circle(Vector2(rx, -2), 1.2, iron.lightened(0.20))
 			draw_circle(Vector2(rx,  4), 1.2, iron.darkened(0.20))
+
+
+# ── Structure silhouettes (admin-placed Construction buildables) ─────────────
+## Shared silhouette dispatcher for the 16 buildables that don't have a
+## dedicated draw yet. Uses the entity's wood-tier color `c` for the main
+## body and `cd` for shadow accents. Each kind gets a distinct compact
+## silhouette so the admin can tell what they placed at a glance.
+func _draw_structure_silhouette(kind: String, c: Color, cd: Color) -> void:
+	# Scale the entire silhouette to match the structure's size class. The
+	# per-kind draws below are authored at a ~28-px "unit" scale; Medium
+	# (64×64) tiles at 2.2× and Large (128×128) at 4.5× so a Watchtower
+	# clearly dwarfs the ~24-px player. Wall/fence/gate stay at 1×.
+	var size: Vector2 = _STRUCTURE_SIZES.get(kind, Vector2(32, 32))
+	var s: float = 1.0
+	if size.x >= 128.0:
+		s = 4.5
+	elif size.x >= 64.0:
+		s = 2.2
+	if s != 1.0:
+		draw_set_transform(Vector2.ZERO, 0.0, Vector2(s, s))
+	match kind:
+		"fence":
+			# Wooden picket fence — 3 posts + top rail.
+			for i in range(3):
+				var fx: float = -14.0 + float(i) * 14.0
+				draw_rect(Rect2(fx - 1, -8, 3, 18), c)
+			draw_rect(Rect2(-16, -4, 32, 2), cd)
+		"gate":
+			# Two posts + a horizontal beam.
+			draw_rect(Rect2(-14, -14, 4, 28), cd)
+			draw_rect(Rect2(10, -14, 4, 28), cd)
+			draw_rect(Rect2(-14, -14, 28, 4), c)
+			draw_rect(Rect2(-14, 10, 28, 4), c)
+			draw_line(Vector2(-14, -12), Vector2(14, 12), c.darkened(0.20), 1.5)
+		"watchtower":
+			# Square base + tapered top + banner spike.
+			draw_rect(Rect2(-14, -6, 28, 20), cd)
+			draw_rect(Rect2(-10, -18, 20, 12), c)
+			draw_colored_polygon(PackedVector2Array([
+				Vector2(-8, -18), Vector2(8, -18), Vector2(0, -26)]),
+				c.darkened(0.15))
+			draw_line(Vector2(0, -26), Vector2(0, -30), Color(0.20, 0.20, 0.20), 1.5)
+		"guard_tower":
+			# Bigger, fortified version — stone base + wood upper.
+			draw_rect(Rect2(-16, -4, 32, 22), Color(0.55, 0.55, 0.50))
+			draw_rect(Rect2(-12, -20, 24, 16), c)
+			# Battlements
+			for i in range(4):
+				var bx: float = -12.0 + float(i) * 8.0
+				draw_rect(Rect2(bx, -24, 4, 5), c.darkened(0.10))
+		"house_frame":
+			# Bare wooden A-frame skeleton.
+			draw_rect(Rect2(-16, 6, 32, 8), cd)
+			draw_line(Vector2(-16, 6), Vector2(0, -14), c, 2.0)
+			draw_line(Vector2(16, 6), Vector2(0, -14), c, 2.0)
+			draw_line(Vector2(-16, 6), Vector2(16, 6), c, 2.0)
+			draw_line(Vector2(-8, -4), Vector2(8, -4), c.darkened(0.20), 1.5)
+		"large_house":
+			# Full house — wide body + peaked roof + door + window.
+			draw_rect(Rect2(-20, -4, 40, 22), c)
+			draw_colored_polygon(PackedVector2Array([
+				Vector2(-22, -4), Vector2(22, -4), Vector2(0, -22)]),
+				c.darkened(0.25))
+			draw_rect(Rect2(-4, 4, 8, 14), Color(0.20, 0.12, 0.04))
+			draw_rect(Rect2(-15, 0, 6, 6), Color(0.68, 0.72, 0.50, 0.75))
+			draw_rect(Rect2(9, 0, 6, 6), Color(0.68, 0.72, 0.50, 0.75))
+		"grand_hall":
+			# Monumental — longhouse silhouette.
+			draw_rect(Rect2(-24, -4, 48, 22), cd)
+			draw_rect(Rect2(-22, -2, 44, 18), c)
+			draw_rect(Rect2(-26, -8, 52, 6), c.lightened(0.15))
+			draw_colored_polygon(PackedVector2Array([
+				Vector2(-6, -8), Vector2(6, -8), Vector2(0, -14)]),
+				c.darkened(0.30))
+			draw_rect(Rect2(-6, 6, 12, 12), Color(0.20, 0.10, 0.04))
+		"clan_hall":
+			# Similar to grand_hall but with a banner over the entrance.
+			draw_rect(Rect2(-20, -4, 40, 22), c)
+			draw_colored_polygon(PackedVector2Array([
+				Vector2(-22, -4), Vector2(22, -4), Vector2(0, -18)]),
+				cd)
+			draw_rect(Rect2(-4, 4, 8, 14), Color(0.20, 0.10, 0.04))
+			# Warband banner.
+			draw_rect(Rect2(-3, -16, 6, 8), Color(0.85, 0.20, 0.20))
+		"well":
+			# Circular stone rim + dark opening + wooden roof on posts.
+			draw_circle(Vector2(0, 4), 10, Color(0.55, 0.55, 0.50))
+			draw_circle(Vector2(0, 4), 7, Color(0.10, 0.10, 0.12))
+			draw_rect(Rect2(-10, -10, 2, 14), cd)
+			draw_rect(Rect2(8, -10, 2, 14), cd)
+			draw_colored_polygon(PackedVector2Array([
+				Vector2(-12, -10), Vector2(12, -10), Vector2(0, -18)]),
+				c)
+		"altar":
+			# Stone base + tall pillar + rune on top.
+			draw_rect(Rect2(-12, 6, 24, 8), Color(0.62, 0.60, 0.55))
+			draw_rect(Rect2(-6, -14, 12, 20), Color(0.72, 0.70, 0.65))
+			draw_rect(Rect2(-8, -18, 16, 4), Color(0.85, 0.83, 0.78))
+			draw_circle(Vector2(0, -20), 2.0, Color(0.55, 0.20, 0.85))
+		"dock":
+			# Wooden platform extending over water.
+			draw_rect(Rect2(-18, -4, 36, 8), c)
+			# Support pillars.
+			for i in range(4):
+				var dx: float = -16.0 + float(i) * 10.0
+				draw_rect(Rect2(dx, 4, 3, 8), cd)
+			# Rope guardrail dots.
+			for i in range(5):
+				var rx: float = -16.0 + float(i) * 8.0
+				draw_circle(Vector2(rx, -8), 1.0, Color(0.55, 0.44, 0.20))
+		"market_stall":
+			# Striped canopy + trestle table.
+			draw_rect(Rect2(-14, 4, 28, 8), c)
+			draw_colored_polygon(PackedVector2Array([
+				Vector2(-16, 4), Vector2(16, 4), Vector2(0, -10)]),
+				Color(0.85, 0.20, 0.20))
+			# Canopy stripes.
+			draw_line(Vector2(-10, -2), Vector2(-4, -6),
+				Color(0.98, 0.98, 0.90), 1.5)
+			draw_line(Vector2(4, -6), Vector2(10, -2),
+				Color(0.98, 0.98, 0.90), 1.5)
+		"site_marker":
+			# Simple wooden post with a flag.
+			draw_rect(Rect2(-1, -14, 2, 26), cd)
+			draw_colored_polygon(PackedVector2Array([
+				Vector2(1, -14), Vector2(10, -10), Vector2(1, -6)]),
+				c)
+		"portal_shrine":
+			# Circular purple portal on a stone base.
+			draw_rect(Rect2(-12, 4, 24, 8), Color(0.55, 0.55, 0.50))
+			draw_circle(Vector2(0, -4), 8, Color(0.42, 0.15, 0.72))
+			draw_circle(Vector2(0, -4), 5, Color(0.72, 0.42, 0.92))
+			draw_circle(Vector2(0, -4), 2, Color(0.95, 0.85, 1.00))
+		"workbench":
+			# Simple table with tools on top.
+			draw_rect(Rect2(-12, -4, 24, 4), c)
+			draw_rect(Rect2(-10, 0, 3, 10), cd)
+			draw_rect(Rect2(7, 0, 3, 10), cd)
+			# Hammer + saw hints.
+			draw_rect(Rect2(-8, -8, 3, 5), Color(0.42, 0.30, 0.14))
+			draw_rect(Rect2(-8, -10, 6, 2), Color(0.55, 0.55, 0.60))
+			draw_line(Vector2(2, -8), Vector2(8, -3),
+				Color(0.72, 0.70, 0.66), 1.5)
+		"smith_station":
+			# Anvil + forge glow.
+			draw_rect(Rect2(-14, 4, 28, 6), cd)
+			draw_rect(Rect2(-6, -6, 12, 10), Color(0.32, 0.30, 0.28))
+			draw_rect(Rect2(-8, -8, 16, 4), Color(0.42, 0.40, 0.38))
+			draw_circle(Vector2(-11, 0), 3.0, Color(1.0, 0.55, 0.15, 0.85))
+		"bank_chest":
+			# Studded chest with gold accents.
+			draw_rect(Rect2(-14, -4, 28, 14), c)
+			draw_rect(Rect2(-14, -4, 28, 3), cd)
+			# Metal band.
+			draw_rect(Rect2(-14, 2, 28, 2), Color(0.55, 0.55, 0.60))
+			# Padlock.
+			draw_rect(Rect2(-2, 4, 4, 6), Color(0.88, 0.72, 0.12))
+		"armory_rack":
+			# Vertical rack with weapon silhouettes.
+			draw_rect(Rect2(-14, 8, 28, 4), cd)
+			draw_rect(Rect2(-14, -10, 28, 3), cd)
+			# Weapon shapes.
+			draw_line(Vector2(-10, -7), Vector2(-10, 8), Color(0.55, 0.55, 0.60), 2.0)
+			draw_rect(Rect2(-12, -8, 5, 2), Color(0.32, 0.20, 0.10))
+			draw_line(Vector2(0, -7), Vector2(0, 8), Color(0.55, 0.55, 0.60), 2.0)
+			draw_line(Vector2(10, -7), Vector2(10, 8), Color(0.72, 0.42, 0.20), 2.0)
+		"plant_bed":
+			# Dirt plot with a couple of sprouts.
+			draw_rect(Rect2(-14, -4, 28, 14), Color(0.35, 0.22, 0.10))
+			draw_rect(Rect2(-14, -6, 28, 2), c)
+			# Sprouts.
+			for i in range(4):
+				var px: float = -10.0 + float(i) * 7.0
+				draw_line(Vector2(px, 0), Vector2(px, -3),
+					Color(0.32, 0.50, 0.20), 1.5)
+				draw_circle(Vector2(px, -4), 1.5, Color(0.42, 0.62, 0.24))
+		_:
+			# Fallback for anything unmapped.
+			draw_rect(Rect2(-14, -14, 28, 28), c)
+	# Reset the transform if we applied a scale — subsequent draw calls (HP
+	# bar, hover glow, etc.) should be in native scale.
+	if s != 1.0:
+		draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
