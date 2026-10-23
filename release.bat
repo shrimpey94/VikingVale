@@ -1,5 +1,5 @@
 @echo off
-REM ─── VikingVale release script ─────────────────────────────────────────────
+REM --- VikingVale release script ----------------------------------------------
 REM Usage: release.bat <version>     e.g.  release.bat 1.0.1
 REM
 REM Bumps version.txt, creates a GitHub release tagged v<version>, uploads
@@ -9,6 +9,9 @@ REM   https://github.com/shrimpey94/VikingVale/releases/latest/download/version.
 REM   https://github.com/shrimpey94/VikingVale/releases/latest/download/VikingVale.exe
 REM
 REM Requires GitHub CLI (gh) authenticated to the shrimpey94/VikingVale repo.
+REM
+REM IMPORTANT: this file MUST stay ASCII with CRLF line endings, or cmd.exe will
+REM mis-parse it and run comment fragments as commands.
 
 setlocal
 
@@ -28,8 +31,8 @@ if not exist "VikingVale.exe" (
     exit /b 1
 )
 
-REM Write version.txt WITHOUT a trailing CRLF preamble. Using `<nul set /p`
-REM avoids the trailing newline `echo` would otherwise add — keeps the file
+REM Write version.txt WITHOUT a trailing newline. Using `<nul set /p`
+REM avoids the trailing newline `echo` would otherwise add -- keeps the file
 REM exactly equal to the tag the updater will compare against.
 <nul set /p="%VERSION%" > version.txt
 
@@ -48,4 +51,12 @@ if errorlevel 1 (
 echo.
 echo === Release %TAG% published successfully ===
 echo The updater will pick this up on next launch.
+
+REM --- Discord release announcement (optional) --------------------------------
+REM Posts the FULL changelog for this version to Discord. The helper pulls the
+REM version's title + notes from scripts\Changelog.gd and reads the webhook from
+REM the VIKINGVALE_DISCORD_WEBHOOK env var or a gitignored .discord_webhook file.
+REM It no-ops (and prints why) if no webhook is set -- never fails the release.
+echo Posting release announcement to Discord...
+python "%~dp0tools\announce_release.py" "%VERSION%"
 endlocal

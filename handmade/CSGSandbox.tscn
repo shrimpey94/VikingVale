@@ -1,0 +1,40 @@
+[gd_scene load_steps=5 format=3]
+
+[ext_resource type="Script" path="res://handmade/CSGSandbox.gd" id="1"]
+
+[sub_resource type="StandardMaterial3D" id="m_ground"]
+albedo_color = Color(0.33, 0.45, 0.29, 1)
+
+[sub_resource type="StandardMaterial3D" id="m_wall"]
+albedo_color = Color(0.64, 0.5, 0.36, 1)
+
+[sub_resource type="StandardMaterial3D" id="m_roof"]
+albedo_color = Color(0.34, 0.2, 0.12, 1)
+
+[node name="CSGSandbox" type="Node3D"]
+script = ExtResource("1")
+
+[node name="Ground" type="CSGBox3D" parent="."]
+size = Vector3(24, 0.4, 24)
+material = SubResource("m_ground")
+
+[node name="MyBuilding" type="CSGCombiner3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.2, 0)
+
+[node name="Walls" type="CSGBox3D" parent="MyBuilding"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.2, 0)
+size = Vector3(4, 2.4, 4)
+material = SubResource("m_wall")
+
+[node name="Roof" type="CSGCylinder3D" parent="MyBuilding"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 3.3, 0)
+radius = 3.2
+height = 1.8
+sides = 4
+cone = true
+material = SubResource("m_roof")
+
+[node name="DoorCut" type="CSGBox3D" parent="MyBuilding"]
+operation = 2
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.8, -2)
+size = Vector3(1.1, 1.7, 1.4)

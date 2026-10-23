@@ -1,0 +1,20 @@
+[gd_scene load_steps=5 format=3]
+
+[ext_resource type="Script" path="res://scripts/World3D.gd" id="1_world3d"]
+[ext_resource type="Script" uid="uid://dve5iqrkh8ugm" path="res://scripts/Ground.gd" id="2_ground"]
+[ext_resource type="Script" uid="uid://c7d6nwtv8iwre" path="res://scripts/HUD.gd" id="3_hud"]
+[ext_resource type="PackedScene" uid="uid://dnlb1u6vhb06o" path="res://player.tscn" id="4_player"]
+
+[node name="World3D" type="Node3D"]
+script = ExtResource("1_world3d")
+
+[node name="Ground" type="Node2D" parent="."]
+script = ExtResource("2_ground")
+
+[node name="Interactables" type="Node2D" parent="."]
+
+[node name="Player" parent="." instance=ExtResource("4_player")]
+position = Vector2(7872, 4416)
+
+[node name="HUD" type="CanvasLayer" parent="."]
+script = ExtResource("3_hud")

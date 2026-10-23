@@ -7,6 +7,8 @@ extends Area2D
 @export var action_label: String          = "Interact"
 @export var interactable_type_str: String = "tree"
 
+const FarmingDef = preload("res://scripts/Farming.gd")
+
 enum State { IDLE, BEING_HIT, DEPLETED }
 
 var _state           := State.IDLE
@@ -26,6 +28,7 @@ var _particles: Array[Dictionary] = []     # [{pos, vel, life, color}]
 
 var is_hovered       := false
 var _xp_cooldown     := 0.0   # cooldown for archery/runestone training
+var _struct_hit_ms:  int = 0  # last structure-attack time (ms) — local 1.5s throttle
 
 # Server-authoritative shared state (set by World on chunk resource nodes).
 var entity_id        := ""
@@ -54,6 +57,27 @@ const GATHER_TIMEOUT := 2.0   # seconds to wait for a server grant before going 
 func _is_server_managed() -> bool:
 	return entity_id != "" and NetworkManager.state == NetworkManager.NetState.LOGGED_IN \
 		and not _local_fallback
+
+# Resource nodes the autoplay AI can harvest (tree/rock/fish/herb share the swing).
+# stick/stone are bare-handed forage nodes — the AI NEEDS them for its first axe.
+const _AUTOPLAY_GATHER_TYPES := ["tree", "rock", "fish", "herb", "stick", "stone"]
+
+## True if the autoplay AI can currently harvest this node (a live resource whose
+## skill requirement the player meets). Used by AutoPlay to pick a target.
+func autoplay_gatherable() -> bool:
+	if interactable_type_str not in _AUTOPLAY_GATHER_TYPES:
+		return false
+	if _state == State.DEPLETED:
+		return false
+	if GameManager.get_skill_level(required_skill) < required_level:
+		return false
+	# Need the right tool (axe/pickaxe) or the AI just stands at the node forever.
+	# Foraging/fishing are bare-handed, so this only gates woodcutting/mining —
+	# which makes the AI forage for sticks/stones first, then craft an axe.
+	return GameManager.has_tool_for_skill(required_skill)
+
+func autoplay_gather_skill() -> String:
+	return required_skill
 
 func _ready() -> void:
 	add_to_group("interactable")
@@ -124,7 +148,12 @@ func _set_stats() -> void:
 			_max_hp = 9999; _swing_interval = 2.0; _success_at_req = 1.0; _success_at_99 = 1.0; _regen_delay = 0.0
 		"bank", "building":
 			_max_hp = 9999; _swing_interval = 1.0; _success_at_req = 1.0; _success_at_99 = 1.0; _regen_delay = 0.0
-		"crafting", "archery", "runestone", "construction", "auction_house":
+		"crafting", "archery", "runestone", "construction", "auction_house", "training_dummy":
+			_max_hp = 9999; _swing_interval = 1.0; _success_at_req = 1.0; _success_at_99 = 1.0; _regen_delay = 0.0
+		"farm_plot":
+			# Farming station — never depletes; state is server-tracked
+			# per-plot (empty/growing/ripe). Click routes to HUD which
+			# opens the plant popup or fires harvest based on _farm_stage.
 			_max_hp = 9999; _swing_interval = 1.0; _success_at_req = 1.0; _success_at_99 = 1.0; _regen_delay = 0.0
 		"stronghold", "banner", "outpost":
 			# Warband structures — never depleted, never gathered. Inspectable
@@ -183,6 +212,8 @@ func _setup_collision() -> void:
 		# Interior exit door — big + tall so it's an easy tap-target when
 		# the player wants OUT of a room they can't otherwise leave.
 		"exit_door": rect.size = Vector2(48, 64)
+		# Dungeon cave mouth — a generous click target.
+		"dungeon_entrance": rect.size = Vector2(56, 52)
 		"wall", "fence":
 			rect.size = _STRUCTURE_SIZES.get(interactable_type_str,
 					Vector2(32, 32))
@@ -288,6 +319,14 @@ func _on_structure_hp_changed(eid: String, hp: int, max_hp: int,
 		# Cap the buffer so a long fight doesn't grow it unbounded.
 		if _dmg_popups.size() > 8:
 			_dmg_popups.pop_front()
+	# Town-wall REBUILD (v1.6.2): the server revived a razed wall (alive True after
+	# it was destroyed). Restore its collision + normal look so it blocks the tile
+	# and can be attacked / repaired again.
+	if alive and not structure_alive and _state == State.DEPLETED:
+		modulate = Color(1, 1, 1, 1)
+		_state = State.IDLE
+		if get_node_or_null("StructureBody") == null and interactable_type_str in _STRUCTURE_SIZES:
+			_add_structure_static_body(_STRUCTURE_SIZES[interactable_type_str])
 	structure_hp = hp
 	structure_max_hp = max_hp
 	structure_alive = alive
@@ -436,6 +475,8 @@ func _process(delta: float) -> void:
 
 	elif interactable_type_str in ["forge", "fire", "building", "auction_house", "essence"]:
 		queue_redraw()
+	elif interactable_type_str == "farm_plot" and _farm_stage == 1:
+		queue_redraw()   # animate the growth + water bars while a crop grows
 
 # ── Hit ─────────────────────────────────────────────────────────────────────
 func _apply_hit() -> void:
@@ -476,6 +517,23 @@ func _get_tool_bonus() -> float:
 			return 0.05
 	return 0.0
 
+## Roll a possible gem drop for a mining node, keyed to the rock's required
+## level. Returns "" (no drop, the common case) or a gem id. Higher-tier
+## rocks lean toward rarer gems. ~4-6% base chance.
+func _roll_mining_gem(rock_lv: int) -> String:
+	if randf() > 0.05:
+		return ""
+	# Weighted pick by tier. Low rocks → opal; high rocks can hit diamond.
+	var r := randf()
+	if rock_lv >= 85:          # runite
+		return "diamond" if r < 0.35 else ("amethyst" if r < 0.75 else "opal")
+	elif rock_lv >= 70:        # adamant
+		return "diamond" if r < 0.12 else ("amethyst" if r < 0.55 else "opal")
+	elif rock_lv >= 50:        # mithril
+		return "amethyst" if r < 0.25 else "opal"
+	else:                      # gold / lower high-tier
+		return "amethyst" if r < 0.08 else "opal"
+
 func _deplete() -> void:
 	_state          = State.DEPLETED   # set BEFORE emitting so _on_player_stop_action ignores it
 	collision_layer = 0
@@ -483,28 +541,62 @@ func _deplete() -> void:
 	_regen_elapsed  = 0.0
 	_particles.clear()
 	_shake          = Vector2.ZERO
-	# Award loot + XP (the gathering client awards locally)
+	# Ground pickups (stick/stone) vanish the moment they're collected — a
+	# "depleted stick" reads as debris still lying there. Hidden until the
+	# node respawns (which relocates it). Renewable nodes like trees/rocks
+	# keep their depleted visual (stump / cracked rock).
+	if interactable_type_str in ["stick", "stone"]:
+		visible = false
+	# Award loot + XP. v1.7 B2a — for SERVER-managed nodes the SERVER now grants
+	# the primary drop + XP (pushed back via gather_reward), so the client must
+	# NOT mint it here. Offline / non-server nodes still grant locally.
 	var loot := _loot_data()
-	if not loot.is_empty():
+	var _server_gather := _is_server_managed() and _i_am_gathering
+	if not _server_gather and not loot.is_empty():
 		GameManager.add_item(loot["id"], loot["name"], 1, loot["color"])
 		GameManager.add_xp(required_skill, loot["xp"])
-	# Rune essence — secondary Magic XP scaling with the player's Magic level
-	# so a high-magic miner gets compounding reward from extracting essence.
-	# Formula: 5 + magic_level / 4, capped at 30, so lv 1 ≈ 5 xp, lv 99 ≈ 29.
-	if interactable_type_str == "essence":
-		var mlv := GameManager.get_skill_level("magic")
-		@warning_ignore("integer_division")
-		var bonus := mini(30, 5 + mlv / 4)
-		GameManager.add_xp("magic", bonus)
-	# Foraging herbs occasionally yield a farming seed.
-	if interactable_type_str == "herb" and randf() < 0.15:
-		var Farming := preload("res://scripts/Farming.gd")
-		var sd: Dictionary = Farming.seed_def(Farming.random_seed_id())
-		if not sd.is_empty():
-			GameManager.add_item(str(sd["seed"]), str(sd["seed_name"]), 1, Farming.color_of(sd))
-	# Tell the server it's depleted so every nearby client sees it deplete + respawn.
-	if _is_server_managed() and _i_am_gathering:
-		NetworkManager.send_gather_complete(entity_id, _regen_delay)
+	# Gather SECONDARIES (essence→magic XP, herb→seed, rock→gem). v1.7 ⑥ — for
+	# SERVER-managed nodes the SERVER now rolls + pushes these (extra gather_reward
+	# messages), so the client must NOT mint them here. Offline / non-server nodes
+	# still roll locally.
+	if not _server_gather:
+		# Rune essence — secondary Magic XP scaling with the player's Magic level
+		# so a high-magic miner gets compounding reward from extracting essence.
+		# Formula: 5 + magic_level / 4, capped at 30, so lv 1 ≈ 5 xp, lv 99 ≈ 29.
+		if interactable_type_str == "essence":
+			var mlv := GameManager.get_skill_level("magic")
+			@warning_ignore("integer_division")
+			var bonus := mini(30, 5 + mlv / 4)
+			GameManager.add_xp("magic", bonus)
+		# Foraging herbs can yield a farming seed — tiered rarity by seed level
+		# (mid ~1/20, scaling rarer up to ~1/1000 for the top crops).
+		if interactable_type_str == "herb":
+			var seed_id := FarmingDef.roll_forage_seed()
+			if seed_id != "":
+				var sd: Dictionary = FarmingDef.seed_def(seed_id)
+				if not sd.is_empty():
+					GameManager.add_item(str(sd["seed"]), str(sd["seed_name"]), 1, FarmingDef.color_of(sd))
+		# Jewelcrafting gem drops (Phase 1) — mining higher-tier ore has a small
+		# chance to also yield a gem. Tier scales with the rock's required level:
+		# gold/mithril → opal, adamant → amethyst, runite → diamond.
+		if interactable_type_str == "rock" and required_level >= 30:
+			var gem := _roll_mining_gem(required_level)
+			if gem != "":
+				var gem_names := {"opal": "Opal", "amethyst": "Amethyst", "diamond": "Diamond"}
+				var gem_cols := {
+					"opal": Color(0.82, 0.90, 0.95),
+					"amethyst": Color(0.62, 0.38, 0.85),
+					"diamond": Color(0.85, 0.95, 1.00)}
+				GameManager.add_item(gem, str(gem_names[gem]), 1, gem_cols[gem] as Color)
+				GameManager.add_xp("jewelcrafting", 5)
+				Events.chat_message.emit("You unearthed a%s %s!" % [
+					"n" if gem == "amethyst" or gem == "opal" else "", gem_names[gem]])
+	# Tell the server it's depleted so every nearby client sees it deplete +
+	# respawn — AND (B2a) carry the resolved loot so the server can grant it
+	# authoritatively (the baked map overrides this claim; it's the pre-bake path).
+	if _server_gather:
+		loot["skill"] = required_skill
+		NetworkManager.send_gather_complete(entity_id, _regen_delay, loot)
 		_i_am_gathering = false
 	Events.node_depleted.emit(self)
 	Events.player_stop_action.emit()
@@ -526,6 +618,7 @@ func _respawn() -> void:
 	_state          = State.IDLE
 	_regen_elapsed  = 0.0
 	_swing_elapsed  = 0.0
+	visible         = true   # restore hidden stick/stone pickups at the new spot
 	_particles.clear()
 	_shake          = Vector2.ZERO
 	collision_layer = 4
@@ -593,16 +686,17 @@ func _loot_data() -> Dictionary:
 			else:
 				return {"id":"runite_ore",  "name":"Runite Ore",  "color":Color(0.65,0.20,0.82), "xp":125}
 		"fish":
+			# XP mirrors server SKILL_ACTIONS (rebalanced 2026-09-26 → ~200 h fishing 99).
 			if required_level < 20:
-				return {"id":"raw_fish",    "name":"Raw Fish",    "color":Color(0.70,0.90,0.95), "xp":20}
+				return {"id":"raw_fish",    "name":"Raw Fish",    "color":Color(0.70,0.90,0.95), "xp":30}
 			elif required_level < 40:
-				return {"id":"raw_salmon",  "name":"Raw Salmon",  "color":Color(0.95,0.55,0.30), "xp":35}
+				return {"id":"raw_salmon",  "name":"Raw Salmon",  "color":Color(0.95,0.55,0.30), "xp":50}
 			elif required_level < 60:
-				return {"id":"lobster",     "name":"Lobster",     "color":Color(0.90,0.30,0.20), "xp":60}
+				return {"id":"lobster",     "name":"Lobster",     "color":Color(0.90,0.30,0.20), "xp":85}
 			elif required_level < 80:
-				return {"id":"raw_shark",   "name":"Raw Shark",   "color":Color(0.55,0.58,0.62), "xp":90}
+				return {"id":"raw_shark",   "name":"Raw Shark",   "color":Color(0.55,0.58,0.62), "xp":130}
 			else:
-				return {"id":"abyssal_eel", "name":"Abyssal Eel", "color":Color(0.28,0.45,0.35), "xp":120}
+				return {"id":"abyssal_eel", "name":"Abyssal Eel", "color":Color(0.28,0.45,0.35), "xp":175}
 		"herb":
 			match display_name:
 				"Mushroom Patch":
@@ -637,12 +731,36 @@ func _loot_data() -> Dictionary:
 			return {}
 
 func _skill_to_action() -> String:
+	# Drives the swing visual: chop = axe, mine = pickaxe, fish = rod, forage =
+	# BARE HAND (picking herbs/sticks/stones needs no tool). Foraging + anything
+	# unknown falls to the empty-handed pick so we never draw an axe for a herb.
 	match required_skill:
 		"woodcutting":  return "chop"
 		"mining":       return "mine"
 		"fishing":      return "fish"
 		"construction": return "mine"
-		_:              return "chop"
+		"foraging":     return "forage"
+		_:              return "forage"
+
+func _has_weapon_kind(suffix: String) -> bool:
+	# A bow/staff either equipped OR carried counts (item id ends with the kind).
+	if str(GameManager.equipment.get("weapon", "")).ends_with(suffix):
+		return true
+	for it: Dictionary in GameManager.inventory:
+		if str(it.get("id", "")).ends_with(suffix):
+			return true
+	return false
+
+func _has_melee_weapon() -> bool:
+	# Any weapon that is not a bow/staff (equipped) or a sword/axe/mace (carried).
+	var eq := str(GameManager.equipment.get("weapon", ""))
+	if eq != "" and not eq.ends_with("bow") and not eq.ends_with("staff"):
+		return true
+	for it: Dictionary in GameManager.inventory:
+		var iid := str(it.get("id", ""))
+		if iid.ends_with("sword") or iid.ends_with("axe") or iid.ends_with("mace"):
+			return true
+	return false
 
 # ── Hover ────────────────────────────────────────────────────────────────────
 func _on_hover_enter() -> void:
@@ -688,6 +806,12 @@ func _on_player_interacted(node: Node) -> void:
 		# their return coords. Universal — every interior region has one.
 		NetworkManager.send_exit_interior()
 		return
+	if interactable_type_str == "dungeon_entrance":
+		# Overworld cave mouth (v1.5.3). Server resolves which dungeon this
+		# entrance leads to from the entity + validates proximity, then pushes
+		# the layout back via dungeon_entered.
+		NetworkManager.send_dungeon_enter(entity_id)
+		return
 	if interactable_type_str == "building":
 		# Enter the building's interior. Two paths:
 		#   1. Admin-placed buildings (id starts with "a:") are in
@@ -712,17 +836,39 @@ func _on_player_interacted(node: Node) -> void:
 		if _xp_cooldown > 0.0:
 			Events.chat_message.emit("You need to rest before training again. (%.0fs)" % _xp_cooldown)
 			return
-		GameManager.add_xp("ranged", 5)
-		_xp_cooldown = 30.0
-		Events.ui_show_interaction.emit({"type": "action", "action": "Train", "target": display_name, "skill": "ranged"})
+		# Gate: a bow AND arrows. No UI without them - just a toast (v1.6.6).
+		if not _has_weapon_kind("bow") or GameManager.get_item_qty("arrows") <= 0:
+			Events.chat_message.emit("You need a bow and arrows to train here.")
+			return
+		_xp_cooldown = 20.0
+		Events.skill_minigame_start.emit({
+			"skill": "ranged", "level": GameManager.get_skill_level("ranged"),
+			"shots": 5, "ammo_id": "arrows", "theme": "archery", "station": display_name})
 		return
 	if interactable_type_str == "runestone":
 		if _xp_cooldown > 0.0:
 			Events.chat_message.emit("The rune is still recharging. (%.0fs)" % _xp_cooldown)
 			return
-		GameManager.add_xp("magic", 5)
-		_xp_cooldown = 30.0
-		Events.ui_show_interaction.emit({"type": "action", "action": "Study", "target": display_name, "skill": "magic"})
+		# Magic mirror of the range: a staff + rune essence to channel.
+		if not _has_weapon_kind("staff") or GameManager.get_item_qty("rune_essence") <= 0:
+			Events.chat_message.emit("You need a staff and rune essence to study here.")
+			return
+		_xp_cooldown = 20.0
+		Events.skill_minigame_start.emit({
+			"skill": "magic", "level": GameManager.get_skill_level("magic"),
+			"shots": 5, "ammo_id": "rune_essence", "theme": "rune", "station": display_name})
+		return
+	if interactable_type_str == "training_dummy":
+		if _xp_cooldown > 0.0:
+			Events.chat_message.emit("Catch your breath before sparring again. (%.0fs)" % _xp_cooldown)
+			return
+		if not _has_melee_weapon():
+			Events.chat_message.emit("You need a melee weapon to spar here.")
+			return
+		_xp_cooldown = 20.0
+		Events.skill_minigame_start.emit({
+			"skill": "melee", "level": GameManager.get_skill_level("melee"),
+			"shots": 5, "ammo_id": "", "theme": "melee", "station": display_name})
 		return
 	if interactable_type_str == "construction":
 		Events.open_construction.emit()
@@ -752,6 +898,21 @@ func _on_player_interacted(node: Node) -> void:
 		# pledges + alliance status.
 		Events.chat_message.emit("You inspect the %s. (Coming soon.)" % display_name)
 		return
+	if interactable_type_str == "farm_plot":
+		# A plot is TENDED, never hit — left-click does the stage-appropriate
+		# farming action (no gather/attack swing). Empty → plant popup; growing →
+		# water when the boost window is up; ripe → harvest.
+		var fstage := get_farm_stage()
+		if fstage == 2:
+			NetworkManager.send_farm_harvest(entity_id)
+		elif fstage == 1:
+			if farm_can_water():
+				NetworkManager.send_farm_water(entity_id)
+			else:
+				Events.chat_message.emit("> Still growing…")
+		else:
+			Events.farm_plant_requested.emit(entity_id)
+		return
 	if interactable_type_str in _STRUCTURE_SIZES:
 		# Left-click attack: fire one damage message. HUD's right-click
 		# menu supplies Inspect / Repair alternatives. Only alive
@@ -760,14 +921,19 @@ func _on_player_interacted(node: Node) -> void:
 			Events.chat_message.emit("The %s is already destroyed."
 					% display_name)
 			return
+		# Local 1.5s attack throttle so a fast-clicker can't flood the server (which
+		# also enforces the cooldown + reach authoritatively, echoing a toast if far).
+		var now_ms := Time.get_ticks_msec()
+		if now_ms - _struct_hit_ms < 1500:
+			return
+		_struct_hit_ms = now_ms
 		# Baseline melee damage — pulled from Attack skill via existing
-		# GameManager if available, else fixed 5. Server enforces range +
-		# rate independently, so nothing bad happens if the client spams.
+		# GameManager if available, else fixed 5.
 		var dmg: int = 5
 		if GameManager.has_method("get_effective_attack_damage"):
 			dmg = int(GameManager.call("get_effective_attack_damage"))
 		if entity_id != "":
-			NetworkManager.send_structure_damage(entity_id, dmg)
+			NetworkManager.send_structure_damage(entity_id, dmg, GameManager.combat_style)
 			Events.chat_message.emit("You strike the %s." % display_name)
 		return
 	if interactable_type_str in ["stick", "stone"]:
@@ -811,7 +977,11 @@ func _request_gather() -> void:
 	_local_fallback = false
 	_gather_pending = true
 	_gather_wait    = 0.0
-	NetworkManager.send_gather_request(entity_id, global_position.x, global_position.y)
+	# Tell nearby clients which tool we're swinging so they draw our tiered
+	# axe/pick (not a generic one). Foraging/fishing carry no tool id.
+	var tool_id := Appearance.best_tool(GameManager.inventory, _skill_to_action())
+	NetworkManager.send_gather_request(entity_id, global_position.x,
+		global_position.y, tool_id)
 
 ## Shared swing-start used by both the server-granted and local-fallback paths.
 func _start_swinging() -> void:
@@ -867,6 +1037,9 @@ func apply_depleted(_respawn_in: float) -> void:
 	input_pickable  = false
 	_particles.clear()
 	_shake          = Vector2.ZERO
+	# Server-managed pickups vanish on collect too (see _deplete).
+	if interactable_type_str in ["stick", "stone"]:
+		visible = false
 	queue_redraw()
 
 ## Called by World when the server respawns this node (in place, no move).
@@ -884,6 +1057,7 @@ func apply_respawn() -> void:
 	_shake          = Vector2.ZERO
 	collision_layer = 4
 	input_pickable  = true
+	visible         = true   # restore hidden stick/stone pickups
 	queue_redraw()
 
 func _on_player_stop_action() -> void:
@@ -952,10 +1126,13 @@ func _draw_body() -> void:
 		"crafting":     _draw_crafting_bench(ratio, c, cd)
 		"archery":      _draw_archery_target(ratio, c, cd)
 		"runestone":    _draw_runestone(ratio, c, cd)
+		"training_dummy": _draw_training_dummy(ratio, c, cd)
 		"construction": _draw_construction(ratio, c, cd)
 		"auction_house": _draw_auction_house(c, cd)
+		"farm_plot":    _draw_farm_plot(ratio, c, cd)
 		"door":         _draw_door(c, cd)
 		"exit_door":    _draw_exit_door(c, cd)
+		"dungeon_entrance": _draw_dungeon_entrance()
 		"stick":        _draw_stick(c)
 		"stone":        _draw_stone(c, cd)
 		"stronghold":   _draw_stronghold()
@@ -1709,6 +1886,292 @@ func _draw_fish(ratio: float, c: Color, _cd: Color) -> void:
 		draw_circle(Vector2(-5.0, -13.0), 2.5, Color(0.82, 0.95, 1.0, 0.55))
 		draw_circle(Vector2(4.0, -11.0), 1.5, Color(0.82, 0.95, 1.0, 0.45))
 
+## Farm plot — three visual states driven by `_farm_stage`:
+##   0 = empty (tilled soil, ready to plant)
+##   1 = growing (small sprouts)
+##   2 = ripe (full crop ready to harvest)
+## Server broadcasts stage changes via farm_plot_state; the world routes
+## them to `set_farm_stage(stage, seed_id)`.
+var _farm_stage: int = 0
+var _farm_seed_id: String = ""
+# Grow/water bar state (server-relative; ticked locally so bars animate + the
+# crop ripens visually without a per-second server push). FARM_WATER_BOOST=300.
+var _farm_grow: float = 0.0        # total grow seconds for the planted crop
+var _farm_eff: float = 0.0         # effective matured seconds at last server update
+var _farm_boost: float = 0.0       # seconds of 2× boost left at last update
+var _farm_update_ms: int = 0       # Time.get_ticks_msec at that update
+const _FARM_WATER_BOOST := 300.0
+
+func set_farm_stage(stage: int, seed_id: String,
+		grow: float = 0.0, eff: float = 0.0, boost: float = 0.0) -> void:
+	_farm_stage = clampi(stage, 0, 2)
+	_farm_seed_id = seed_id
+	_farm_grow = grow
+	_farm_eff = eff
+	_farm_boost = boost
+	_farm_update_ms = Time.get_ticks_msec()
+	queue_redraw()
+
+## Current effective-grow + boost-left, extrapolated from the last update.
+func _farm_now() -> Dictionary:
+	var el := float(Time.get_ticks_msec() - _farm_update_ms) / 1000.0
+	# rate is 2× while boosted, 1× after: eff += el + min(el, boost).
+	var eff_now := _farm_eff + el + minf(el, _farm_boost)
+	return {"eff": eff_now, "boost_left": maxf(0.0, _farm_boost - el)}
+
+## Locally-promoted stage — a growing crop reads as ripe once effective grow
+## reaches full, so the action menu offers Harvest without waiting on the server.
+func get_farm_stage() -> int:
+	if _farm_stage == 1 and _farm_grow > 0.0 and float(_farm_now()["eff"]) >= _farm_grow:
+		return 2
+	return _farm_stage
+
+## True if this growing crop can be watered right now (boost window elapsed).
+func farm_can_water() -> bool:
+	return get_farm_stage() == 1 and float(_farm_now()["boost_left"]) <= 0.0
+
+func _draw_farm_plot(_ratio: float, _c: Color, _cd: Color) -> void:
+	# Tilled soil base — always present under any stage. Rows of furrows.
+	var soil := Color(0.42, 0.28, 0.14)
+	var soil_dk := soil.darkened(0.25)
+	draw_rect(Rect2(-14, -6, 28, 20), soil)
+	for i in range(3):
+		var fy: float = -3.0 + i * 6.0
+		draw_line(Vector2(-13, fy), Vector2(13, fy), soil_dk, 1.2)
+	# Fence corners so the plot reads as an intentional plot vs random dirt.
+	for corner in [Vector2(-14, -6), Vector2(13, -6), Vector2(-14, 13), Vector2(13, 13)]:
+		draw_rect(Rect2(corner.x - 1, corner.y - 1, 2, 3), Color(0.32, 0.20, 0.08))
+	var stage := get_farm_stage()
+	match stage:
+		0:
+			# Empty — small "plant here" pip in the middle so it reads as
+			# interactable, not just decoration.
+			draw_circle(Vector2(0, 4), 2.0, Color(0.55, 0.42, 0.20, 0.60))
+		1:
+			# Growing — the actual crop plant, sized by its 4–7 discrete stages
+			# (more stages for higher tiers). Species-specific silhouette.
+			var prog := clampf(float(_farm_now()["eff"]) / maxf(1.0, _farm_grow), 0.0, 1.0)
+			var stages := _farm_growth_stages()
+			var step := clampi(int(prog * float(stages)) + 1, 1, stages)
+			_draw_crop_plant(_farm_seed_id, float(step) / float(stages), false)
+		2:
+			# Ripe — the finished crop plant, species-specific.
+			_draw_crop_plant(_farm_seed_id, 1.0, true)
+	# Growth + water bars above a growing crop (stage 1 only). Green = time to
+	# ripe (drains full→empty); blue = water cooldown (full just after watering,
+	# drains to empty = can water again for another 2× boost).
+	if stage == 1 and _farm_grow > 0.0:
+		var now := _farm_now()
+		var grow_left := clampf(1.0 - float(now["eff"]) / _farm_grow, 0.0, 1.0)
+		var water_frac := clampf(float(now["boost_left"]) / _FARM_WATER_BOOST, 0.0, 1.0)
+		var bw := 22.0
+		var bx := -bw * 0.5
+		_draw_farm_bar(bx, -20.0, bw, grow_left, Color(0.35, 0.80, 0.30))
+		_draw_farm_bar(bx, -15.0, bw, water_frac, Color(0.35, 0.65, 0.95))
+
+func _draw_farm_bar(x: float, y: float, w: float, frac: float, fill: Color) -> void:
+	draw_rect(Rect2(x - 1, y - 1, w + 2, 4), Color(0, 0, 0, 0.55))
+	if frac > 0.0:
+		draw_rect(Rect2(x, y, w * frac, 2), fill)
+
+## Number of visible growth stages for the planted crop — 4 for low tiers up to
+## 7 for the highest, so pricier crops read as a longer, more elaborate grow.
+func _farm_growth_stages() -> int:
+	var lv := FarmingDef.req_level(_farm_seed_id)
+	return clampi(4 + int(lv / 22.0), 4, 7)
+
+## Crop id → botanical archetype so each crop reads as the real plant.
+func _crop_archetype(seed_id: String) -> String:
+	match seed_id:
+		"wheat_seed", "barley_seed", "rye_seed": return "grain"
+		"moonwheat_seed": return "moongrain"
+		"carrot_seed": return "carrot"
+		"potato_seed": return "potato"
+		"cabbage_seed": return "cabbage"
+		"corn_seed": return "corn"
+		"sugarcane_seed": return "cane"
+		"hops_seed": return "hops"
+		"tomato_seed", "pepper_seed": return "fruitbush"
+		"blueberry_seed", "lingonberry_seed", "strawberry_seed": return "berry"
+		"grape_seed": return "vine"
+		"peach_seed", "apple_seed": return "treefruit"
+		"watermelon_seed": return "melon"
+		"cotton_seed": return "cotton"
+	return "generic"
+
+## Draw the planted crop as its real species. `frac` 0..1 = growth progress;
+## `ripe` shows the harvest-ready form (grain ears / root / fruit). Origin is the
+## plot centre, soil top ≈ y=10, plants grow upward (−y).
+func _draw_crop_plant(seed_id: String, frac: float, ripe: bool) -> void:
+	var sd := FarmingDef.seed_def(seed_id)
+	var col: Color = FarmingDef.color_of(sd) if not sd.is_empty() else Color(0.5, 0.6, 0.3)
+	var stalk := Color(0.30, 0.55, 0.22)
+	var leaf := Color(0.42, 0.72, 0.34)
+	# Shared early seedling — a sprout with two cotyledon leaves.
+	if not ripe and frac < 0.30:
+		draw_line(Vector2(0, 10), Vector2(0, 7), stalk, 1.4)
+		draw_circle(Vector2(-1.6, 7), 1.3, leaf)
+		draw_circle(Vector2(1.6, 7), 1.3, leaf)
+		return
+	var ripe_look := ripe or frac > 0.72   # crop product appears near/at ripe
+	match _crop_archetype(seed_id):
+		"grain", "moongrain":
+			var gh := lerpf(7.0, 15.0, frac)
+			if _crop_archetype(seed_id) == "moongrain":
+				draw_circle(Vector2(0, 10 - gh * 0.6), gh * 0.5, Color(col.r, col.g, col.b, 0.12))
+			for sx in [-6.0, -2.0, 2.0, 6.0]:
+				var bend := 0.7 if sx > 0.0 else -0.7
+				var topg := Vector2(sx + (bend if ripe_look else 0.0), 10 - gh)
+				draw_line(Vector2(sx, 10), topg, stalk, 1.2)
+				if ripe_look:
+					for k in range(5):
+						var ky := topg.y + k * 1.5
+						draw_circle(Vector2(topg.x - 0.9, ky), 0.85, col)
+						draw_circle(Vector2(topg.x + 0.9, ky), 0.85, col.darkened(0.10))
+					draw_line(topg, topg + Vector2(-1.4, -3.0), col.lightened(0.2), 0.5)
+					draw_line(topg, topg + Vector2(1.4, -3.0), col.lightened(0.2), 0.5)
+				else:
+					draw_circle(topg, 1.0, leaf)
+		"carrot":
+			var ch := lerpf(6.0, 11.0, frac)
+			for lx in [-4.0, -2.0, 0.0, 2.0, 4.0]:
+				draw_line(Vector2(0, 9), Vector2(lx, 10 - ch), stalk, 0.9)
+				draw_circle(Vector2(lx, 10 - ch), 0.7, leaf)
+			if ripe:
+				draw_colored_polygon(PackedVector2Array([
+					Vector2(-2.6, 8.5), Vector2(2.6, 8.5), Vector2(0, 14.5)]), col)
+				draw_line(Vector2(-1.0, 10.0), Vector2(-0.2, 13.0), col.lightened(0.2), 0.6)
+		"potato":
+			var ph := lerpf(5.0, 9.0, frac)
+			for i in range(5):
+				var ang := -PI * 0.5 + (float(i) - 2.0) * 0.42
+				var tip := Vector2(cos(ang) * 6.0 * frac, 10 - ph * 0.7 + sin(ang) * 2.0)
+				draw_line(Vector2(0, 9), tip, stalk, 1.0)
+				draw_circle(tip, 1.6 * frac, leaf)
+			if ripe:
+				draw_circle(Vector2(-3, 11.5), 2.0, col.darkened(0.05))
+				draw_circle(Vector2(0, 12.2), 2.3, col)
+				draw_circle(Vector2(3, 11.5), 2.0, col.darkened(0.10))
+		"cabbage":
+			var cr := lerpf(2.5, 6.5, frac)
+			var head: Color = col if ripe else leaf.darkened(0.05)
+			var cc := Vector2(0, 10 - cr * 0.5)
+			draw_circle(cc, cr, head.darkened(0.15))
+			draw_circle(cc, cr * 0.72, head)
+			draw_circle(cc + Vector2(-cr * 0.25, -cr * 0.2), cr * 0.35, head.lightened(0.12))
+			draw_line(cc + Vector2(0, cr * 0.7), cc + Vector2(0, -cr * 0.7), head.darkened(0.3), 0.7)
+		"corn":
+			var coh := lerpf(8.0, 15.0, frac)
+			for sx in [-3.0, 3.0]:
+				draw_line(Vector2(sx, 10), Vector2(sx, 10 - coh), stalk, 1.6)
+				draw_line(Vector2(sx, 10 - coh * 0.6), Vector2(sx - 4.0, 10 - coh * 0.42), leaf, 1.2)
+				draw_line(Vector2(sx, 10 - coh * 0.42), Vector2(sx + 4.0, 10 - coh * 0.24), leaf, 1.2)
+				if ripe_look:
+					draw_line(Vector2(sx, 10 - coh), Vector2(sx - 1.2, 10 - coh - 2.6), Color(0.85, 0.72, 0.40), 0.6)
+					draw_line(Vector2(sx, 10 - coh), Vector2(sx + 1.2, 10 - coh - 2.6), Color(0.85, 0.72, 0.40), 0.6)
+			if ripe:
+				for cy in range(4):
+					draw_circle(Vector2(2.0, 10 - coh * 0.5 + float(cy) * 1.3), 1.5, col)
+				draw_line(Vector2(0.6, 10 - coh * 0.5 - 1.0), Vector2(0.6, 10 - coh * 0.5 + 5.0), Color(0.45, 0.68, 0.32), 1.0)
+		"cane":
+			var kh := lerpf(9.0, 16.0, frac)
+			for sx in [-3.0, 0.0, 3.0]:
+				draw_line(Vector2(sx, 10), Vector2(sx, 10 - kh), (col.darkened(0.15) if ripe else stalk), 1.7)
+				for seg in range(1, 4):
+					var sy := 10 - kh * float(seg) / 4.0
+					draw_line(Vector2(sx - 1.0, sy), Vector2(sx + 1.0, sy), col.darkened(0.35), 0.7)
+				draw_line(Vector2(sx, 10 - kh), Vector2(sx - 3.0, 10 - kh - 3.0), leaf, 1.0)
+				draw_line(Vector2(sx, 10 - kh), Vector2(sx + 3.0, 10 - kh - 3.0), leaf, 1.0)
+		"hops":
+			var hh := lerpf(7.0, 14.0, frac)
+			var prev := Vector2(0, 10)
+			for i in range(1, 7):
+				var t := float(i) / 6.0
+				var p := Vector2(sin(t * TAU) * 3.0, 10 - hh * t)
+				draw_line(prev, p, stalk, 1.3)
+				draw_circle(p + Vector2(1.8, 0), 1.0, leaf)
+				if ripe_look and i >= 3:
+					draw_colored_polygon(PackedVector2Array([
+						p + Vector2(-1.4, 0), p + Vector2(1.4, 0), p + Vector2(0, 3.0)]), col)
+				prev = p
+		"fruitbush":
+			var fh := lerpf(6.0, 12.0, frac)
+			var pepper := seed_id == "pepper_seed"
+			draw_line(Vector2(0, 10), Vector2(0, 10 - fh), stalk, 1.5)
+			for sx in [-4.0, -2.0, 2.0, 4.0]:
+				var ly := 10 - fh * (0.4 + absf(sx) * 0.06)
+				draw_line(Vector2(0, ly), Vector2(sx, ly - 2.0), leaf, 1.1)
+				draw_circle(Vector2(sx, ly - 2.0), 1.6 * frac, leaf)
+			if ripe_look:
+				for fx in [-3.0, 1.0, 3.0]:
+					var fp := Vector2(fx, 10 - fh * 0.5)
+					if pepper:
+						draw_colored_polygon(PackedVector2Array([
+							fp + Vector2(-1.3, -1.4), fp + Vector2(1.3, -1.4), fp + Vector2(0, 2.6)]), col)
+					else:
+						draw_circle(fp, 1.8, col)
+						draw_circle(fp + Vector2(-0.5, -0.5), 0.7, col.lightened(0.25))
+		"berry":
+			var bh := lerpf(4.0, 8.0, frac)
+			for sx in [-4.0, -1.0, 2.0, 4.0]:
+				draw_line(Vector2(0, 10), Vector2(sx, 10 - bh * 0.7), stalk, 1.0)
+				draw_circle(Vector2(sx, 10 - bh * 0.7), 1.6 * frac, leaf)
+			if ripe_look:
+				for bx in [-3.0, -1.0, 1.0, 3.0, 0.0]:
+					draw_circle(Vector2(bx, 10 - bh * 0.45 + (1.0 if int(bx) % 2 == 0 else 0.0)), 1.1, col)
+		"vine":
+			var vh := lerpf(7.0, 14.0, frac)
+			draw_line(Vector2(-4, 10), Vector2(-1, 10 - vh), stalk, 1.3)
+			draw_circle(Vector2(-3, 10 - vh * 0.5), 2.2 * frac, leaf)
+			draw_circle(Vector2(2, 10 - vh * 0.7), 2.0 * frac, leaf.darkened(0.05))
+			if ripe_look:
+				var cy := 10 - vh * 0.4
+				var rows := [[0.0], [-1.0, 1.0], [-2.0, 0.0, 2.0], [-1.0, 1.0], [0.0]]
+				for r in range(rows.size()):
+					for gx in rows[r]:
+						draw_circle(Vector2(2.0 + gx * 1.3, cy + float(r) * 1.4), 1.1, col)
+		"treefruit":
+			var th := lerpf(6.0, 12.0, frac)
+			draw_line(Vector2(0, 10), Vector2(0, 10 - th * 0.5), Color(0.45, 0.30, 0.16), 1.8)
+			draw_circle(Vector2(0, 10 - th * 0.7), lerpf(2.0, 5.0, frac), leaf.darkened(0.05))
+			draw_circle(Vector2(-2, 10 - th * 0.7), lerpf(1.5, 3.5, frac), leaf)
+			draw_circle(Vector2(2, 10 - th * 0.62), lerpf(1.5, 3.5, frac), leaf)
+			if ripe_look:
+				for fx in [-2.0, 2.0, 0.0]:
+					draw_circle(Vector2(fx, 10 - th * 0.65), 1.7, col)
+					draw_circle(Vector2(fx - 0.5, 10 - th * 0.65 - 0.5), 0.6, col.lightened(0.25))
+		"melon":
+			var mh := lerpf(3.0, 6.0, frac)
+			draw_line(Vector2(-6, 11), Vector2(6, 11), stalk, 1.2)
+			for lx in [-5.0, -2.0, 2.0, 5.0]:
+				draw_circle(Vector2(lx, 10 - mh * 0.5), 1.8 * frac, leaf)
+			if ripe:
+				draw_circle(Vector2(0, 11), 4.5, col.darkened(0.12))
+				draw_circle(Vector2(0, 11), 4.0, col)
+				for a in [-0.6, 0.0, 0.6]:
+					draw_line(Vector2(a * 3.0 - 1.0, 7.5), Vector2(a * 3.0 + 1.0, 14.5), col.darkened(0.35), 0.8)
+		"cotton":
+			var wh := lerpf(5.0, 10.0, frac)
+			draw_line(Vector2(0, 10), Vector2(0, 10 - wh), stalk, 1.4)
+			for sx in [-3.0, 3.0]:
+				draw_line(Vector2(0, 10 - wh * 0.5), Vector2(sx, 10 - wh * 0.5 - 2.0), leaf, 1.2)
+				draw_circle(Vector2(sx, 10 - wh * 0.5 - 2.0), 1.8 * frac, leaf)
+			if ripe:
+				var boll := Color(0.96, 0.96, 0.94)
+				for bx in [-3.0, 0.0, 3.0]:
+					var by := 10 - wh * 0.6
+					for o in [Vector2(0, 0), Vector2(-1, -0.6), Vector2(1, -0.6), Vector2(0, -1.2)]:
+						draw_circle(Vector2(bx, by) + o, 1.0, boll)
+		_:
+			var h := lerpf(4.0, 13.0, frac)
+			for sx in [-6.0, 0.0, 6.0]:
+				var top := Vector2(sx, 10.0 - h)
+				draw_line(Vector2(sx, 10), top, stalk, 1.6)
+				if ripe_look:
+					draw_circle(top, lerpf(1.6, 2.6, frac), col)
+				else:
+					draw_circle(top, 1.4, leaf.lightened(0.10))
+
 func _draw_forge(c: Color, cd: Color) -> void:
 	draw_rect(Rect2(-13, -8, 26, 22), cd)
 	draw_rect(Rect2(-10, -8, 20, 16), c)
@@ -1955,82 +2418,116 @@ func _draw_bank(_c: Color) -> void:
 ## buildings visibly tower over the ~26 px player and ~32 px trees. Colors
 ## and detail proportions unchanged — just the pixel counts. Roof always
 ## sits ABOVE the wall, front door punches through the wall bottom.
+# ── Faux-3D building shell (art pass v1.5.3) ─────────────────────────────────
+# Norse longhouse rendered with VOLUME instead of a flat rect: a ground drop-
+# shadow (lower-right), a front wall face, a shaded right side for depth, and a
+# pitched gable roof split into a lit (upper-left) and shaded half. Everything is
+# lit from the upper-left to match the terrain's directional shading. Returns the
+# wall's front-face rect so callers can place doors/windows on it.
+func _draw_building_shell(w: float, wall_h: float, roof_h: float,
+		wall_c: Color, roof_c: Color) -> Rect2:
+	var hw := w * 0.5
+	var base := wall_h * 0.5          # ground line (bottom of the wall)
+	var wall_top := -wall_h * 0.5
+	var ridge_y := wall_top - roof_h  # roof peak
+	var eave := hw + 6.0              # roof overhangs the wall
+	# Ground drop-shadow, skewed to the lower-right.
+	draw_colored_polygon(PackedVector2Array([
+		Vector2(-hw + 8, base - 2), Vector2(hw + 6, base - 2),
+		Vector2(hw + 16, base + 9), Vector2(-hw + 16, base + 9)]),
+		Color(0, 0, 0, 0.22))
+	# Right side face (depth) — a receding parallelogram off the wall's right edge.
+	draw_colored_polygon(PackedVector2Array([
+		Vector2(hw, wall_top + 4), Vector2(hw + 9, wall_top - 2),
+		Vector2(hw + 9, base - 4), Vector2(hw, base)]), wall_c.darkened(0.38))
+	# Front wall face.
+	draw_rect(Rect2(-hw, wall_top, w, wall_h), wall_c)
+	draw_rect(Rect2(-hw, wall_top, 3, wall_h), wall_c.lightened(0.16))  # lit left edge
+	draw_rect(Rect2(-hw, base - 3, w, 3), wall_c.darkened(0.28))        # grounded base
+	# Vertical timber planks.
+	var plank := wall_c.darkened(0.14)
+	var px := -hw + 10.0
+	while px < hw - 4.0:
+		draw_line(Vector2(px, wall_top + 2), Vector2(px, base - 3), plank, 1.0)
+		px += 12.0
+	# Pitched gable roof — lit left half, shaded right half, overhanging eaves.
+	draw_colored_polygon(PackedVector2Array([
+		Vector2(-eave, wall_top), Vector2(0, ridge_y), Vector2(0, wall_top)]),
+		roof_c.lightened(0.14))
+	draw_colored_polygon(PackedVector2Array([
+		Vector2(0, wall_top), Vector2(0, ridge_y), Vector2(eave, wall_top)]),
+		roof_c.darkened(0.20))
+	draw_line(Vector2(0, ridge_y), Vector2(0, wall_top), roof_c.lightened(0.35), 1.5)  # ridge
+	draw_line(Vector2(-eave, wall_top), Vector2(eave, wall_top), roof_c.darkened(0.45), 2.0)  # eave shadow
+	return Rect2(-hw, wall_top, w, wall_h)
+
+## A door on the wall's front face, sitting on the base line.
+func _draw_wall_door(base_y: float, dw: float, dh: float) -> void:
+	var frame := Color(0.16, 0.10, 0.04)
+	var slab := Color(0.30, 0.19, 0.08)
+	draw_rect(Rect2(-dw * 0.5 - 2, base_y - dh - 2, dw + 4, dh + 2), frame)
+	draw_rect(Rect2(-dw * 0.5, base_y - dh, dw, dh), slab)
+	draw_line(Vector2(0, base_y - dh), Vector2(0, base_y), frame, 1.2)
+	draw_circle(Vector2(dw * 0.35, base_y - dh * 0.5), 1.6, Color(0.82, 0.66, 0.15))
+
+func _draw_lit_window(cx: float, cy: float, r: float) -> void:
+	draw_rect(Rect2(cx - r, cy - r, r * 2, r * 2), Color(0.14, 0.10, 0.06))
+	draw_rect(Rect2(cx - r + 1, cy - r + 1, r * 2 - 2, r * 2 - 2),
+		Color(0.95, 0.80, 0.42, 0.9))   # warm interior glow
+	draw_line(Vector2(cx, cy - r), Vector2(cx, cy + r), Color(0.14, 0.10, 0.06), 1.0)
+	draw_line(Vector2(cx - r, cy), Vector2(cx + r, cy), Color(0.14, 0.10, 0.06), 1.0)
+
 func _draw_building(c: Color, cd: Color) -> void:
+	# Roof tone — dark thatch, tinted slightly toward the wall colour.
+	var roof := Color(0.30, 0.20, 0.12).lerp(cd.darkened(0.2), 0.35)
 	match display_name:
 		"Great Hall":
-			# Monumental longhouse — 100 × 90.
-			draw_rect(Rect2(-50, -45, 100, 85), cd)
-			draw_rect(Rect2(-45, -40, 90, 75), c)
-			# Overhanging thatched roof strip.
-			draw_rect(Rect2(-50, -45, 100, 14), c.lightened(0.18))
-			draw_rect(Rect2(-50, -47, 100, 5), c.darkened(0.35))
-			# Roof ridge peak.
-			draw_rect(Rect2(-3, -50, 6, 8), c.lightened(0.35))
-			# Grand double door.
-			draw_rect(Rect2(-14, 4, 28, 36), Color(0.20, 0.12, 0.04))
-			draw_rect(Rect2(-10, 8, 20, 30), Color(0.30, 0.18, 0.06))
-			draw_line(Vector2(0, 8), Vector2(0, 38), Color(0.10, 0.05, 0.02), 1.5)
-			# Windows.
-			draw_rect(Rect2(-36, -20, 14, 14), Color(0.68, 0.72, 0.50, 0.75))
-			draw_rect(Rect2(22,  -20, 14, 14), Color(0.68, 0.72, 0.50, 0.75))
-			# Support beams.
-			draw_line(Vector2(-45, -12), Vector2(45, -12), c.darkened(0.30), 2.0)
+			var f := _draw_building_shell(104, 50, 40, c, roof)
+			_draw_wall_door(f.end.y, 30, 34)
+			_draw_lit_window(-34, f.position.y + 22, 8)
+			_draw_lit_window(34, f.position.y + 22, 8)
+			# Carved gable-post beast heads at the eaves.
+			draw_circle(Vector2(-58, f.position.y + 1), 3.5, roof.lightened(0.2))
+			draw_circle(Vector2(58, f.position.y + 1), 3.5, roof.darkened(0.1))
 		"Tavern":
-			# ~82 × 66 with a hanging sign.
-			draw_rect(Rect2(-41, -33, 82, 64), cd)
-			draw_rect(Rect2(-37, -29, 74, 56), c)
-			draw_rect(Rect2(-41, -33, 82, 12), c.lightened(0.20))
-			# Door.
-			draw_rect(Rect2(-11, -2, 22, 33), Color(0.22, 0.12, 0.04))
-			draw_rect(Rect2(-8, 2, 16, 27), Color(0.32, 0.20, 0.08))
-			# Hanging tavern sign above the door.
-			draw_rect(Rect2(-22, -52, 44, 18), Color(0.55, 0.38, 0.14))
-			draw_rect(Rect2(-18, -49, 36, 12), Color(0.75, 0.55, 0.22))
-			# Small round windows either side.
-			draw_circle(Vector2(-28, -14), 8, Color(0.72, 0.78, 0.52, 0.78))
-			draw_circle(Vector2(28,  -14), 8, Color(0.72, 0.78, 0.52, 0.78))
+			var f := _draw_building_shell(84, 44, 30, c, roof)
+			_draw_wall_door(f.end.y, 24, 30)
+			_draw_lit_window(-28, f.position.y + 20, 7)
+			_draw_lit_window(28, f.position.y + 20, 7)
+			# Hanging sign off a bracket on the left.
+			draw_line(Vector2(-42, f.position.y - 6), Vector2(-52, f.position.y - 6),
+				Color(0.30, 0.20, 0.10), 2.0)
+			draw_rect(Rect2(-58, f.position.y - 4, 14, 12), Color(0.60, 0.42, 0.16))
+			draw_rect(Rect2(-56, f.position.y - 2, 10, 8), Color(0.80, 0.60, 0.24))
 		"Warehouse":
-			# ~90 × 56 — long low storage. Cargo doors instead of windows.
-			draw_rect(Rect2(-45, -25, 90, 55), cd)
-			draw_rect(Rect2(-41, -21, 82, 47), c)
-			draw_rect(Rect2(-41, -21, 82, 10), c.lightened(0.12))
+			var f := _draw_building_shell(94, 46, 24, c, roof)   # low broad roof
 			# Central double cargo door.
-			draw_rect(Rect2(-22, 2, 44, 28), Color(0.30, 0.22, 0.10))
-			draw_line(Vector2(0, 2), Vector2(0, 30), Color(0.42, 0.32, 0.16), 2.5)
-			# Horizontal plank lines.
-			draw_line(Vector2(-41, -6), Vector2(41, -6), c.darkened(0.35), 1.5)
-			draw_line(Vector2(-41,  0), Vector2(41,  0), c.darkened(0.35), 1.5)
+			draw_rect(Rect2(-24, f.end.y - 30, 48, 30), Color(0.26, 0.18, 0.08))
+			draw_line(Vector2(0, f.end.y - 30), Vector2(0, f.end.y),
+				Color(0.42, 0.30, 0.14), 2.5)
+			draw_rect(Rect2(-24, f.end.y - 30, 48, 3), Color(0.42, 0.30, 0.14))
 		"Chapel":
-			# ~60 × 62 — tall narrow chapel with cross window + spire.
-			draw_rect(Rect2(-30, -30, 60, 60), cd)
-			draw_rect(Rect2(-26, -26, 52, 52), c)
-			# Peaked spire above the door.
-			draw_colored_polygon(PackedVector2Array([
-				Vector2(-8, -30), Vector2(8, -30), Vector2(0, -46)]),
-				c.lightened(0.10))
-			# Door.
-			draw_rect(Rect2(-11, 4, 22, 26), Color(0.25, 0.20, 0.14))
-			# Rounded arch at door top.
-			draw_circle(Vector2(0, 6), 11, Color(0.25, 0.20, 0.14))
-			# Cross window.
-			draw_rect(Rect2(-3, -22, 6, 20), Color(0.88, 0.85, 0.78))
-			draw_rect(Rect2(-10, -14, 20, 6), Color(0.88, 0.85, 0.78))
-			# Blue circular stained-glass round window.
-			draw_circle(Vector2(0, -6), 8, Color(0.62, 0.72, 0.88, 0.72))
+			var f := _draw_building_shell(58, 54, 40, c, roof)
+			# Cross finial on the ridge peak.
+			var peak := f.position.y - 40
+			draw_rect(Rect2(-1.5, peak - 10, 3, 12), Color(0.85, 0.82, 0.72))
+			draw_rect(Rect2(-5, peak - 6, 10, 3), Color(0.85, 0.82, 0.72))
+			_draw_wall_door(f.end.y, 20, 28)
+			draw_circle(Vector2(0, f.end.y - 28), 10, Color(0.30, 0.24, 0.16))  # arch
+			draw_rect(Rect2(-11, f.end.y - 26, 22, 24), Color(0.30, 0.24, 0.16))
+			draw_rect(Rect2(-8, f.end.y - 24, 16, 20), Color(0.30, 0.19, 0.08))
+			# Round stained-glass window high on the gable.
+			draw_circle(Vector2(0, f.position.y + 10), 7, Color(0.62, 0.72, 0.88, 0.85))
+			draw_circle(Vector2(0, f.position.y + 10), 3, Color(0.90, 0.70, 0.40, 0.9))
 		_:  # House
-			# ~66 × 60 default cottage.
-			draw_rect(Rect2(-33, -30, 66, 60), cd)
-			draw_rect(Rect2(-29, -26, 58, 52), c)
-			draw_rect(Rect2(-33, -30, 66, 10), c.lightened(0.18))
-			# Door.
-			draw_rect(Rect2(-11, 2, 22, 28), Color(0.28, 0.18, 0.08))
-			draw_rect(Rect2(-8, 6, 16, 22), Color(0.38, 0.24, 0.10))
-			# Doorknob.
-			draw_circle(Vector2(6.0, 16.0), 2.0, Color(0.82, 0.66, 0.15))
-			# Window on the side.
-			draw_rect(Rect2(-24, -10, 14, 14), Color(0.68, 0.74, 0.52, 0.78))
-			# Chimney.
-			draw_rect(Rect2(16, -36, 8, 12), c.darkened(0.30))
+			var f := _draw_building_shell(68, 42, 28, c, roof)
+			_draw_wall_door(f.end.y, 20, 26)
+			_draw_lit_window(-22, f.position.y + 18, 7)
+			# Chimney on the roof's shaded side, with a wisp of smoke.
+			draw_rect(Rect2(18, f.position.y - 20, 8, 18), c.darkened(0.35))
+			draw_rect(Rect2(17, f.position.y - 22, 10, 4), c.darkened(0.5))
+			draw_circle(Vector2(22, f.position.y - 26), 3, Color(0.7, 0.7, 0.72, 0.35))
+			draw_circle(Vector2(24, f.position.y - 31), 4, Color(0.7, 0.7, 0.72, 0.22))
 
 func _draw_crafting_bench(ratio: float, _c: Color, _cd: Color) -> void:
 	var wood := Color(0.52, 0.34, 0.14)
@@ -2072,6 +2569,17 @@ func _draw_archery_target(ratio: float, _c: Color, _cd: Color) -> void:
 	if ratio < 0.5:
 		draw_line(Vector2(6, -10), Vector2(3, -6), Color(0.45, 0.28, 0.10), 1.5)
 		draw_circle(Vector2(3, -6), 1.5, Color(0.92, 0.88, 0.18))
+
+func _draw_training_dummy(ratio: float, _c: Color, _cd: Color) -> void:
+	# Straw-wrapped cross-post sparring dummy.
+	draw_rect(Rect2(-2, -2, 4, 22), Color(0.42, 0.28, 0.12))       # post
+	draw_rect(Rect2(-12, 2, 24, 3), Color(0.42, 0.28, 0.12))       # cross-arm
+	draw_circle(Vector2(0, -8), 8, Color(0.80, 0.68, 0.30))        # straw body
+	draw_circle(Vector2(0, -13), 4, Color(0.82, 0.70, 0.32))       # head
+	draw_line(Vector2(-7, -10), Vector2(7, -6), Color(0.55, 0.40, 0.14), 1.0)
+	draw_line(Vector2(-7, -6), Vector2(7, -10), Color(0.55, 0.40, 0.14), 1.0)
+	if ratio < 0.6:
+		draw_line(Vector2(-6, -12), Vector2(4, -4), Color(0.30, 0.20, 0.10), 1.5)  # a battle scar
 
 func _draw_runestone(ratio: float, _c: Color, _cd: Color) -> void:
 	var stone := Color(0.45, 0.43, 0.40)
@@ -2265,6 +2773,30 @@ func _draw_exit_door(c: Color, cd: Color) -> void:
 		draw_string(font, Vector2(-lw * 0.5, -60), label,
 			HORIZONTAL_ALIGNMENT_CENTER, -1, fsize, gold)
 
+## Overworld cave mouth — a dark opening in a rocky outcrop with a faint glow
+## from within (v1.5.3 dungeon entrance).
+func _draw_dungeon_entrance() -> void:
+	var rock := Color(0.34, 0.31, 0.30)
+	var rock_d := rock.darkened(0.4)
+	# Rocky outcrop mound.
+	draw_colored_polygon(PackedVector2Array([
+		Vector2(-30, 22), Vector2(-24, -6), Vector2(-10, -22),
+		Vector2(12, -24), Vector2(26, -8), Vector2(30, 22)]), rock)
+	draw_polyline(PackedVector2Array([
+		Vector2(-30, 22), Vector2(-24, -6), Vector2(-10, -22),
+		Vector2(12, -24), Vector2(26, -8), Vector2(30, 22)]), rock_d, 2.0)
+	# The dark mouth.
+	draw_colored_polygon(PackedVector2Array([
+		Vector2(-16, 22), Vector2(-12, -4), Vector2(0, -14),
+		Vector2(12, -3), Vector2(15, 22)]), Color(0.05, 0.04, 0.06))
+	# Faint torch glow from inside, pulsing.
+	var pulse: float = 0.35 + 0.2 * abs(sin(_time_elapsed * 2.0))
+	draw_circle(Vector2(0, 8), 9.0, Color(0.95, 0.60, 0.25, pulse))
+	draw_circle(Vector2(0, 8), 4.0, Color(1.00, 0.80, 0.45, pulse))
+	# Small cracks on the rock.
+	draw_line(Vector2(-20, -2), Vector2(-16, 10), rock_d, 1.0)
+	draw_line(Vector2(20, -4), Vector2(23, 8), rock_d, 1.0)
+
 ## ── Warband structures (placeholder visuals for v1) ────────────────────────
 ## These three draws are intentionally chunky and readable from camera
 ## distance — the player needs to spot a friendly stronghold from across
@@ -2386,32 +2918,101 @@ func _draw_outpost() -> void:
 ## per-tier tint (wood log color for wall, metal bar tint for fortified_wall);
 ## `fortified` toggles the reinforcement bands. StaticBody2D physical block
 ## is added separately in `_setup_collision`.
-func _draw_wall_segment(c: Color, cd: Color, fortified: bool) -> void:
-	var w: float = 48.0
-	var h: float = 24.0 if fortified else 20.0
-	var half_w: float = w * 0.5
-	var half_h: float = h * 0.5
-	# Base panel + darker outline.
-	draw_rect(Rect2(-half_w, -half_h, w, h), cd)
-	draw_rect(Rect2(-half_w + 2, -half_h + 2, w - 4, h - 4), c)
-	# Vertical plank / stone divisions every 8 px.
-	var dark := c.darkened(0.35)
-	var i: int = 1
-	while float(i) * 8.0 < w - 4.0:
-		var x: float = -half_w + 2 + float(i) * 8.0
-		draw_line(Vector2(x, -half_h + 2), Vector2(x, half_h - 2), dark, 1.0)
-		i += 1
-	# Trim strip on top + shadow strip on bottom.
-	draw_rect(Rect2(-half_w, -half_h, w, 3), c.lightened(0.20))
-	draw_rect(Rect2(-half_w, half_h - 3, w, 3), c.darkened(0.35))
-	# Fortified: iron reinforcement bands + rivet dots.
+func _draw_wall_segment(c: Color, _cd: Color, fortified: bool) -> void:
+	# Faux-3D wall (art pass v1.5.3) — a front stone face with real HEIGHT, a lit
+	# top cap that recedes up-back, a shaded right side, and crenellations for
+	# fortified walls. Lit from the upper-left. Slightly wider than the tile so a
+	# run of them reads as one continuous rampart.
+	var w := 34.0
+	var hw := w * 0.5
+	var base := 15.0
+	var top := (-19.0 if fortified else -15.0)   # taller when fortified
+	var cap := top - 6.0
+	var stone := c
+	var stone_d := c.darkened(0.32)
+	# Ground shadow (lower-right).
+	draw_colored_polygon(PackedVector2Array([
+		Vector2(-hw + 4, base), Vector2(hw + 4, base),
+		Vector2(hw + 9, base + 6), Vector2(-hw + 9, base + 6)]), Color(0, 0, 0, 0.20))
+	# Right side depth face.
+	draw_colored_polygon(PackedVector2Array([
+		Vector2(hw, top), Vector2(hw + 6, cap), Vector2(hw + 6, base - 3),
+		Vector2(hw, base)]), stone_d.darkened(0.15))
+	# Front face + lit left edge + grounded base.
+	draw_rect(Rect2(-hw, top, w, base - top), stone)
+	draw_rect(Rect2(-hw, top, 2.5, base - top), stone.lightened(0.12))
+	draw_rect(Rect2(-hw, base - 2, w, 2), stone_d)
+	# Stone courses (horizontal) + staggered joints (vertical).
+	var joint := stone_d
+	var cy := top + 8.0
+	var row := 0
+	while cy < base - 2.0:
+		draw_line(Vector2(-hw, cy), Vector2(hw, cy), joint, 1.0)
+		var off := 0.0 if (row % 2 == 0) else 8.0
+		var jx := -hw + 8.0 + off
+		while jx < hw - 2.0:
+			draw_line(Vector2(jx, cy), Vector2(jx, cy + 8.0), joint, 1.0)
+			jx += 16.0
+		cy += 8.0
+		row += 1
+	# Lit top cap (the wall walkway, receding up-back).
+	draw_colored_polygon(PackedVector2Array([
+		Vector2(-hw, top), Vector2(-hw + 4, cap),
+		Vector2(hw + 4, cap), Vector2(hw, top)]), stone.lightened(0.18))
 	if fortified:
-		var iron := Color(0.55, 0.55, 0.60)
-		draw_rect(Rect2(-half_w + 2, -3, w - 4, 2), iron)
-		for j in range(4):
-			var rx: float = -half_w + 6.0 + float(j) * 12.0
-			draw_circle(Vector2(rx, -2), 1.2, iron.lightened(0.20))
-			draw_circle(Vector2(rx,  4), 1.2, iron.darkened(0.20))
+		# Crenellations — merlons along the cap.
+		var mx := -hw
+		while mx < hw - 2.0:
+			draw_rect(Rect2(mx, cap - 5, 6, 6), stone.lightened(0.1))
+			draw_rect(Rect2(mx, cap - 5, 6, 1.5), stone.lightened(0.25))
+			mx += 12.0
+
+
+## Faux-3D tower (art pass v1.5.3) — a tall stone shaft with a shaded side face,
+## an overhanging crenellated top platform, a conical roof and a pennant. Drawn
+## in the unit scale the silhouette dispatcher scales up (×4.5 for Large). Lit
+## from the upper-left.
+func _draw_faux_tower(hw: float, stone: Color, big: bool) -> void:
+	var base := 14.0
+	var top := -18.0
+	var stone_d := stone.darkened(0.34)
+	# Ground shadow.
+	draw_colored_polygon(PackedVector2Array([
+		Vector2(-hw + 2, base), Vector2(hw + 2, base),
+		Vector2(hw + 6, base + 5), Vector2(-hw + 6, base + 5)]), Color(0, 0, 0, 0.20))
+	# Right side depth face.
+	draw_colored_polygon(PackedVector2Array([
+		Vector2(hw, top), Vector2(hw + 4, top - 3), Vector2(hw + 4, base - 2),
+		Vector2(hw, base)]), stone_d.darkened(0.12))
+	# Front shaft.
+	draw_rect(Rect2(-hw, top, hw * 2.0, base - top), stone)
+	draw_rect(Rect2(-hw, top, 2.0, base - top), stone.lightened(0.14))
+	# Stone courses.
+	var cy := top + 6.0
+	while cy < base - 2.0:
+		draw_line(Vector2(-hw, cy), Vector2(hw, cy), stone_d, 0.8)
+		cy += 6.0
+	# A slit window.
+	draw_rect(Rect2(-1.5, top + 6, 3, 6), Color(0.08, 0.07, 0.09))
+	# Overhanging top platform (machicolation), lit on top.
+	var pw := hw + 4.0
+	draw_rect(Rect2(-pw, top - 5, pw * 2.0, 6), stone_d)
+	draw_rect(Rect2(-pw, top - 5, pw * 2.0, 1.5), stone.lightened(0.18))
+	# Crenellations.
+	var mx := -pw
+	while mx < pw - 1.0:
+		draw_rect(Rect2(mx, top - 9, 4, 5), stone.lightened(0.08))
+		mx += 8.0
+	# Conical roof + pennant (only the taller guard tower gets the tall spire).
+	var roof_c := Color(0.42, 0.20, 0.14) if big else Color(0.34, 0.28, 0.20)
+	draw_colored_polygon(PackedVector2Array([
+		Vector2(-hw * 0.7, top - 9), Vector2(hw * 0.7, top - 9),
+		Vector2(0, top - 24)]), roof_c)
+	draw_line(Vector2(0, top - 9), Vector2(0, top - 24), roof_c.lightened(0.2), 1.0)
+	draw_line(Vector2(0, top - 24), Vector2(0, top - 30), Color(0.2, 0.2, 0.2), 1.0)
+	draw_colored_polygon(PackedVector2Array([
+		Vector2(0, top - 29), Vector2(8, top - 27), Vector2(0, top - 24)]),
+		Color(0.75, 0.18, 0.14))
 
 
 # ── Structure silhouettes (admin-placed Construction buildables) ─────────────
@@ -2447,21 +3048,10 @@ func _draw_structure_silhouette(kind: String, c: Color, cd: Color) -> void:
 			draw_rect(Rect2(-14, 10, 28, 4), c)
 			draw_line(Vector2(-14, -12), Vector2(14, 12), c.darkened(0.20), 1.5)
 		"watchtower":
-			# Square base + tapered top + banner spike.
-			draw_rect(Rect2(-14, -6, 28, 20), cd)
-			draw_rect(Rect2(-10, -18, 20, 12), c)
-			draw_colored_polygon(PackedVector2Array([
-				Vector2(-8, -18), Vector2(8, -18), Vector2(0, -26)]),
-				c.darkened(0.15))
-			draw_line(Vector2(0, -26), Vector2(0, -30), Color(0.20, 0.20, 0.20), 1.5)
+			_draw_faux_tower(11.0, c, false)
 		"guard_tower":
-			# Bigger, fortified version — stone base + wood upper.
-			draw_rect(Rect2(-16, -4, 32, 22), Color(0.55, 0.55, 0.50))
-			draw_rect(Rect2(-12, -20, 24, 16), c)
-			# Battlements
-			for i in range(4):
-				var bx: float = -12.0 + float(i) * 8.0
-				draw_rect(Rect2(bx, -24, 4, 5), c.darkened(0.10))
+			# Bigger, stone, more battlements — the same faux-3D shell, wider.
+			_draw_faux_tower(15.0, Color(0.56, 0.56, 0.52), true)
 		"house_frame":
 			# Bare wooden A-frame skeleton.
 			draw_rect(Rect2(-16, 6, 32, 8), cd)

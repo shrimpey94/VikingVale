@@ -5,6 +5,9 @@ extends VBoxContainer
 ## that confirms then calls NetworkManager.logout directly.
 
 const UITheme = preload("res://scripts/ui/UITheme.gd")
+# LoginScreen holds the auto-login credential store (static helpers) — reused here
+# so the toggle reads/writes the same `user://login.cfg`.
+const LoginScreenCls = preload("res://scripts/LoginScreen.gd")
 # VikingTheme uses `class_name VikingTheme` — globally available, no
 # preload const needed (would shadow the class_name symbol).
 
@@ -65,9 +68,51 @@ func _build() -> void:
 	_add_volume_slider("Ambience", "Ambience")
 
 	add_child(VikingTheme.divider())
+	_build_graphics_section()
+
+	add_child(VikingTheme.divider())
 	_build_account_section()
 
 	add_child(VikingTheme.divider())
+	add_child(VikingTheme.section_header("Help", 11))
+	var tut_btn := Button.new()
+	tut_btn.text = "Replay Tutorial"
+	tut_btn.custom_minimum_size = Vector2(0, 30)
+	VikingTheme.apply_button(tut_btn, false)
+	tut_btn.pressed.connect(func() -> void: Events.replay_tutorial.emit())
+	add_child(tut_btn)
+
+	var guides_btn := Button.new()
+	guides_btn.text = "📖 Guides"
+	guides_btn.custom_minimum_size = Vector2(0, 30)
+	VikingTheme.apply_button(guides_btn, false)
+	guides_btn.pressed.connect(func() -> void: Events.show_guides.emit())
+	add_child(guides_btn)
+
+	var intro_btn := Button.new()
+	intro_btn.text = "📖 Replay Opening"
+	intro_btn.custom_minimum_size = Vector2(0, 30)
+	VikingTheme.apply_button(intro_btn, false)
+	intro_btn.pressed.connect(func() -> void: Events.replay_prologue.emit())
+	add_child(intro_btn)
+
+	add_child(VikingTheme.divider())
+	# Auto-login toggle — when on, the game signs itself in on launch with the last
+	# saved account. Turning it off wipes the stored credentials.
+	var auto_btn := CheckButton.new()
+	auto_btn.text = "Auto-login on launch"
+	auto_btn.button_pressed = bool(LoginScreenCls.load_login().get("auto", false))
+	auto_btn.add_theme_color_override("font_color", VikingTheme.TEXT)
+	auto_btn.add_theme_font_size_override("font_size", 11)
+	auto_btn.toggled.connect(_on_auto_login_toggled)
+	add_child(auto_btn)
+	var auto_hint := Label.new()
+	auto_hint.text = "Log in once; later launches connect automatically."
+	auto_hint.add_theme_color_override("font_color", VikingTheme.DIM)
+	auto_hint.add_theme_font_size_override("font_size", 9)
+	auto_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	add_child(auto_hint)
+
 	var logout_btn := Button.new()
 	logout_btn.text = "Log Out"
 	logout_btn.custom_minimum_size = Vector2(0, 32)
@@ -75,6 +120,9 @@ func _build() -> void:
 	logout_btn.add_theme_color_override("font_color", VikingTheme.RED)
 	logout_btn.pressed.connect(_on_logout_pressed)
 	add_child(logout_btn)
+
+func _on_auto_login_toggled(on: bool) -> void:
+	LoginScreenCls.set_auto_login(on)
 
 func _add_volume_slider(label_text: String, bus_name: String) -> void:
 	var row := HBoxContainer.new()
@@ -97,10 +145,113 @@ func _add_volume_slider(label_text: String, bus_name: String) -> void:
 	row.add_child(slider)
 	add_child(row)
 
+## Graphics section — Terrain quality toggle (Crisp vs Smooth). Reads the
+## live Ground node's current mode so the button reflects the persisted
+## setting on open; on toggle, drives Ground.set_terrain_smooth() which
+## saves the pref + re-bakes + swaps the shader live (no restart).
+func _build_graphics_section() -> void:
+	add_child(VikingTheme.section_header("Graphics", 11))
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 6)
+	var lbl := Label.new()
+	lbl.text = "Terrain"
+	lbl.custom_minimum_size = Vector2(70, 0)
+	lbl.add_theme_color_override("font_color", UITheme.TEXT)
+	lbl.add_theme_font_size_override("font_size", 10)
+	row.add_child(lbl)
+	var toggle := CheckButton.new()
+	toggle.text = "Smooth (Civ-style)"
+	toggle.add_theme_font_size_override("font_size", 10)
+	# Reflect the current live mode. Ground exposes `_terrain_smooth`; fall
+	# back to reading graphics.cfg directly if the world isn't loaded yet.
+	toggle.button_pressed = _current_terrain_smooth()
+	toggle.toggled.connect(func(on: bool) -> void:
+		var ground := get_tree().get_first_node_in_group("ground")
+		if ground != null and ground.has_method("set_terrain_smooth"):
+			ground.call("set_terrain_smooth", on))
+	row.add_child(toggle)
+	add_child(row)
+	var hint := Label.new()
+	hint.text = "Smooth melts biome borders + softens detail. Off = crisp tiles."
+	hint.add_theme_color_override("font_color", UITheme.DIM)
+	hint.add_theme_font_size_override("font_size", 9)
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	add_child(hint)
+
+	# ── 2D / 3D renderer toggle (v1.6 P7) ──
+	var row3d := HBoxContainer.new()
+	row3d.add_theme_constant_override("separation", 6)
+	var lbl3d := Label.new()
+	lbl3d.text = "World"
+	lbl3d.custom_minimum_size = Vector2(70, 0)
+	lbl3d.add_theme_color_override("font_color", UITheme.TEXT)
+	lbl3d.add_theme_font_size_override("font_size", 10)
+	row3d.add_child(lbl3d)
+	var t3d := CheckButton.new()
+	t3d.text = "3D (beta)"
+	t3d.add_theme_font_size_override("font_size", 10)
+	t3d.button_pressed = _renderer_3d_pref()
+	t3d.toggled.connect(func(on: bool) -> void:
+		_save_renderer_3d_pref(on)
+		# Carry the player's CURRENT position across the switch (else they'd respawn
+		# at Bjorn's = a free fast-travel). If inside an interior/dungeon, use the
+		# overworld return anchor so we never land in the far-Y interior band.
+		if GameManager.in_interior:
+			GameManager.switch_pos = GameManager.overworld_anchor
+		else:
+			var p := get_tree().get_first_node_in_group("player")
+			if p != null and p is Node2D:
+				GameManager.switch_pos = (p as Node2D).global_position
+		# Switch live — both clients reuse the autoloads + LoginScreen, so if you're
+		# already logged in the other client spawns you straight back in.
+		get_tree().change_scene_to_file("res://world3d.tscn" if on else "res://world.tscn"))
+	row3d.add_child(t3d)
+	add_child(row3d)
+	var hint3d := Label.new()
+	hint3d.text = "Play in the low-poly 3D world (in development) or the classic 2D world. Switches immediately."
+	hint3d.add_theme_color_override("font_color", UITheme.DIM)
+	hint3d.add_theme_font_size_override("font_size", 9)
+	hint3d.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	add_child(hint3d)
+
+## Persisted renderer choice (user://graphics.cfg, section [graphics]). Read by
+## Boot.gd at launch AND to init the toggle here.
+func _renderer_3d_pref() -> bool:
+	var cfg := ConfigFile.new()
+	if cfg.load("user://graphics.cfg") != OK:
+		return false
+	return bool(cfg.get_value("graphics", "renderer_3d", false))
+
+func _save_renderer_3d_pref(on: bool) -> void:
+	var cfg := ConfigFile.new()
+	cfg.load("user://graphics.cfg")   # keep other graphics keys (e.g. terrain_smooth)
+	cfg.set_value("graphics", "renderer_3d", on)
+	cfg.save("user://graphics.cfg")
+
+## Current terrain-smooth state — prefer the live Ground node, fall back to
+## the persisted config file if the world scene isn't up yet.
+func _current_terrain_smooth() -> bool:
+	var ground := get_tree().get_first_node_in_group("ground")
+	if ground != null:
+		var v: Variant = ground.get("_terrain_smooth")
+		if v != null:
+			return bool(v)
+	var cfg := ConfigFile.new()
+	if cfg.load("user://graphics.cfg") != OK:
+		return false
+	return bool(cfg.get_value("graphics", "terrain_smooth", false))
+
 func _on_logout_pressed() -> void:
 	var dlg := ConfirmationDialog.new()
 	dlg.title = "Log Out"
-	dlg.dialog_text = "Are you sure you want to log out?"
+	# Warn if any thrall is idle or a combat thrall has no food (Phase 10b) —
+	# leaving now wastes the offline window or risks a starving thrall's death.
+	var warn: Array = ThrallManager.attention_notes()
+	if warn.is_empty():
+		dlg.dialog_text = "Are you sure you want to log out?"
+	else:
+		dlg.dialog_text = ("⚠ Your thralls need attention:\n• "
+			+ "\n• ".join(warn) + "\n\nLog out anyway?")
 	dlg.ok_button_text = "Log Out"
 	dlg.confirmed.connect(func() -> void:
 		NetworkManager.logout()

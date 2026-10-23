@@ -65,6 +65,7 @@ static func entries() -> Array:
 		_res("tree", "Oak Tree",     "woodcutting",  1, "Chop", Color(0.18, 0.55, 0.15)),
 		_res("tree", "Pine Tree",    "woodcutting",  5, "Chop", Color(0.10, 0.42, 0.20)),
 		_res("tree", "Cherry Tree",  "woodcutting", 20, "Chop", Color(0.98, 0.72, 0.80)),
+		_res("tree", "Ironwood Tree","woodcutting", 30, "Chop", Color(0.30, 0.18, 0.08)),
 		_res("tree", "Frost Tree",   "woodcutting", 50, "Chop", Color(0.72, 0.90, 0.98)),
 		_res("tree", "Ancient Tree", "woodcutting", 70, "Chop", Color(0.35, 0.20, 0.08)),
 		# ── Rocks ───────────────────────────────────────────────────────────────
@@ -96,8 +97,10 @@ static func entries() -> Array:
 		_res("building",     "Town Building",  "",             1, "Enter",   Color(0.55, 0.45, 0.32)),
 		_res("crafting",     "Crafting Bench", "crafting",     1, "Craft",   Color(0.70, 0.50, 0.20)),
 		_res("archery",      "Archery Range",  "ranged",       1, "Train",   Color(0.50, 0.35, 0.20)),
+		_res("training_dummy","Training Dummy", "melee",        1, "Spar",    Color(0.55, 0.42, 0.24)),
 		_res("runestone",    "Runestone",      "magic",        1, "Inscribe",Color(0.50, 0.20, 0.75)),
 		_res("construction", "Workbench",      "construction", 1, "Build",   Color(0.55, 0.40, 0.20)),
+		_res("farm_plot",    "Farm Plot",      "farming",      1, "Use",     Color(0.55, 0.42, 0.20)),
 		# ── Walls (Construction skill wall recipes; admin can spawn freely) ─
 		# Tiered by wood color — mirrors HUD.gd _CONSTR_WOOD entries. Player
 		# path via Construction recipe deducts materials + XP; admin path
@@ -117,6 +120,7 @@ static func entries() -> Array:
 		# ── Monsters ────────────────────────────────────────────────────────────
 		_mon("chicken",   "Chicken",        1),
 		_mon("rat",       "Giant Rat",      2),
+		_mon("plague_rat","Plague Rat",    10),
 		_mon("goblin",    "Goblin",         5),
 		_mon("wolf",      "Wolf",          10),
 		_mon("bandit",    "Bandit",        15),
@@ -136,14 +140,20 @@ static func entries() -> Array:
 		_mon("elder_bear",       "Elder Bear",        29),
 		_mon("forest_spirit",    "Forest Spirit",     30),
 		_mon("ancient_troll",    "Ancient Troll",     44),
+		_mon("swamp_troll",      "Swamp Troll",       30),
+		_mon("ice_troll",        "Ice Troll",         40),
+		_mon("cave_troll",       "Cave Troll",        45),
 		_mon("fire_imp",         "Fire Imp",          55),
 		_mon("lava_crawler",     "Lava Crawler",      60),
 		_mon("frost_wyrm",       "Frost Wyrm",        62),
-		_mon("fire_giant",       "Fire Giant",        65),
+		_mon("fire_giant",       "Fire Giant",        45),
 		_mon("shadow_draugr",    "Shadow Draugr",     68),
 		_mon("death_knight",     "Death Knight",      75),
 		_mon("magma_elemental",  "Magma Elemental",   76),
 		_mon("spectral_warrior", "Spectral Warrior",  80),
+		# Slim dragon family (V1.5.4) — lean cousins of Níðhöggr.
+		_mon("drake",            "Bronze Drake",      48),
+		_mon("wyvern",           "Venom Wyvern",      58),
 		# Water — water-only pathing, semi-transparent, targets boats.
 		_mon("shark",            "Shark",             30),
 		# ── NPCs ────────────────────────────────────────────────────────────────
@@ -153,9 +163,24 @@ static func entries() -> Array:
 		_npc("quest",      "Quest Giver"),
 		_npc("tutor",      "Tutor"),
 		_npc("trainer",    "Trainer"),
+		# ── Named quest-givers ────────────────────────────────────────────────
+		# Placeable with the EXACT giver_npc name so they link to their quests
+		# (NPC.gd offers quests by name for any npc_type). Re-placing one restores
+		# its quests; edit its greeting via Inspect/Edit → Dialogue. Ulfr/Sigrid/
+		# Brynhildr double as shops below (their labels now match the quest names).
+		_npc("quest", "Elder Bjarne"),
+		_npc("quest", "Castellan Halvdan"),
+		_npc("quest", "Hunter Ragnhild"),
+		_npc("quest", "Torsten the Wanderer"),
+		_npc("quest", "Scout Halfdan"),
+		_npc("quest", "Old Brynjar"),
+		_npc("quest", "Merchant Eydis"),
+		_npc("quest", "Ironwood Hermit Skade"),
+		_npc("quest", "Sea Captain Valdis"),
+		_npc("quest", "Captain Sten"),
 		# ── Shopkeepers (Phase 4) — each binds a ShopCatalog template ─────────
 		_shopkeeper("general_store", "Bjorn the Trader"),
-		_shopkeeper("weapons_smith", "Ulfr the Smith"),
+		_shopkeeper("weapons_smith", "Blacksmith Ulfr"),
 		_shopkeeper("fishmonger",    "Sigrid the Fishmonger"),
 		_shopkeeper("apothecary",    "Brynhildr the Apothecary"),
 		_shopkeeper("magic_vendor",  "Eirik the Rune-Master"),

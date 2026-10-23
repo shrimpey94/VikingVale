@@ -34,7 +34,6 @@ var interior_id: String = ""
 # Bookkeeping.
 var _walls: StaticBody2D = null
 var _door_area: Area2D = null
-var _decorations: Array = []
 
 
 ## Set by World.gd from the biome at the exterior return coord. Colors the

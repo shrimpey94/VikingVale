@@ -15,13 +15,100 @@ const RS_GOLD   := Color(1.00, 0.85, 0.25)
 const RS_RED    := Color(0.90, 0.30, 0.20)
 const RS_GREEN  := Color(0.35, 0.88, 0.40)
 
-const VERSION        := "v0.1.0"
+# Shown only if version.txt can't be read — keep it at the current release so a
+# missing file degrades gracefully instead of showing something ancient.
+const VERSION_FALLBACK := "v1.4.2"
 const DEFAULT_SERVER := "147.185.221.211:21498"
+# Preloaded (not via class_name) so a stale editor parse can't fail to resolve
+# the changelog data — same defensive pattern used elsewhere in the codebase.
+const _ChangelogData := preload("res://scripts/Changelog.gd")
+
+## The displayed version, sourced from version.txt (the single source of truth
+## release.bat bumps + updater.py maintains) so the login screen never drifts.
+## Editor reads res://version.txt; a shipped build reads the exe-adjacent copy
+## (where updater.py keeps it, matching its app_dir()/version.txt). version.txt
+## has an inconsistent trailing newline, so always strip.
+func _read_version() -> String:
+	var path := "res://version.txt"
+	if not OS.has_feature("editor"):
+		path = OS.get_executable_path().get_base_dir().path_join("version.txt")
+	var f := FileAccess.open(path, FileAccess.READ)
+	if f == null:
+		return VERSION_FALLBACK
+	var raw := f.get_as_text().strip_edges()
+	f.close()
+	if raw == "":
+		return VERSION_FALLBACK
+	return raw if raw.begins_with("v") else "v" + raw
 # Last-used server address persists across launches so mobile players (and
 # anyone running their own server) don't have to re-type the address every
 # time. ConfigFile at `user://server_address.cfg` — Godot maps user:// to
 # the per-OS app data dir, works identically on Windows and Android.
 const SERVER_ADDRESS_CFG := "user://server_address.cfg"
+
+# ── Auto-login ──────────────────────────────────────────────────────────────
+# After the first successful sign-in the credentials are remembered so the game
+# logs itself in on every later launch — the player types them ONCE. Stored in
+# `user://login.cfg`; the password is XOR+base64 OBFUSCATED (local deterrent only,
+# NOT real encryption — it's a single-user desktop client). Switched off in
+# Settings (which clears the saved credentials). A manual Log Out keeps the creds
+# but suppresses auto-login for the current session so the player can switch users.
+const LOGIN_CFG := "user://login.cfg"
+const _OBF_KEY := "vv_local_login_v1"
+
+static func load_login() -> Dictionary:
+	var cfg := ConfigFile.new()
+	if cfg.load(LOGIN_CFG) != OK:
+		return {"auto": false, "username": "", "password": ""}
+	return {
+		"auto": bool(cfg.get_value("login", "auto", false)),
+		"username": str(cfg.get_value("login", "username", "")),
+		"password": _deobfuscate(str(cfg.get_value("login", "password", ""))),
+	}
+
+static func save_login(username: String, password: String, auto: bool) -> void:
+	var cfg := ConfigFile.new()
+	cfg.set_value("login", "auto", auto)
+	cfg.set_value("login", "username", username)
+	cfg.set_value("login", "password", _obfuscate(password))
+	var _e := cfg.save(LOGIN_CFG)
+
+## Toggle auto-login without needing the password (called from Settings). ON just
+## flips the flag — the password is already saved from the last sign-in; OFF wipes
+## the saved credentials entirely.
+static func set_auto_login(enabled: bool) -> void:
+	var d := load_login()
+	if enabled:
+		save_login(str(d["username"]), str(d["password"]), true)
+	else:
+		clear_login()
+
+static func clear_login() -> void:
+	var cfg := ConfigFile.new()
+	cfg.set_value("login", "auto", false)
+	cfg.set_value("login", "username", "")
+	cfg.set_value("login", "password", "")
+	var _e := cfg.save(LOGIN_CFG)
+
+static func _obfuscate(s: String) -> String:
+	if s == "":
+		return ""
+	var raw := s.to_utf8_buffer()
+	var key := _OBF_KEY.to_utf8_buffer()
+	for i in range(raw.size()):
+		raw[i] = raw[i] ^ key[i % key.size()]
+	return Marshalls.raw_to_base64(raw)
+
+static func _deobfuscate(s: String) -> String:
+	if s == "":
+		return ""
+	var raw := Marshalls.base64_to_raw(s)
+	if raw.is_empty():
+		return ""
+	var key := _OBF_KEY.to_utf8_buffer()
+	for i in range(raw.size()):
+		raw[i] = raw[i] ^ key[i % key.size()]
+	return raw.get_string_from_utf8()
 
 var _status_lbl: Label    = null
 var _user_field: LineEdit = null
@@ -34,6 +121,11 @@ var _server_row: Control  = null
 var _nm: Node = null
 var _connected: bool = false
 var _pending_char_creation: bool = false
+## Auto-login: armed in _ready when saved credentials should be used; fires once
+## the socket connects. `_was_auto_attempt` marks that the CURRENT in-flight login
+## came from auto-login, so a rejection can wipe the stale saved credentials.
+var _auto_login_pending: bool = false
+var _was_auto_attempt: bool = false
 
 func _ready() -> void:
 	layer = 100
@@ -48,7 +140,21 @@ func _ready() -> void:
 		_nm.register_fail.connect(_on_auth_fail)
 		_nm.kicked.connect(_on_kicked)
 	_set_connected(false)
+	# Auto-login: prefill the last username always (one-click re-login), and if
+	# auto-login is on with saved credentials — and a manual logout hasn't
+	# suppressed it this session — arm it to fire the moment we connect.
+	var saved := load_login()
+	if str(saved["username"]) != "" and _user_field != null:
+		_user_field.text = str(saved["username"])
+	if bool(saved["auto"]) and str(saved["username"]) != "" \
+			and str(saved["password"]) != "" and not _auto_login_suppressed():
+		if _pass_field != null:
+			_pass_field.text = str(saved["password"])
+		_auto_login_pending = true
 	_attempt_connect()
+
+func _auto_login_suppressed() -> bool:
+	return _nm != null and bool(_nm.get("suppress_auto_login"))
 
 # ── UI construction ─────────────────────────────────────────────────────────
 func _build_ui() -> void:
@@ -87,9 +193,6 @@ func _build_ui() -> void:
 	panel.anchor_top  = 0.5; panel.anchor_bottom = 0.5
 	panel.offset_left = -206; panel.offset_right = 206
 	panel.offset_top  = -276; panel.offset_bottom = 276
-
-	# Corner rune accents (Norse flavour)
-	_add_corner_runes(panel)
 
 	var margin := MarginContainer.new()
 	margin.add_theme_constant_override("margin_left", 26)
@@ -147,6 +250,16 @@ func _build_ui() -> void:
 	forgot_link.pressed.connect(_on_forgot_pressed)
 	forgot_row.add_child(forgot_link)
 
+	# ── Discord invite (always open) ──────────────────────────────────────────
+	var discord_row := HBoxContainer.new()
+	discord_row.alignment = BoxContainer.ALIGNMENT_CENTER
+	vbox.add_child(discord_row)
+	var discord := _link_btn("💬  Join our Discord")
+	discord.add_theme_color_override("font_color", Color(0.45, 0.55, 0.95))
+	discord.add_theme_color_override("font_hover_color", Color(0.65, 0.75, 1.0))
+	discord.pressed.connect(func() -> void: OS.shell_open("https://discord.gg/uajgxvU3c"))
+	discord_row.add_child(discord)
+
 	# ── Status message (errors / progress) ────────────────────────────────────
 	_status_lbl = Label.new()
 	_status_lbl.text = ""
@@ -199,22 +312,127 @@ func _build_ui() -> void:
 	recon.pressed.connect(_reconnect)
 	_server_row.add_child(recon)
 
-	# ── Offline (kept available, subtle) ──────────────────────────────────────
-	var offline := _link_btn("Play offline (no server)")
-	offline.pressed.connect(_on_offline_pressed)
-	vbox.add_child(offline)
-
-	# ── Version (bottom-right corner of the screen) ───────────────────────────
-	var ver := Label.new()
-	ver.text = VERSION
-	ver.add_theme_color_override("font_color", RS_DIM.darkened(0.2))
-	ver.add_theme_font_size_override("font_size", 10)
-	ver.anchor_left = 1.0; ver.anchor_right = 1.0
+	# ── Version — prominent, invites a click to see the changelog ─────────────
+	var ver := Button.new()
+	ver.text = "v%s  —  Click me to see updates!" % _read_version()
+	ver.flat = true
+	ver.focus_mode = Control.FOCUS_NONE
+	ver.add_theme_color_override("font_color", RS_GOLD)
+	ver.add_theme_color_override("font_hover_color", Color(1.0, 0.95, 0.7))
+	ver.add_theme_color_override("font_pressed_color", RS_GOLD)
+	ver.add_theme_font_size_override("font_size", 17)
+	ver.tooltip_text = "What's new"
+	ver.anchor_left = 0.5; ver.anchor_right = 0.5
 	ver.anchor_top  = 1.0; ver.anchor_bottom = 1.0
-	ver.offset_left = -90; ver.offset_right = -10
-	ver.offset_top  = -24; ver.offset_bottom = -6
-	ver.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	ver.offset_left = -190; ver.offset_right = 190
+	ver.offset_top  = -40; ver.offset_bottom = -8
+	ver.alignment = HORIZONTAL_ALIGNMENT_CENTER
+	ver.pressed.connect(_show_changelog)
 	add_child(ver)
+
+## Changelog overlay — current version on top, scrollable history below. Data
+## lives in Changelog.gd; the header version comes from _read_version so it
+## always matches the real release.
+func _show_changelog() -> void:
+	if get_node_or_null("ChangelogOverlay") != null:
+		return
+	var overlay := Control.new()
+	overlay.name = "ChangelogOverlay"
+	overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	add_child(overlay)
+
+	var dim := ColorRect.new()
+	dim.color = Color(0, 0, 0, 0.6)
+	dim.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	dim.mouse_filter = Control.MOUSE_FILTER_STOP
+	dim.gui_input.connect(func(e: InputEvent) -> void:
+		if e is InputEventMouseButton and (e as InputEventMouseButton).pressed:
+			overlay.queue_free())
+	overlay.add_child(dim)
+
+	var panel := PanelContainer.new()
+	panel.add_theme_stylebox_override("panel", _panel_sb())
+	panel.anchor_left = 0.5; panel.anchor_right = 0.5
+	panel.anchor_top = 0.5;  panel.anchor_bottom = 0.5
+	panel.offset_left = -240; panel.offset_right = 240
+	panel.offset_top = -220;  panel.offset_bottom = 220
+	overlay.add_child(panel)
+
+	var root := VBoxContainer.new()
+	root.add_theme_constant_override("separation", 6)
+	panel.add_child(root)
+
+	var head := HBoxContainer.new()
+	root.add_child(head)
+	var title := Label.new()
+	title.text = "What's New  —  %s" % _read_version()
+	title.add_theme_color_override("font_color", RS_GOLD)
+	title.add_theme_font_size_override("font_size", 16)
+	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	head.add_child(title)
+	var close := Button.new()
+	close.text = "✕"
+	close.flat = true
+	close.add_theme_color_override("font_color", RS_DIM)
+	close.add_theme_color_override("font_hover_color", RS_GOLD)
+	close.pressed.connect(func() -> void: overlay.queue_free())
+	head.add_child(close)
+
+	var sep := HSeparator.new()
+	root.add_child(sep)
+
+	var scroll := ScrollContainer.new()
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	root.add_child(scroll)
+	var list := VBoxContainer.new()
+	list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	list.add_theme_constant_override("separation", 10)
+	scroll.add_child(list)
+
+	var entries: Array = _ChangelogData.ENTRIES
+	for i in range(entries.size()):
+		list.add_child(_changelog_entry(entries[i] as Dictionary, i == 0))
+
+func _changelog_entry(entry: Dictionary, is_current: bool) -> Control:
+	var box := VBoxContainer.new()
+	box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	box.add_theme_constant_override("separation", 2)
+
+	var hdr := Label.new()
+	var vtxt := "v%s" % str(entry.get("version", "?"))
+	var ttl := str(entry.get("title", ""))
+	hdr.text = "%s  —  %s" % [vtxt, ttl] if ttl != "" else vtxt
+	if str(entry.get("date", "")) != "":
+		hdr.text += "   (%s)" % str(entry.get("date"))
+	hdr.add_theme_color_override("font_color", RS_GOLD if is_current else RS_TEXT)
+	hdr.add_theme_font_size_override("font_size", 13 if is_current else 12)
+	box.add_child(hdr)
+	if is_current:
+		var badge := Label.new()
+		badge.text = "current version"
+		badge.add_theme_color_override("font_color", RS_GREEN)
+		badge.add_theme_font_size_override("font_size", 9)
+		box.add_child(badge)
+
+	for note: Variant in (entry.get("notes", []) as Array):
+		var n := Label.new()
+		n.text = "•  %s" % str(note)
+		n.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		n.add_theme_color_override("font_color", RS_DIM if not is_current else RS_TEXT)
+		n.add_theme_font_size_override("font_size", 10)
+		box.add_child(n)
+	return box
+
+## Reusable dark panel stylebox matching the login screen's look.
+func _panel_sb() -> StyleBoxFlat:
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = RS_BG
+	sb.border_color = RS_BORDER
+	sb.set_border_width_all(3)
+	sb.set_corner_radius_all(4)
+	sb.set_content_margin_all(12)
+	return sb
 
 func _make_logo() -> Control:
 	var holder := Control.new()
@@ -260,27 +478,6 @@ func _make_logo() -> Control:
 	title.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	holder.add_child(title)
 	return holder
-
-func _add_corner_runes(panel: Control) -> void:
-	var runes := ["ᚠ", "ᚢ", "ᚦ", "ᚨ"]
-	var corners := [
-		[Vector2(0.0, 0.0),  Vector2(8, 4)],
-		[Vector2(1.0, 0.0),  Vector2(-22, 4)],
-		[Vector2(0.0, 1.0),  Vector2(8, -22)],
-		[Vector2(1.0, 1.0),  Vector2(-22, -22)],
-	]
-	for i in range(4):
-		var r := Label.new()
-		r.text = runes[i]
-		r.add_theme_color_override("font_color", RS_BORDER)
-		r.add_theme_font_size_override("font_size", 16)
-		var anch: Vector2 = corners[i][0]
-		var off:  Vector2 = corners[i][1]
-		r.anchor_left = anch.x; r.anchor_right = anch.x
-		r.anchor_top  = anch.y; r.anchor_bottom = anch.y
-		r.offset_left = off.x;  r.offset_right = off.x + 16
-		r.offset_top  = off.y;  r.offset_bottom = off.y + 18
-		panel.add_child(r)
 
 func _make_field(placeholder: String, secret: bool) -> LineEdit:
 	var f := LineEdit.new()
@@ -383,11 +580,6 @@ func _on_register_pressed() -> void:
 	if _nm != null:
 		_nm.send_register(u, p, e)
 
-func _on_offline_pressed() -> void:
-	if _nm != null:
-		_nm.go_offline()
-	_status("Playing offline.", RS_GREEN)
-	_close()
 
 # Open the password reset screen as a modal CanvasLayer overlay. Whatever
 # the player typed in the username field carries forward as a prefill, so
@@ -414,10 +606,21 @@ func _on_pass_input(event: InputEvent) -> void:
 # ── NetworkManager callbacks ───────────────────────────────────────────────────
 func _on_server_connected() -> void:
 	_set_connected(true)
-	_status("Connected — log in or create an account.", RS_GREEN)
 	# Persist the working address — by the time we're here we know it
 	# actually connects, so saving a typo is impossible.
 	_save_server_address()
+	# Armed auto-login fires now that we're connected (once — if it's rejected the
+	# player finishes on the manual screen).
+	if _auto_login_pending and not _auto_login_suppressed():
+		_auto_login_pending = false
+		var u := _user_field.text.strip_edges()
+		var p := _pass_field.text
+		if _nm != null and u != "" and p != "":
+			_was_auto_attempt = true
+			_status("Welcome back — signing in as %s…" % u, RS_DIM)
+			_nm.send_login(u, p)
+			return
+	_status("Connected — log in or create an account.", RS_GREEN)
 	if _user_field != null:
 		_user_field.grab_focus()
 
@@ -427,6 +630,13 @@ func _on_server_disconnected() -> void:
 
 func _on_login_ok(player_data: Dictionary) -> void:
 	GameManager.populate_from_server_data(player_data)
+	# Remember these credentials so the game logs itself in next launch, PRESERVING
+	# the player's auto-login preference (defaults ON for the very first sign-in;
+	# stays OFF if they switched it off in Settings).
+	_was_auto_attempt = false
+	var prev := load_login()
+	var uname := str(player_data.get("username", _user_field.text.strip_edges()))
+	save_login(uname, _pass_field.text, bool(prev.get("auto", true)))
 	if _pending_char_creation:
 		_pending_char_creation = false
 		_open_character_creation()
@@ -441,6 +651,16 @@ func _open_character_creation() -> void:
 	queue_free()
 
 func _on_auth_fail(reason: String) -> void:
+	# If the rejected attempt was an AUTO-login, the saved credentials are stale
+	# (password changed / account gone). Wipe them so we don't loop next launch and
+	# let the player sign in fresh — the username stays prefilled.
+	if _was_auto_attempt:
+		_was_auto_attempt = false
+		clear_login()
+		if _pass_field != null:
+			_pass_field.text = ""
+		_status("Saved login is no longer valid — please sign in.", RS_RED)
+		return
 	_status(reason, RS_RED)
 
 func _on_register_ok() -> void:

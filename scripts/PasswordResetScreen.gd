@@ -96,7 +96,7 @@ func _render_stage() -> void:
 func _render_request() -> void:
 	_body.add_child(_title("Forgot password"))
 	_body.add_child(_dim_lbl(
-		"Enter your username OR email. If an account is found and has "
+		"Enter your username OR email. If an account is found and has " +
 		"an email on file, a reset token will be sent to that address."))
 
 	var u_field := _make_field("Username", false)

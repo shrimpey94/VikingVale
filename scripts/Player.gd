@@ -4,7 +4,11 @@ const Boats       = preload("res://scripts/Boat.gd")
 const SeaMonsters = preload("res://scripts/SeaMonsters.gd")
 const Fishing     = preload("res://scripts/Fishing.gd")
 
-const BASE_SPEED := 120.0
+# Base on-foot move speed. Reduced 35% (was 120) per playtest — the world
+# reads too fast at 120. Boot tiers (GameManager.boot_speed_bonus, 8%/tier)
+# claw some of it back for geared players. Re-tune in a later phase if the
+# slower pace feels off.
+const BASE_SPEED := 78.0
 const TILE := 32.0
 const INTERACT_RANGE  := 54.0
 const MELEE_RANGE     := 40.0
@@ -26,9 +30,21 @@ var _action_type      := ""       # "chop" | "mine" | "fish"
 var _action_frame     := 0.0      # 0→1 per swing cycle
 var _action_interval  := 2.5      # mirrors the target's swing_interval
 var _target_pos       := Vector2.ZERO
+## v1.6 3D client — when true, this Player is a shared LOGIC driver inside the 3D
+## world (World3D). Its own 2D mouse/key input is suppressed (the 2D mouse maps to
+## the wrong coords in a 3D scene); World3D feeds `_target_pos` / `_target_interactable`
+## from 3D ray-picks instead. Default false → the 2D client is completely unchanged.
+var external_control  := false
+## LootDrop node the player has committed to picking up after walking to
+## it. When non-null, `_physics_process` fires perform_pickup() the moment
+## distance drops within LootDrop.PICKUP_RANGE. Manual WASD input, a click
+## on a different target, or the node being freed all clear this.
+var _pending_pickup: Node2D = null
 var _target_interactable: Node = null
 var _target_monster:  Node = null
 var _in_combat:       bool = false
+## Last-rendered PvP flag — repaints the self-indicator only when it flips.
+var _pvp_flag_shown:  bool = false
 var _walk_time        := 0.0      # accumulates while MOVING for leg animation
 var _ground:          Node = null  # cached reference to Ground node
 var _footstep_frame:  int  = 0    # 0..3, ticks AudioManager.play_footstep on rollover
@@ -232,6 +248,22 @@ func _interval_for(atype: String) -> float:
 
 # ── Physics ─────────────────────────────────────────────────────────────────
 func _physics_process(delta: float) -> void:
+	# Spectator mode: the local player is an invisible camera puppet driven by
+	# World.gd to follow the recorded target. No input, no movement, no sync.
+	if NetworkManager.spectating:
+		velocity = Vector2.ZERO
+		return
+	# Freeze-on-disconnect (Phase 7): if the in-game socket dropped, halt the
+	# player instead of letting them walk through a dead, unsynced world. The
+	# reconnect overlay handles getting them back online.
+	if NetworkManager.lost_connection:
+		velocity = Vector2.ZERO
+		return
+	# Repaint once when our PvP flag flips so the self-indicator appears/clears
+	# even while standing still (idle frames don't otherwise queue a redraw).
+	if _pvp_flag_shown != GameManager.pvp_flagged:
+		_pvp_flag_shown = GameManager.pvp_flagged
+		queue_redraw()
 	_update_camera(delta)
 	if _swing_t > 0.0:
 		_swing_t -= delta
@@ -274,6 +306,7 @@ func _physics_process(delta: float) -> void:
 		_target_pos = global_position   # cancel any click destination so we stop on key release
 		if not _in_combat:
 			_target_monster = null
+		_pending_pickup = null   # WASD cancels any pending loot walk-to-pickup
 		velocity = kb * spd
 		_state   = PlayerState.MOVING
 	elif _target_pos.distance_to(global_position) > 4.0:
@@ -282,6 +315,13 @@ func _physics_process(delta: float) -> void:
 		if _target_interactable != null:
 			if global_position.distance_to(_target_interactable.global_position) <= INTERACT_RANGE:
 				_fire_interaction()
+		# Pending loot pickup — same "close enough to fire" pattern.
+		# LootDrop.PICKUP_RANGE = 40 px.
+		if _pending_pickup != null and is_instance_valid(_pending_pickup):
+			if global_position.distance_to(_pending_pickup.global_position) <= 40.0:
+				var drop := _pending_pickup
+				_pending_pickup = null
+				drop.call("perform_pickup")
 	else:
 		if _state == PlayerState.MOVING:
 			_walk_time = 0.0
@@ -290,6 +330,12 @@ func _physics_process(delta: float) -> void:
 		_state   = PlayerState.IDLE
 		if _target_interactable != null:
 			_fire_interaction()
+		# Pending pickup on final arrival too — covers the exact-distance case.
+		if _pending_pickup != null and is_instance_valid(_pending_pickup):
+			if global_position.distance_to(_pending_pickup.global_position) <= 40.0:
+				var drop := _pending_pickup
+				_pending_pickup = null
+				drop.call("perform_pickup")
 
 	if velocity.x != 0.0:
 		_facing = signf(velocity.x)
@@ -488,6 +534,7 @@ func _handle_sail_click(p: Vector2) -> void:
 		# wait. HUD listens for this signal and spawns the modal; the
 		# modal emits `cast_minigame_ended` which lands in our handler.
 		_casting = true
+		AudioManager.play_sfx("fishing_cast", 0.2)
 		Events.cast_minigame_start.emit()
 		queue_redraw()
 	else:
@@ -563,12 +610,41 @@ func _attempt_boat_catch() -> void:
 		_reeling = true
 		Events.reel_minigame_start.emit(catch)
 		return
-	GameManager.add_item(str(catch["id"]), str(catch["name"]), 1, catch["color"] as Color)
-	# Phase 5 Part 3 — bait `catch_bonus` applies as a flat XP multiplier on
-	# the landed catch (1.0 if no bait, 1.0 + catch_bonus if bait equipped).
-	# Lures don't apply here — their bonus lives in _pick_catch's rare lift.
-	GameManager.add_xp("fishing",
-		int(round(float(catch["xp"]) * _bait_xp_mult())))
+	# Instant catch (small shoreline fish, no reel) — 1x XP base. The reel path
+	# gets its landing SFX from ReelMinigame; this quick path needs its own.
+	AudioManager.play_sfx("fishing_catch", 0.3)
+	_grant_weighted_catch(catch, 1.0)
+
+## Grant a landed catch with a rolled WEIGHT (1.6.3). The weight rides on the
+## fish item (drives cooked-heal + the biggest-catch leaderboard), scales the
+## Fishing XP, and shows a chat flourish (⭐ on a trophy). `xp_base_mult` is 1x
+## for an instant catch, 2x for a reeled one. Bait `catch_bonus` still stacks.
+func _grant_weighted_catch(catch: Dictionary, xp_base_mult: float) -> void:
+	var col_v: Variant = catch.get("color", Color.WHITE)
+	var col: Color = col_v if col_v is Color else Color.WHITE
+	# Trophy-hunter tackle (glimmer_roe / trophy_spoon) fattens the weight roll.
+	var weight := Fishing.roll_weight(catch, float(_tackle_data().get("weight_skew", 0.0)))
+	var trophy := Fishing.is_trophy(catch, weight)
+	var iname := str(catch.get("name", "fish"))
+	var wnorm := Fishing.weight_norm(catch, weight)
+	# ⑥ SERVER-AUTHORITY — online, the SERVER grants the fish item (+ meta) +
+	# fishing XP + bonus gold and pushes them back (admin_inventory_set/gold_set),
+	# so the client must NOT mint them here. Offline still grants locally.
+	if NetworkManager.state == NetworkManager.NetState.LOGGED_IN:
+		var col_arr: Array = [col.r, col.g, col.b, col.a]
+		NetworkManager.send_fish_caught(str(catch["id"]), iname, weight, wnorm,
+			int(catch.get("xp", 0)), col_arr, xp_base_mult >= 2.0, _bait_xp_mult())
+	else:
+		# `wnorm` (0..1) rides along so cooking + eating can scale heal later.
+		GameManager.add_item(str(catch["id"]), iname, 1, col,
+			{"weight": weight, "trophy": trophy, "wnorm": wnorm})
+		var mult := _bait_xp_mult() * xp_base_mult * Fishing.weight_mult(catch, weight)
+		GameManager.add_xp("fishing", int(round(float(catch.get("xp", 0)) * mult)))
+	if trophy:
+		AudioManager.play_ui("quest_complete")   # a trophy earns a fanfare
+		Events.chat_message.emit("⭐ TROPHY!  You landed a %s — %.1f kg!" % [iname, weight])
+	else:
+		Events.chat_message.emit("You landed a %s (%.1f kg)." % [iname, weight])
 
 ## Returns true if this catch should open the reel minigame. Rolls + consumes
 ## the trigger chance internally so callers don't need to know the table:
@@ -591,15 +667,9 @@ func _on_reel_minigame_ended(catch_data: Dictionary, success: bool) -> void:
 	_reeling = false
 	var iname := str(catch_data.get("name", "fish"))
 	if success:
-		var col_v: Variant = catch_data.get("color", Color.WHITE)
-		var col: Color = col_v if col_v is Color else Color.WHITE
-		GameManager.add_item(str(catch_data["id"]), iname, 1, col)
-		# Double XP for the reeled catch — the player earned it through
-		# active play, not just the cast-and-wait loop. Phase 5 Part 3 —
-		# bait `catch_bonus` multiplies on top via `_bait_xp_mult()`.
-		GameManager.add_xp("fishing",
-			int(round(float(catch_data.get("xp", 0)) * 2.0 * _bait_xp_mult())))
-		Events.chat_message.emit("You landed the %s!" % iname)
+		# Reeled catch — 2x XP base (earned through active play). Weight + trophy
+		# flourish handled by the shared grant helper.
+		_grant_weighted_catch(catch_data, 2.0)
 	else:
 		Events.chat_message.emit("The line snapped — the %s escaped." % iname)
 	# Phase 5 — one-cast-per-click model. Whatever the reel outcome, this
@@ -624,6 +694,20 @@ func _sea_encounter_chance(deep: bool) -> float:
 ##   lose — boat is sunk: clear GameManager.current_boat (the boat is gone),
 ##          damage the player 25% of max HP, force-dock back to land via the
 ##          normal docking path so they don't drown in open water.
+## ⑥ — normalize a sea monster's loot[] into the server-claim shape (color as a
+## [r,g,b,a] list). Used pre-bake; once the admin bakes sea loot the server ignores
+## this and grants from its own table.
+func _sea_loot_claim(m: Dictionary) -> Array:
+	var out: Array = []
+	for it: Variant in (m.get("loot", []) as Array):
+		if it is Dictionary:
+			var d: Dictionary = it
+			var col_v: Variant = d.get("color", Color.WHITE)
+			var col: Color = col_v if col_v is Color else Color.WHITE
+			out.append({"id": str(d.get("id", "")), "name": str(d.get("name", "")),
+				"qty": int(d.get("qty", 1)), "color": [col.r, col.g, col.b, col.a]})
+	return out
+
 @warning_ignore("integer_division")
 func _on_sea_combat_ended(monster_type: String, outcome: String) -> void:
 	_in_sea_combat = false
@@ -633,21 +717,30 @@ func _on_sea_combat_ended(monster_type: String, outcome: String) -> void:
 	var mname := str(m.get("name", "creature"))
 	match outcome:
 		"win":
-			var loot_v: Variant = m.get("loot", [])
-			if loot_v is Array:
-				for it: Variant in (loot_v as Array):
-					if it is Dictionary:
-						var d: Dictionary = it
-						var col_v: Variant = d.get("color", Color.WHITE)
-						var col: Color = col_v if col_v is Color else Color.WHITE
-						GameManager.add_item(str(d.get("id", "")),
-							str(d.get("name", "")),
-							int(d.get("qty", 1)), col)
-			var xp := int(m.get("xp_reward", 0))
-			@warning_ignore("integer_division")
-			GameManager.add_xp("fishing", xp / 2)
-			@warning_ignore("integer_division")
-			GameManager.add_xp("melee",   xp - xp / 2)
+			# ⑥ SERVER-AUTHORITY — online, the SERVER grants the sea-monster loot +
+			# XP (from the baked table) and pushes them back, so the client must NOT
+			# mint them here. Offline still grants locally. The fight is a client
+			# modal the server can't referee, so we send a claim it validates.
+			if NetworkManager.state == NetworkManager.NetState.LOGGED_IN:
+				var claim := {"name": mname, "xp_reward": int(m.get("xp_reward", 0)),
+					"loot": _sea_loot_claim(m)}
+				NetworkManager.send_sea_combat_win(monster_type, claim)
+			else:
+				var loot_v: Variant = m.get("loot", [])
+				if loot_v is Array:
+					for it: Variant in (loot_v as Array):
+						if it is Dictionary:
+							var d: Dictionary = it
+							var col_v: Variant = d.get("color", Color.WHITE)
+							var col: Color = col_v if col_v is Color else Color.WHITE
+							GameManager.add_item(str(d.get("id", "")),
+								str(d.get("name", "")),
+								int(d.get("qty", 1)), col)
+				var xp := int(m.get("xp_reward", 0))
+				@warning_ignore("integer_division")
+				GameManager.add_xp("fishing", xp / 2)
+				@warning_ignore("integer_division")
+				GameManager.add_xp("melee",   xp - xp / 2)
 			# Phase 4 — record boss kills so the spawn radius doesn't keep
 			# re-triggering the same fight every cast for the rest of the
 			# session. List resets on next login (no server persistence).
@@ -783,6 +876,19 @@ func _has_inventory_room_for(item_id: String) -> bool:
 func _on_cast_minigame_ended(success: bool, tier_bonus: int) -> void:
 	_casting = false
 	if not success:
+		# A botched cast at sea thrashes the water — 96% of the time it draws a
+		# sea monster (so you can deliberately fail a cast to pick a fight; the
+		# rare random encounter on a SUCCESSFUL cast still works as before). Only
+		# while boat-fishing; a snapped shoreline cast is just a snapped cast.
+		if GameManager.current_boat != "" and not _in_sea_combat and randf() < 0.96:
+			var deep: bool = _ground != null and _ground.is_deep_ocean(global_position)
+			var lv := GameManager.get_skill_level("fishing")
+			var monster_type := SeaMonsters.roll_encounter(lv, not deep)
+			if monster_type != "":
+				Events.chat_message.emit("Your thrashing line lures something up from the deep!")
+				_in_sea_combat = true
+				Events.sea_combat_start.emit(monster_type)
+				return
 		Events.chat_message.emit("The line snapped! Cast failed.")
 		Events.player_stop_action.emit()
 		return
@@ -795,7 +901,20 @@ func _on_cast_minigame_ended(success: bool, tier_bonus: int) -> void:
 	if not _reeling and not _in_sea_combat:
 		Events.player_stop_action.emit()
 
+## True when a text field (chat box, search, etc.) has keyboard focus — WASD then
+## belongs to the typist, not the character.
+func _text_input_focused() -> bool:
+	var vp := get_viewport()
+	if vp == null:
+		return false
+	var f := vp.gui_get_focus_owner()
+	return f is LineEdit or f is TextEdit
+
 func _keyboard_direction() -> Vector2:
+	# 3D client drives movement camera-relative via _target_pos (World3D reads the
+	# camera yaw); suppress the Player's own world-axis WASD so they don't fight.
+	if external_control or _text_input_focused():
+		return Vector2.ZERO
 	var d := Vector2.ZERO
 	if Input.is_key_pressed(KEY_A): d.x -= 1
 	if Input.is_key_pressed(KEY_D): d.x += 1
@@ -805,6 +924,14 @@ func _keyboard_direction() -> Vector2:
 
 # ── Input ───────────────────────────────────────────────────────────────────
 func _unhandled_input(event: InputEvent) -> void:
+	# 3D client: World3D owns picking/movement via 3D ray-casts and feeds this
+	# Player its targets directly, so ignore raw 2D mouse/key input here (the 2D
+	# mouse position is meaningless against a 3D camera).
+	if external_control:
+		return
+	# Spectator mode is strictly read-only — swallow nothing, act on nothing.
+	if NetworkManager.spectating:
+		return
 	if event is InputEventKey and (event as InputEventKey).pressed and not (event as InputEventKey).echo:
 		if (event as InputEventKey).keycode == KEY_E and _boat_prompt_kind != "":
 			_toggle_boat()
@@ -870,10 +997,12 @@ func _unhandled_input(event: InputEvent) -> void:
 			velocity             = Vector2.ZERO
 			Events.target_cleared.emit()
 		MOUSE_BUTTON_WHEEL_UP:
-			if _cam != null:
+			# Don't zoom when the mouse is over a UI panel (scrolling a list past its
+			# end used to spill into camera zoom).
+			if _cam != null and get_viewport().gui_get_hovered_control() == null:
 				_cam.zoom = (_cam.zoom * 1.1).clamp(Vector2(0.5, 0.5), Vector2(3.0, 3.0))
 		MOUSE_BUTTON_WHEEL_DOWN:
-			if _cam != null:
+			if _cam != null and get_viewport().gui_get_hovered_control() == null:
 				_cam.zoom = (_cam.zoom * 0.9).clamp(Vector2(0.5, 0.5), Vector2(3.0, 3.0))
 
 # ── Camera pan / lock ────────────────────────────────────────────────────────
@@ -943,8 +1072,47 @@ func _fire_interaction() -> void:
 	velocity              = Vector2.ZERO
 	Events.player_interacted.emit(node)
 
+# ── Autoplay hooks (in-client AI drives the REAL player) ──────────────────────
+## Walk to a node and interact with it (gather/craft-station/etc.) — the same
+## path a click takes, so everything (movement, swing, XP, inventory) is real.
+func autoplay_interact(node: Node2D) -> void:
+	if node == null or not is_instance_valid(node):
+		return
+	_target_interactable = node
+	_target_pos          = node.global_position
+	_state               = PlayerState.MOVING
+
+## Walk to a world point (no interaction on arrival).
+func autoplay_walk(pos: Vector2) -> void:
+	_target_interactable = null
+	_target_pos          = pos
+	_state               = PlayerState.MOVING
+
+## True when free to receive a new order (not moving, acting, or fighting).
+func autoplay_is_idle() -> bool:
+	return _state == PlayerState.IDLE and _target_interactable == null and not _in_combat
+
+## True while a fight is underway (AutoPlay waits it out).
+func autoplay_in_combat() -> bool:
+	return _in_combat
+
+## Attack a monster — the exact path "click monster → Attack" takes, so the real
+## combat window opens and the fight (approach + swings) proceeds natively.
+func autoplay_attack(monster: Node) -> void:
+	_on_monster_attack_chosen(monster)
+
+## Called by LootDrop._input_event when the player clicks loot that's out
+## of pickup range. Sets the pending pickup + relies on _physics_process
+## to fire perform_pickup() the moment the player walks close enough.
+## Clicking another target or hitting WASD clears the pending pickup.
+func set_pending_pickup(drop: Node2D) -> void:
+	_pending_pickup = drop
+
 # ── Drawing ─────────────────────────────────────────────────────────────────
 func _draw() -> void:
+	# Spectator puppet is never drawn — only the camera rides this node.
+	if NetworkManager.spectating:
+		return
 	var arm_a := _arm_angle()
 	var moving := _state == PlayerState.MOVING and not _sailing
 	var acting := _state == PlayerState.ACTING
@@ -961,12 +1129,15 @@ func _draw() -> void:
 	var swing_a := 0.0
 	if _swing_t > 0.0:
 		swing_a = sin((1.0 - _swing_t / SWING_DUR) * PI) * 1.7
+	# My own gather swing draws the highest-tier axe/pick I'm actually carrying.
+	var my_tool := Appearance.best_tool(GameManager.inventory, _action_type) if acting else ""
 	Appearance.draw_character(self, GameManager.appearance, {
 		"walk_sw":      walk_sw,
 		"left_arm":     left_a,
 		"right_arm":    arm_a + walk_arm_a + swing_a,
 		"acting":       acting,
 		"action_type":  _action_type,
+		"tool":         my_tool,
 		"equip":        GameManager.equipment,
 	})
 	# Boat drawn in front of and slightly below the character, so the rower sits
@@ -976,6 +1147,23 @@ func _draw() -> void:
 		Boats.draw_boat(self, _boat_id, _facing)
 		draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 		_draw_boat_hp_bar()
+	# PvP self-indicator (Phase 8) — the same style symbol OtherPlayer draws for
+	# flagged players, shown above your OWN head too so both duelists see the
+	# marker on both characters, not just on the opponent.
+	if GameManager.pvp_flagged:
+		var font := ThemeDB.fallback_font
+		if font != null:
+			var glyph := _pvp_style_glyph()
+			var gw := font.get_string_size(glyph, HORIZONTAL_ALIGNMENT_LEFT, -1, 12).x
+			draw_string(font, Vector2(-gw * 0.5, -47), glyph,
+				HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color(1.00, 0.30, 0.25))
+
+## Combat-style marker for the PvP flag: ⚔ melee / ➹ ranged / ✦ magic.
+func _pvp_style_glyph() -> String:
+	match GameManager.combat_style:
+		"ranged": return "➹"
+		"magic":  return "✦"
+		_:        return "⚔"
 
 ## Floating hull HP bar — only drawn when the boat has taken at least 1 point
 ## of damage in the current sailing session. Positioned just below the boat

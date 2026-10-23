@@ -102,6 +102,12 @@ const PRICES: Dictionary = {
 	"adamant_bar":  800,
 	"runite_bar": 1_600,
 
+	# ── Jewelcrafting gems (Phase 1) — rare, high value. Bought at a premium
+	# from the rare gem vendor; sold back for a fraction.
+	"opal":       1_200,
+	"amethyst":   4_000,
+	"diamond":   12_000,
+
 	# ── Foraging ──────────────────────────────────────────────────────────────
 	"herbs":          5,
 	"mushrooms":      8,
@@ -216,10 +222,15 @@ const PRICES: Dictionary = {
 	"feast_of_valhalla":2_000,
 
 	# ── Bait / lures (Phase 5 fishing rework) ─────────────────────────────────
-	"earthworm":      3,
-	"fatty_lard":    50,
-	"runic_lure": 2_500,
-	"kraken_bait":5_000,
+	"earthworm":       3,
+	"shrimp_bait":    15,
+	"fatty_lard":     50,
+	"calming_chum":   40,
+	"glimmer_roe":   220,
+	"runic_lure":  2_500,
+	"trophy_spoon":3_500,
+	"serpent_lure":4_000,
+	"kraken_bait": 5_000,
 
 	# ── Farming (seeds + crops) ───────────────────────────────────────────────
 	"barley_seed":   10,
@@ -257,7 +268,7 @@ const PRICES: Dictionary = {
 # sell-back multiplier never drifts if a skill is added or renamed — update
 # this list alongside GameManager and the function picks up the change.
 const _SKILLS: Array[String] = [
-	"woodcutting", "mining", "fishing", "foraging",
+	"woodcutting", "mining", "fishing", "jewelcrafting",
 	"smithing", "cooking", "crafting", "construction", "farming",
 	"melee", "ranged", "magic", "defense", "vitality", "soul",
 ]
@@ -268,6 +279,11 @@ const _SKILLS: Array[String] = [
 ## Shop UIs multiply this by their buy_multiplier (player buys) or by
 ## `sell_back_multiplier(player)` (player sells).
 static func price_for(item_id: String) -> int:
+	# Token-upgraded gear (Phase 1d) carries a "~u{level}" suffix — value it off
+	# the base piece so it prices/sells like the un-upgraded item.
+	var _up := item_id.find("~u")
+	if _up >= 0:
+		item_id = item_id.substr(0, _up)
 	if PRICES.has(item_id):
 		return int(PRICES[item_id])
 	return _derive_from_naming(item_id)

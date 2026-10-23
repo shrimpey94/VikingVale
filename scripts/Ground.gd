@@ -57,7 +57,20 @@ var _impassable_tiles:  Dictionary = {}    # idx → true   (only stored when bl
 # startup via SubViewport, then handed to the terrain_blend shader as a uniform.
 var _biome_atlas_img: Image       = null
 var _biome_atlas_tex: ImageTexture = null
-const BIOME_COUNT := 50
+const BIOME_COUNT := 94
+
+# ── Crisp / Smooth terrain mode ──────────────────────────────────────────────
+# "Smooth" bakes the atlas at a higher per-cell resolution and swaps in
+# terrain_blend_smooth.gdshader (linear filtering + noise-warped melt
+# borders). "Crisp" (default) is the original 32px-cell + nearest-filter
+# look. Chosen at boot from user://graphics.cfg and switchable live via
+# set_terrain_smooth(). `_atlas_cell_px` tracks whichever resolution the
+# atlas was last baked at so cell-crop math (thumbnails, CPU fallback)
+# stays correct.
+const SMOOTH_CELL_PX := 128
+const _GRAPHICS_CFG  := "user://graphics.cfg"
+var _terrain_smooth: bool = false
+var _atlas_cell_px:  int  = TILE
 
 # True once the atlas bake has finished AND terrain_blend.gdshader is bound to
 # this node. Before that, _draw() falls back to the CPU per-tile dispatch so the
@@ -129,6 +142,65 @@ const B_DRIFTWOOD_SHORE := 47
 # edges are drawn in the _draw_*_bridge functions themselves.
 const B_WOOD_BRIDGE   := 48
 const B_STONE_BRIDGE  := 49
+# ── Expansion #4: intra-biome grass-family variants (50..56). Kept
+# contiguous so the shader's `is_grass` range test stays cheap. Every
+# tile here reads AS its parent biome (blends via is_grass at edges)
+# but paints with subtly different flora / dryness / undergrowth.
+const B_PLAINS_WILDFLOWER := 50
+const B_PLAINS_DRY        := 51
+const B_OAK_DENSE         := 52
+const B_OAK_AUTUMN        := 53
+const B_DARK_ROOT_TANGLE  := 54
+const B_DARK_MUSHROOM_RING := 55
+const B_SWAMP_DEEP_MUD    := 56
+# ── Water variants (57..58) — participate in is_water so shorelines
+# still dither correctly against coast/ocean.
+const B_OCEAN_KELP  := 57
+const B_OCEAN_DEEP  := 58
+# ── Farming (59..63) — beyond the single farm_crops tile.
+const B_WHEAT_FIELD   := 59
+const B_TILLED_SOIL   := 60
+const B_PASTURE       := 61
+const B_VINEYARD      := 62
+const B_ORCHARD       := 63
+# ── Ruins / damage (64..69) — post-battle + weathered stone.
+const B_RUBBLE          := 64
+const B_BROKEN_WALL     := 65
+const B_CRACKED_EARTH   := 66
+const B_SCORCHED_EARTH  := 67
+const B_CEMETERY        := 68
+const B_ANCIENT_RUINS   := 69
+# ── Volcanic / fire (70..74) — beyond ashlands.
+const B_LAVA_FLOW         := 70
+const B_BASALT            := 71
+const B_ASH_DUNE          := 72
+const B_GEOTHERMAL_VENT   := 73
+const B_OBSIDIAN_SHARD    := 74
+# ── Vegetation variety (75..81) — split across Grass/Forest/Wetlands
+# in the admin picker, but grouped here for ID contiguity.
+const B_TALL_GRASS      := 75
+const B_REEDS           := 76
+const B_LILY_PADS       := 77
+const B_DEAD_GRASS      := 78
+const B_BURNT_GRASS     := 79
+const B_BIRCH_FOREST    := 80
+const B_BAMBOO_STAND    := 81
+# ── Norse cultural (82..86) — set dressing.
+const B_RUNE_STONE_GROUND := 82
+const B_GRAVE_MOUND       := 83
+const B_LONGHOUSE_FLOOR   := 84
+const B_FIRE_PIT_INDOOR   := 85
+const B_FUR_RUG           := 86
+# ── Remaining intra-biome variants (87..93). Not in the grass block
+# because they don't need is_grass blending (mountain/snow already stand
+# alone in the shader).
+const B_PINE_SNOW_DUST     := 87
+const B_PINE_NEEDLE_BED    := 88
+const B_SWAMP_BUBBLING     := 89
+const B_MOUNTAIN_ALPINE    := 90
+const B_MOUNTAIN_GRANITE   := 91
+const B_SNOW_PRISTINE      := 92
+const B_SNOW_TRACKS        := 93
 
 const _BIOME_NAMES := [
 	"plains", "plains", "oak_forest", "pine_forest", "dark_forest",
@@ -147,20 +219,78 @@ const _BIOME_NAMES := [
 	"reef", "tidepool", "wet_sand", "driftwood_shore",
 	# Bridges (48..49) — walkable-over-water.
 	"wood_bridge", "stone_bridge",
+	# Grass-family variants (50..56) — is_grass block extends here.
+	"plains_wildflower", "plains_dry", "oak_dense", "oak_autumn",
+	"dark_root_tangle", "dark_mushroom_ring", "swamp_deep_mud",
+	# Water variants (57..58) — is_water block extends here.
+	"ocean_kelp", "ocean_deep",
+	# Farming (59..63).
+	"wheat_field", "tilled_soil", "pasture", "vineyard", "orchard",
+	# Ruins / damage (64..69).
+	"rubble", "broken_wall", "cracked_earth", "scorched_earth",
+	"cemetery", "ancient_ruins",
+	# Volcanic / fire (70..74).
+	"lava_flow", "basalt", "ash_dune", "geothermal_vent", "obsidian_shard",
+	# Vegetation variety (75..81).
+	"tall_grass", "reeds", "lily_pads", "dead_grass", "burnt_grass",
+	"birch_forest", "bamboo_stand",
+	# Norse cultural (82..86).
+	"rune_stone_ground", "grave_mound", "longhouse_floor",
+	"fire_pit_indoor", "fur_rug",
+	# Remaining intra-biome variants (87..93).
+	"pine_snow_dust", "pine_needle_bed", "swamp_bubbling",
+	"mountain_alpine", "mountain_granite",
+	"snow_pristine", "snow_tracks",
 ]
+
+## Login flash fix — Ground draws the procedural biome map on frame 0, but
+## the server's saved `tile_overrides` arrive as a separate message *after*
+## login_ok, several frames later. We hide the whole Ground node until the
+## first apply_tile_overrides call so the raw procedural pass never flashes
+## to the player. Safety timer reveals anyway after 3 s in case overrides
+## never arrive (offline / broken login) so the world still becomes visible.
+var _overrides_applied: bool = false
 
 func _ready() -> void:
 	add_to_group("ground")
+	visible = false   # hidden until the server's tile overrides land
 	var mat := ShaderMaterial.new()
 	mat.shader = load("res://shaders/ground_noise.gdshader") as Shader
 	self.material = mat
 	_build_cache()
 	_build_biome_lookup_tex()
 	_rebuild_impassable_collision()
+	# Terrain-quality preference — Crisp (default) or Smooth. Read before the
+	# bake so the atlas is baked at the right resolution the first time.
+	_terrain_smooth = _load_terrain_smooth_pref()
+	_atlas_cell_px = SMOOTH_CELL_PX if _terrain_smooth else TILE
 	# Atlas bake awaits a SubViewport render — runs after the rest of init so
 	# the world is fully playable before the bake completes. Step 4 will switch
 	# the per-tile draw path over to atlas sampling once this is ready.
-	await _bake_biome_atlas()
+	await _bake_biome_atlas(_atlas_cell_px)
+	# Kill the login flash for good. On a LIVE (connected) session the raw
+	# procedural base — the old "town squares" map — must NEVER show: we hold the
+	# ground hidden until apply_tile_overrides paints the admin map (the server
+	# always sends tile_overrides in the login burst, even when empty, so this is
+	# guaranteed to fire). The base is only ever revealed when we're genuinely
+	# OFFLINE (no server session) — a mode that's going away after v1.7 anyway.
+	_reveal_when_ready()
+
+## Reveal-gate: shows the ground the moment the admin overrides land (live), or —
+## only if there is NO server session at all — falls back to the procedural base
+## so an offline player still sees the world. Re-checks itself while a server
+## session is pending so a slow login can never flash the old map.
+func _reveal_when_ready() -> void:
+	if _overrides_applied or visible:
+		return
+	if NetworkManager.state != NetworkManager.NetState.OFFLINE:
+		# Connecting / logged in → the admin map is on its way. Keep the base
+		# hidden and check again shortly; apply_tile_overrides will reveal it.
+		get_tree().create_timer(0.5).timeout.connect(_reveal_when_ready)
+		return
+	# Truly offline (no server, no overrides coming) → the procedural base IS
+	# the map, so it's safe to show it.
+	visible = true
 
 ## Public API — returns the biome name at a world pixel position.
 func biome_at_world(world_pos: Vector2) -> String:
@@ -206,8 +336,11 @@ func _fbm(x: float, y: float) -> float:
 # ── Settlement / road detection ───────────────────────────────────────────────
 
 func _is_town(tx: int, ty: int) -> bool:
-	# Kjelvik (hub) tx 77-90, ty 109-122
-	if tx >= 77 and tx <= 90 and ty >= 109 and ty <= 122: return true
+	# Kjelvik — the CAPITAL. Walled castle city, so its footprint is much larger
+	# than the outposts: tx 71-96, ty 105-128 covers everything inside the wall
+	# ring generated in World._kjelvik_castle_nodes(). MUST stay in sync with the
+	# _KC_* ring bounds there, or cobble and walls disagree.
+	if tx >= 71 and tx <= 96 and ty >= 105 and ty <= 128: return true
 	# Frostheim tx 37-50, ty 23-36
 	if tx >= 37 and tx <= 50 and ty >= 23 and ty <= 36:  return true
 	# Ironwood Keep tx 105-118, ty 149-162
@@ -223,10 +356,18 @@ func _is_road(tx: int, ty: int) -> bool:
 	if tx >= 77 and tx <= 79 and ty >= 36 and ty <= 109: return true
 	if tx >= 50 and tx <= 77 and ty >= 76 and ty <= 78:  return true
 	if tx >= 50 and tx <= 52 and ty >= 36 and ty <= 77:  return true
-	# Kjelvik ↔ Ironwood Keep (S road)
+	# Kjelvik ↔ Ironwood Keep (S road, then the eastward spur into town).
+	# The S road ended at tx 84-86 while Ironwood starts at tx 105 — ~20 tiles
+	# short. The spur carries it east to the keep's gate (Phase 5c).
 	if tx >= 84 and tx <= 86 and ty >= 122 and ty <= 149: return true
-	# Kjelvik ↔ Eastmark Post (E road)
+	if tx >= 86 and tx <= 106 and ty >= 147 and ty <= 149: return true
+	# Kjelvik ↔ Eastmark Post (E road, then the southward spur into town).
+	# The E road alone runs east at ty 113-115 and never turns — it used to end
+	# ~64 tiles NORTH of Eastmark (ty 177-190), so the road literally led
+	# nowhere. The spur below closes that gap so caravans can hug real road the
+	# whole way (Phase 5c).
 	if tx >= 90 and tx <= 179 and ty >= 113 and ty <= 115: return true
+	if tx >= 177 and tx <= 179 and ty >= 115 and ty <= 178: return true
 	# Kjelvik ↔ Bjorn's Landing (NE road)
 	if tx >= 90 and tx <= 239 and ty >= 109 and ty <= 111: return true
 	if tx >= 239 and tx <= 241 and ty >= 109 and ty <= 132: return true
@@ -252,6 +393,21 @@ func _bid_at(tx: int, ty: int) -> int:
 	if _overrides.has(idx):
 		return int(_overrides[idx])
 	return _biome_cache[idx]
+
+## DEV (V1.5.6 3D prototype): dump the live admin tile paints to
+## user://map_export.json so the offline 3D sandbox can rebuild the EXACT current
+## map (procedural base + these overrides). Triggered by the /exportmap admin
+## command. Returns the number of painted tiles written (-1 on write failure).
+func export_overrides_to_user() -> int:
+	var ov: Dictionary = {}
+	for k: Variant in _overrides.keys():
+		ov[str(int(k))] = int(_overrides[k])
+	var f := FileAccess.open("user://map_export.json", FileAccess.WRITE)
+	if f == null:
+		return -1
+	f.store_string(JSON.stringify({"cols": COLS, "rows": ROWS, "overrides": ov}))
+	f.close()
+	return _overrides.size()
 
 func _is_impassable_bid(bid: int) -> bool:
 	# Water + walls + cliffs block. All hill biomes (both grass-family and
@@ -294,7 +450,7 @@ func get_biome_thumbnail(biome_name: String) -> Texture2D:
 	var bid := biome_name_to_id(biome_name)
 	if bid < 0 or bid >= BIOME_COUNT:
 		return null
-	var region := Rect2i(0, bid * TILE, TILE, TILE)
+	var region := Rect2i(0, bid * _atlas_cell_px, _atlas_cell_px, _atlas_cell_px)
 	var cell_img := _biome_atlas_img.get_region(region)
 	if cell_img == null or cell_img.is_empty():
 		return null
@@ -346,6 +502,18 @@ func biome_name_to_id(biome_name: String) -> int:
 	var i := _BIOME_NAMES.find(biome_name)
 	return i if i >= 0 else B_PLAINS
 
+func biome_id_to_name(biome_id: int) -> String:
+	return str(_BIOME_NAMES[biome_id]) if biome_id >= 0 and biome_id < _BIOME_NAMES.size() else ""
+
+## Current OVERRIDE biome name at a tile, or "" if the tile has no override (it's
+## still procedural). The admin tile-paint undo captures this before painting so a
+## stroke can be restored to exactly what it replaced (""→ re-clear).
+func override_biome_at(tx: int, ty: int) -> String:
+	if tx < 0 or tx >= COLS or ty < 0 or ty >= ROWS:
+		return ""
+	var idx := ty * COLS + tx
+	return biome_id_to_name(int(_overrides[idx])) if _overrides.has(idx) else ""
+
 ## Build the 300x300 R8 biome lookup texture from the current _biome_cache.
 ## Each pixel's R channel encodes the biome id (0..15). The shader path samples
 ## this to do per-fragment biome lookup + neighbor blending. Updates after
@@ -364,21 +532,27 @@ func _build_biome_lookup_tex() -> void:
 	_tint_lookup_img.fill(Color8(128, 128, 0, 255))
 	_tint_lookup_tex = ImageTexture.create_from_image(_tint_lookup_img)
 
-## Render each biome's draw output into a single representative 32×32 cell, all
-## stacked into a 32 × (BIOME_COUNT*32) atlas. Uses a one-shot SubViewport and
-## the inner _AtlasBaker node to dispatch into the shared per-biome draw funcs.
-## Awaits two frame_post_draw to let the viewport flush before we read it back.
-func _bake_biome_atlas() -> void:
+## Render each biome's draw output into one representative cell, stacked into
+## a `cell_px × (BIOME_COUNT*cell_px)` vertical-strip atlas. `cell_px` is TILE
+## (32) for Crisp or SMOOTH_CELL_PX (128) for Smooth. The per-biome draws are
+## authored in 32px space, so the baker node is scaled `cell_px/TILE` to fill
+## the larger cells crisply (vector art → no re-authoring). Re-runnable: a
+## live Crisp↔Smooth toggle calls this again at the other resolution.
+func _bake_biome_atlas(cell_px: int) -> void:
+	_atlas_cell_px = cell_px
 	var vp := SubViewport.new()
-	vp.size = Vector2i(TILE, BIOME_COUNT * TILE)
+	vp.size = Vector2i(cell_px, BIOME_COUNT * cell_px)
 	vp.transparent_bg = true
 	vp.render_target_update_mode = SubViewport.UPDATE_ONCE
-	# Don't let the viewport's render texture pick up filter/repeat from the
-	# world — we want crisp 1:1 pixels in the atlas.
 	vp.disable_3d = true
 	add_child(vp)
 	var baker := _AtlasBaker.new()
 	baker.ground = self
+	# Scale the 32px-authored draws up to fill the cell. At 1.0 (Crisp) the
+	# cell is exactly 32px; at 4.0 (Smooth 128px) every draw coord + line
+	# width multiplies, keeping the vector art sharp at the higher res.
+	var s := float(cell_px) / float(TILE)
+	baker.scale = Vector2(s, s)
 	vp.add_child(baker)
 	await RenderingServer.frame_post_draw
 	await RenderingServer.frame_post_draw
@@ -387,25 +561,65 @@ func _bake_biome_atlas() -> void:
 	vp.queue_free()
 	_activate_terrain_shader()
 
-## Swap the placeholder ground_noise material for terrain_blend.gdshader and
-## hand it the baked atlas + biome lookup. After this, _draw() collapses to a
-## single full-coverage rect and per-frame redraws stop — the shader keeps
-## rendering on its own; we only `queue_redraw` when the lookup texture
-## actually changes (apply_tile_change / apply_tile_overrides).
+## Bind the terrain material — terrain_blend.gdshader (Crisp) or
+## terrain_blend_smooth.gdshader (Smooth) — and hand it the baked atlas +
+## lookups. After this, _draw() collapses to a single full-coverage rect and
+## per-frame redraws stop; we only queue_redraw when the lookup texture
+## changes (apply_tile_change / apply_tile_overrides).
 func _activate_terrain_shader() -> void:
 	var mat := ShaderMaterial.new()
-	mat.shader = load("res://shaders/terrain_blend.gdshader") as Shader
+	var shader_path := "res://shaders/terrain_blend_smooth.gdshader" if _terrain_smooth \
+		else "res://shaders/terrain_blend.gdshader"
+	mat.shader = load(shader_path) as Shader
 	mat.set_shader_parameter("atlas",            _biome_atlas_tex)
 	mat.set_shader_parameter("biome_lookup",     _biome_lookup_tex)
 	mat.set_shader_parameter("tint_lookup",      _tint_lookup_tex)
 	mat.set_shader_parameter("world_size_tiles", Vector2(float(COLS), float(ROWS)))
 	mat.set_shader_parameter("tile_px",          float(TILE))
 	mat.set_shader_parameter("atlas_rows",       float(BIOME_COUNT))
+	# Smooth shader needs the atlas cell resolution (decoupled from the 32px
+	# world tile). Only set it on the smooth path so the Crisp shader doesn't
+	# log an unknown-parameter warning.
+	if _terrain_smooth:
+		mat.set_shader_parameter("atlas_cell_px", float(_atlas_cell_px))
 	self.material = mat
 	_atlas_ready = true
 	set_process(false)
 	queue_redraw()
 	atlas_ready.emit()
+
+## ── Terrain-quality preference (Crisp / Smooth) ─────────────────────────────
+## Persisted in user://graphics.cfg, mirroring AudioManager's ConfigFile
+## pattern. Default false = Crisp (original look).
+func _load_terrain_smooth_pref() -> bool:
+	var cfg := ConfigFile.new()
+	if cfg.load(_GRAPHICS_CFG) != OK:
+		return false
+	return bool(cfg.get_value("graphics", "terrain_smooth", false))
+
+func _save_terrain_smooth_pref(on: bool) -> void:
+	var cfg := ConfigFile.new()
+	cfg.load(_GRAPHICS_CFG)   # preserve any other keys
+	cfg.set_value("graphics", "terrain_smooth", on)
+	cfg.save(_GRAPHICS_CFG)
+
+## Public toggle — called from SettingsPanel. Saves the pref, re-bakes the
+## atlas at the new cell resolution, and swaps the material live (no restart).
+## No-ops if already in the requested mode.
+func set_terrain_smooth(on: bool) -> void:
+	if on == _terrain_smooth and _atlas_ready:
+		return
+	_terrain_smooth = on
+	_save_terrain_smooth_pref(on)
+	var cell_px := SMOOTH_CELL_PX if on else TILE
+	# Clear the thumbnail cache — cells changed resolution.
+	_biome_thumb_cache.clear()
+	# Re-bake + re-activate. Fire-and-forget the await via a coroutine so the
+	# caller (a UI button) returns immediately.
+	_rebake_atlas_async(cell_px)
+
+func _rebake_atlas_async(cell_px: int) -> void:
+	await _bake_biome_atlas(cell_px)
 
 ## Dispatcher used by the atlas baker — same routing as _draw_tile but no
 ## edge-blend post pass (the shader will handle inter-biome blending later).
@@ -464,6 +678,50 @@ func _draw_biome_cell(ci: CanvasItem, bid: int, x: int, y: int) -> void:
 		"driftwood_shore": _draw_driftwood_shore(ci, hv, x, y, cx, cy)
 		"wood_bridge":     _draw_wood_bridge(ci, hv, x, y, cx, cy)
 		"stone_bridge":    _draw_stone_bridge(ci, hv, x, y, cx, cy)
+		"plains_wildflower":  _draw_plains_wildflower(ci, hv, x, y, cx, cy)
+		"plains_dry":         _draw_plains_dry(ci, hv, x, y, cx, cy)
+		"oak_dense":          _draw_oak_dense(ci, hv, x, y, cx, cy)
+		"oak_autumn":         _draw_oak_autumn(ci, hv, x, y, cx, cy)
+		"dark_root_tangle":   _draw_dark_root_tangle(ci, hv, x, y, cx, cy)
+		"dark_mushroom_ring": _draw_dark_mushroom_ring(ci, hv, x, y, cx, cy)
+		"swamp_deep_mud":     _draw_swamp_deep_mud(ci, hv, x, y, cx, cy)
+		"ocean_kelp":         _draw_ocean_kelp(ci, hv, x, y, cx, cy)
+		"ocean_deep":         _draw_ocean_deep(ci, hv, x, y, cx, cy)
+		"wheat_field":        _draw_wheat_field(ci, hv, x, y, cx, cy)
+		"tilled_soil":        _draw_tilled_soil(ci, hv, x, y, cx, cy)
+		"pasture":            _draw_pasture(ci, hv, x, y, cx, cy)
+		"vineyard":           _draw_vineyard(ci, hv, x, y, cx, cy)
+		"orchard":            _draw_orchard(ci, hv, x, y, cx, cy)
+		"rubble":             _draw_rubble(ci, hv, x, y, cx, cy)
+		"broken_wall":        _draw_broken_wall(ci, hv, x, y, cx, cy)
+		"cracked_earth":      _draw_cracked_earth(ci, hv, x, y, cx, cy)
+		"scorched_earth":     _draw_scorched_earth(ci, hv, x, y, cx, cy)
+		"cemetery":           _draw_cemetery(ci, hv, x, y, cx, cy)
+		"ancient_ruins":      _draw_ancient_ruins(ci, hv, x, y, cx, cy)
+		"lava_flow":          _draw_lava_flow(ci, hv, x, y, cx, cy)
+		"basalt":             _draw_basalt(ci, hv, x, y, cx, cy)
+		"ash_dune":           _draw_ash_dune(ci, hv, x, y, cx, cy)
+		"geothermal_vent":    _draw_geothermal_vent(ci, hv, x, y, cx, cy)
+		"obsidian_shard":     _draw_obsidian_shard(ci, hv, x, y, cx, cy)
+		"tall_grass":         _draw_tall_grass(ci, hv, x, y, cx, cy)
+		"reeds":              _draw_reeds(ci, hv, x, y, cx, cy)
+		"lily_pads":          _draw_lily_pads(ci, hv, x, y, cx, cy)
+		"dead_grass":         _draw_dead_grass(ci, hv, x, y, cx, cy)
+		"burnt_grass":        _draw_burnt_grass(ci, hv, x, y, cx, cy)
+		"birch_forest":       _draw_birch_forest(ci, hv, x, y, cx, cy)
+		"bamboo_stand":       _draw_bamboo_stand(ci, hv, x, y, cx, cy)
+		"rune_stone_ground":  _draw_rune_stone_ground(ci, hv, x, y, cx, cy)
+		"grave_mound":        _draw_grave_mound(ci, hv, x, y, cx, cy)
+		"longhouse_floor":    _draw_longhouse_floor(ci, hv, x, y, cx, cy)
+		"fire_pit_indoor":    _draw_fire_pit_indoor(ci, hv, x, y, cx, cy)
+		"fur_rug":            _draw_fur_rug(ci, hv, x, y, cx, cy)
+		"pine_snow_dust":     _draw_pine_snow_dust(ci, hv, x, y, cx, cy)
+		"pine_needle_bed":    _draw_pine_needle_bed(ci, hv, x, y, cx, cy)
+		"swamp_bubbling":     _draw_swamp_bubbling(ci, hv, x, y, cx, cy)
+		"mountain_alpine":    _draw_mountain_alpine(ci, hv, x, y, cx, cy)
+		"mountain_granite":   _draw_mountain_granite(ci, hv, x, y, cx, cy)
+		"snow_pristine":      _draw_snow_pristine(ci, hv, x, y, cx, cy)
+		"snow_tracks":        _draw_snow_tracks(ci, hv, x, y, cx, cy)
 		_:             _draw_plains(ci, hv, x, y, cx, cy)
 
 ## THE single entry point for mutating a tile. Nothing else (editor, network,
@@ -557,6 +815,11 @@ func apply_tile_overrides(overrides: Array) -> void:
 		_tint_lookup_tex.update(_tint_lookup_img)
 	_rebuild_impassable_collision()
 	queue_redraw()
+	# Reveal Ground now that the server-persisted terrain has painted at
+	# least once. This is the login-flash fix — until this call fires, the
+	# node stays invisible so the raw procedural map never shows.
+	_overrides_applied = true
+	visible = true
 	# Auto-refresh the minimap so it reflects the server's saved overrides
 	# right after the login burst, without the admin needing to click Save Map.
 	Events.minimap_refresh.emit()
@@ -846,6 +1109,50 @@ func _biome_base_color(biome: String) -> Color:
 		"driftwood_shore": return Color(0.78, 0.70, 0.52)
 		"wood_bridge":     return Color(0.55, 0.38, 0.20)
 		"stone_bridge":    return Color(0.62, 0.60, 0.56)
+		"plains_wildflower":  return Color(0.38, 0.60, 0.24)
+		"plains_dry":         return Color(0.60, 0.62, 0.34)
+		"oak_dense":          return Color(0.16, 0.34, 0.10)
+		"oak_autumn":         return Color(0.62, 0.42, 0.18)
+		"dark_root_tangle":   return Color(0.10, 0.22, 0.10)
+		"dark_mushroom_ring": return Color(0.14, 0.26, 0.12)
+		"swamp_deep_mud":     return Color(0.24, 0.20, 0.12)
+		"ocean_kelp":         return Color(0.08, 0.18, 0.28)
+		"ocean_deep":         return Color(0.02, 0.06, 0.32)
+		"wheat_field":        return Color(0.85, 0.72, 0.30)
+		"tilled_soil":        return Color(0.38, 0.25, 0.15)
+		"pasture":            return Color(0.48, 0.68, 0.28)
+		"vineyard":           return Color(0.44, 0.48, 0.28)
+		"orchard":            return Color(0.28, 0.48, 0.20)
+		"rubble":             return Color(0.50, 0.46, 0.42)
+		"broken_wall":        return Color(0.55, 0.53, 0.48)
+		"cracked_earth":      return Color(0.55, 0.42, 0.28)
+		"scorched_earth":     return Color(0.22, 0.16, 0.12)
+		"cemetery":           return Color(0.32, 0.36, 0.30)
+		"ancient_ruins":      return Color(0.55, 0.52, 0.46)
+		"lava_flow":          return Color(0.95, 0.35, 0.05)
+		"basalt":             return Color(0.18, 0.16, 0.18)
+		"ash_dune":           return Color(0.42, 0.38, 0.35)
+		"geothermal_vent":    return Color(0.32, 0.28, 0.24)
+		"obsidian_shard":     return Color(0.08, 0.06, 0.12)
+		"tall_grass":         return Color(0.30, 0.58, 0.22)
+		"reeds":              return Color(0.35, 0.48, 0.24)
+		"lily_pads":          return Color(0.25, 0.45, 0.60)
+		"dead_grass":         return Color(0.55, 0.52, 0.30)
+		"burnt_grass":        return Color(0.30, 0.26, 0.16)
+		"birch_forest":       return Color(0.55, 0.60, 0.35)
+		"bamboo_stand":       return Color(0.42, 0.62, 0.32)
+		"rune_stone_ground":  return Color(0.40, 0.44, 0.42)
+		"grave_mound":        return Color(0.28, 0.34, 0.22)
+		"longhouse_floor":    return Color(0.38, 0.26, 0.14)
+		"fire_pit_indoor":    return Color(0.24, 0.20, 0.16)
+		"fur_rug":            return Color(0.55, 0.42, 0.28)
+		"pine_snow_dust":     return Color(0.35, 0.48, 0.42)
+		"pine_needle_bed":    return Color(0.24, 0.30, 0.16)
+		"swamp_bubbling":     return Color(0.20, 0.28, 0.18)
+		"mountain_alpine":    return Color(0.50, 0.55, 0.48)
+		"mountain_granite":   return Color(0.48, 0.46, 0.44)
+		"snow_pristine":      return Color(0.95, 0.97, 0.99)
+		"snow_tracks":        return Color(0.75, 0.80, 0.88)
 		_:             return Color(0.30, 0.52, 0.20)
 
 func _draw_tile(biome: String, hv: int, tx: int, ty: int, x: int, y: int) -> void:
@@ -903,6 +1210,50 @@ func _draw_tile(biome: String, hv: int, tx: int, ty: int, x: int, y: int) -> voi
 		"driftwood_shore": _draw_driftwood_shore(self, hv, x, y, cx, cy)
 		"wood_bridge":     _draw_wood_bridge(self, hv, x, y, cx, cy)
 		"stone_bridge":    _draw_stone_bridge(self, hv, x, y, cx, cy)
+		"plains_wildflower":  _draw_plains_wildflower(self, hv, x, y, cx, cy)
+		"plains_dry":         _draw_plains_dry(self, hv, x, y, cx, cy)
+		"oak_dense":          _draw_oak_dense(self, hv, x, y, cx, cy)
+		"oak_autumn":         _draw_oak_autumn(self, hv, x, y, cx, cy)
+		"dark_root_tangle":   _draw_dark_root_tangle(self, hv, x, y, cx, cy)
+		"dark_mushroom_ring": _draw_dark_mushroom_ring(self, hv, x, y, cx, cy)
+		"swamp_deep_mud":     _draw_swamp_deep_mud(self, hv, x, y, cx, cy)
+		"ocean_kelp":         _draw_ocean_kelp(self, hv, x, y, cx, cy)
+		"ocean_deep":         _draw_ocean_deep(self, hv, x, y, cx, cy)
+		"wheat_field":        _draw_wheat_field(self, hv, x, y, cx, cy)
+		"tilled_soil":        _draw_tilled_soil(self, hv, x, y, cx, cy)
+		"pasture":            _draw_pasture(self, hv, x, y, cx, cy)
+		"vineyard":           _draw_vineyard(self, hv, x, y, cx, cy)
+		"orchard":            _draw_orchard(self, hv, x, y, cx, cy)
+		"rubble":             _draw_rubble(self, hv, x, y, cx, cy)
+		"broken_wall":        _draw_broken_wall(self, hv, x, y, cx, cy)
+		"cracked_earth":      _draw_cracked_earth(self, hv, x, y, cx, cy)
+		"scorched_earth":     _draw_scorched_earth(self, hv, x, y, cx, cy)
+		"cemetery":           _draw_cemetery(self, hv, x, y, cx, cy)
+		"ancient_ruins":      _draw_ancient_ruins(self, hv, x, y, cx, cy)
+		"lava_flow":          _draw_lava_flow(self, hv, x, y, cx, cy)
+		"basalt":             _draw_basalt(self, hv, x, y, cx, cy)
+		"ash_dune":           _draw_ash_dune(self, hv, x, y, cx, cy)
+		"geothermal_vent":    _draw_geothermal_vent(self, hv, x, y, cx, cy)
+		"obsidian_shard":     _draw_obsidian_shard(self, hv, x, y, cx, cy)
+		"tall_grass":         _draw_tall_grass(self, hv, x, y, cx, cy)
+		"reeds":              _draw_reeds(self, hv, x, y, cx, cy)
+		"lily_pads":          _draw_lily_pads(self, hv, x, y, cx, cy)
+		"dead_grass":         _draw_dead_grass(self, hv, x, y, cx, cy)
+		"burnt_grass":        _draw_burnt_grass(self, hv, x, y, cx, cy)
+		"birch_forest":       _draw_birch_forest(self, hv, x, y, cx, cy)
+		"bamboo_stand":       _draw_bamboo_stand(self, hv, x, y, cx, cy)
+		"rune_stone_ground":  _draw_rune_stone_ground(self, hv, x, y, cx, cy)
+		"grave_mound":        _draw_grave_mound(self, hv, x, y, cx, cy)
+		"longhouse_floor":    _draw_longhouse_floor(self, hv, x, y, cx, cy)
+		"fire_pit_indoor":    _draw_fire_pit_indoor(self, hv, x, y, cx, cy)
+		"fur_rug":            _draw_fur_rug(self, hv, x, y, cx, cy)
+		"pine_snow_dust":     _draw_pine_snow_dust(self, hv, x, y, cx, cy)
+		"pine_needle_bed":    _draw_pine_needle_bed(self, hv, x, y, cx, cy)
+		"swamp_bubbling":     _draw_swamp_bubbling(self, hv, x, y, cx, cy)
+		"mountain_alpine":    _draw_mountain_alpine(self, hv, x, y, cx, cy)
+		"mountain_granite":   _draw_mountain_granite(self, hv, x, y, cx, cy)
+		"snow_pristine":      _draw_snow_pristine(self, hv, x, y, cx, cy)
+		"snow_tracks":        _draw_snow_tracks(self, hv, x, y, cx, cy)
 		_:             _draw_plains(self, hv, x, y, cx, cy)
 
 	# Biome edge transitions — width / intensity / dither scale vary per biome PAIR:
@@ -1552,99 +1903,112 @@ func _draw_farm_crops(ci: CanvasItem, hv: int, x: int, y: int, _cx: float, _cy: 
 #   3. Small highlight dots (bright rocks catching light) placed
 #      independently of tile boundaries via `(x, y)` hashing
 
-func _draw_plains_hills(ci: CanvasItem, hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
-	# Grass-topped rocky rise. Base is a mottled darker grass than plains
-	# so a cluster of hills reads as "high grass ridge" against surrounding
-	# meadow. Rocks poke through everywhere — dense scree makes the tile
-	# feel elevated + weighty.
-	var base := Color(0.30, 0.48, 0.20) if hv % 3 != 0 else Color(0.26, 0.44, 0.18)
+## Cliff-style rock face base — the shared silhouette shape used by every
+## hill biome. Mirrors _draw_cliff's structure: dark rocky body + sunlit
+## top ridge + deep base shadow + vertical fracture lines + jagged peak
+## silhouette + rubble at the foot. Callers pass a biome-tinted `rock`
+## color; helper does the tint-based shading + calls the biome's own
+## decoration pass afterward.
+func _draw_cliff_hill_base(ci: CanvasItem, hv: int, x: int, y: int,
+		cx: float, cy: float, rock: Color) -> void:
+	var base := rock if hv % 3 != 0 else rock.darkened(0.10)
 	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
-	# Rock outcrops — 6 rocks per tile, positions seeded from WORLD coords
-	# so adjacent tiles don't line up their rocks into visible grid rows.
-	var rock := Color(0.55, 0.50, 0.42)
-	var rock_shadow := Color(0.36, 0.32, 0.26)
-	for i in range(6):
-		var nh := (x * 73856 + y * 19349) ^ (i * 83492)
-		var sx := x + ((nh >> 3) & 27)
-		var sy := y + ((nh >> 8) & 27)
-		var sz := 2 + ((nh >> 12) & 2)
-		ci.draw_rect(Rect2(sx, sy, sz, sz), rock)
-		ci.draw_rect(Rect2(sx, sy + sz - 1, sz, 1), rock_shadow)
-	# Sparse grass tufts filling gaps.
+	# Sunlit top ridge + deep base shadow — matches cliff's fake-height cue.
+	ci.draw_rect(Rect2(x, y, TILE, 5), base.lightened(0.26))
+	ci.draw_rect(Rect2(x, y + TILE - 7, TILE, 7), base.darkened(0.40))
+	# Vertical fracture columns — 4 lines running the tile height, positions
+	# derived from a per-tile hash so adjacent tiles don't line their
+	# fractures up into a striped grid.
+	var h2 := _tile_hash2(x, y, 6)
+	var frac := base.darkened(0.32)
+	for i in range(4):
+		var gi := (h2 + i * 1361) & 0xFFFF
+		var fx := float(x + 3 + gi % 26)
+		ci.draw_line(Vector2(fx, float(y) + 4.0),
+				Vector2(fx + 1.0, float(y) + float(TILE) - 4.0),
+				frac, 1.0)
+	# Jagged peak silhouette near the top edge — pushes the "cliff face"
+	# read even at wide zoom.
+	ci.draw_colored_polygon(PackedVector2Array([
+		Vector2(float(x) + 4, float(y) + 8),
+		Vector2(cx,            float(y) + 1),
+		Vector2(float(x) + TILE - 4, float(y) + 9)]),
+		base.lightened(0.16))
+	# Rubble at the foot — irregular so a cluster of hills doesn't stripe
+	# horizontally along tile boundaries.
+	if hv % 2 == 0:
+		ci.draw_circle(Vector2(cx - 6.0, cy + 9.0), 2.0, base.darkened(0.22))
+		ci.draw_circle(Vector2(cx + 7.0, cy + 10.0), 1.6, base.darkened(0.28))
+
+
+func _draw_plains_hills(ci: CanvasItem, hv: int, x: int, y: int, cx: float, cy: float) -> void:
+	# Green-tinted rock cliff — plains-side elevation. Cliff structure with
+	# grass tufts sprouting from cracks in the rock.
+	_draw_cliff_hill_base(ci, hv, x, y, cx, cy, Color(0.35, 0.42, 0.28))
+	# Grass tufts on the ridge top + growing between fracture cracks.
+	var grass := Color(0.34, 0.60, 0.22)
 	for i in range(3):
-		var nh2 := (x * 47143 + y * 65867) ^ (i * 24029)
-		var sx2 := x + ((nh2 >> 3) & 29)
-		var sy2 := y + ((nh2 >> 9) & 29)
-		ci.draw_rect(Rect2(sx2, sy2, 1, 2), base.darkened(0.35))
+		var nh := (x * 73856 + y * 19349) ^ (i * 83492)
+		var sx := x + 4 + ((nh >> 3) & 24)
+		var sy := y + 2 + ((nh >> 8) & 6)
+		ci.draw_rect(Rect2(sx, sy, 1, 2), grass)
+	# Occasional yellow wildflower peeking through the rocks.
+	if hv % 7 == 0:
+		ci.draw_circle(Vector2(float(x) + 22.0, float(y) + 12.0), 1.0,
+				Color(0.98, 0.88, 0.20))
 
 
-func _draw_oak_hills(ci: CanvasItem, hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
-	# Wooded rocky slope. Darker forest-floor base with big moss-covered
-	# stones. Adjacent tiles read as one forested ridge.
-	var base := Color(0.20, 0.38, 0.14) if hv % 3 == 0 else Color(0.17, 0.34, 0.12)
-	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
-	# Big moss-covered boulders (2-3 per tile).
-	var moss := Color(0.30, 0.44, 0.20)
-	var stone := Color(0.42, 0.40, 0.36)
+func _draw_oak_hills(ci: CanvasItem, hv: int, x: int, y: int, cx: float, cy: float) -> void:
+	# Cliff face draped in moss + dark-forest tint. Reads as "rocky ridge
+	# poking out of the oak canopy."
+	_draw_cliff_hill_base(ci, hv, x, y, cx, cy, Color(0.28, 0.32, 0.22))
+	# Moss patches — soft green blobs on the upper face where light hits.
+	var moss := Color(0.30, 0.48, 0.20, 0.85)
 	for i in range(2):
 		var nh := (x * 82471 + y * 39847) ^ (i * 91201)
-		var cxx := x + 4 + ((nh >> 3) & 23)
-		var cyy := y + 4 + ((nh >> 8) & 23)
-		ci.draw_circle(Vector2(float(cxx), float(cyy)), 4.0, stone)
-		ci.draw_circle(Vector2(float(cxx - 1), float(cyy - 2)), 2.5, moss)
-	# Small pebbles filling.
-	for i in range(4):
-		var nh2 := (x * 17389 + y * 42107) ^ (i * 55403)
-		var px := x + ((nh2 >> 3) & 29)
-		var py := y + ((nh2 >> 9) & 29)
-		ci.draw_rect(Rect2(px, py, 2, 2), stone.darkened(0.15))
+		var mx := x + 6 + ((nh >> 3) & 20)
+		var my := y + 4 + ((nh >> 8) & 10)
+		ci.draw_circle(Vector2(float(mx), float(my)), 3.0, moss)
+	# Fallen acorn/leaf specks at the base.
+	if hv % 5 == 0:
+		ci.draw_circle(Vector2(float(x) + 8.0, float(y) + 24.0), 1.2,
+				Color(0.45, 0.28, 0.12))
 
 
-func _draw_pine_hills(ci: CanvasItem, hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
-	# Steep pine slopes — very dark forest floor with jagged rocks.
-	var base := Color(0.12, 0.28, 0.14) if hv % 3 == 0 else Color(0.10, 0.24, 0.12)
-	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
-	# Jagged dark rocks scattered densely.
-	var rock := Color(0.32, 0.30, 0.28)
-	for i in range(7):
-		var nh := (x * 63151 + y * 24631) ^ (i * 47921)
-		var sx := x + ((nh >> 3) & 27)
-		var sy := y + ((nh >> 8) & 27)
-		var sz := 2 + ((nh >> 12) & 2)
-		ci.draw_rect(Rect2(sx, sy, sz, sz), rock)
-	# Fallen needles as short brown lines — random direction per world pos.
-	var needle_dark := Color(0.22, 0.14, 0.08)
+func _draw_pine_hills(ci: CanvasItem, hv: int, x: int, y: int, cx: float, cy: float) -> void:
+	# Steep dark rock face — pine forest tint (cooler / bluer than oak).
+	_draw_cliff_hill_base(ci, hv, x, y, cx, cy, Color(0.20, 0.28, 0.24))
+	# Pine needles scattered across the rock face — short brown lines
+	# suggesting fallen debris caught in the cracks.
+	var needle := Color(0.28, 0.18, 0.10)
 	for i in range(4):
-		var nh2 := (x * 12583 + y * 96731) ^ (i * 28471)
-		var nx := x + ((nh2 >> 3) & 29)
-		var ny := y + ((nh2 >> 9) & 29)
-		var dx := 2 - int((nh2 >> 15) & 5)
-		var dy := 1 + int((nh2 >> 18) & 3)
+		var nh := (x * 12583 + y * 96731) ^ (i * 28471)
+		var nx := x + ((nh >> 3) & 28)
+		var ny := y + 3 + ((nh >> 9) & 22)
+		var dx := 2 - int((nh >> 15) & 5)
+		var dy := 1 + int((nh >> 18) & 3)
 		ci.draw_line(Vector2(float(nx), float(ny)),
 				Vector2(float(nx + dx), float(ny + dy)),
-				needle_dark, 1.0)
+				needle, 1.0)
 
 
-func _draw_snow_hills(ci: CanvasItem, hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
-	# Frozen peaks — bright white base with dark cold rock poking through.
-	var base := Color(0.90, 0.94, 0.98) if hv % 3 != 0 else Color(0.85, 0.90, 0.96)
-	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
-	# Exposed rock outcrops — grey-blue stones.
-	var stone := Color(0.55, 0.60, 0.68)
-	var stone_dark := Color(0.42, 0.48, 0.58)
-	for i in range(4):
-		var nh := (x * 78493 + y * 21073) ^ (i * 59217)
-		var sx := x + 2 + ((nh >> 3) & 25)
-		var sy := y + 2 + ((nh >> 8) & 25)
-		var sz := 3 + ((nh >> 12) & 2)
-		ci.draw_rect(Rect2(sx, sy, sz, sz), stone)
-		ci.draw_rect(Rect2(sx, sy + sz - 1, sz, 1), stone_dark)
-	# Powdery snow bumps highlight.
+func _draw_snow_hills(ci: CanvasItem, hv: int, x: int, y: int, cx: float, cy: float) -> void:
+	# White/blue rock face — cliff structure lit as ice. Cool palette
+	# reads as frozen elevation.
+	_draw_cliff_hill_base(ci, hv, x, y, cx, cy, Color(0.62, 0.72, 0.85))
+	# Snowdrift piles clinging to the ledges — bright white puffs.
+	var snow := Color(1.0, 1.0, 1.0)
 	for i in range(3):
-		var nh2 := (x * 33871 + y * 84109) ^ (i * 71203)
-		var px := x + ((nh2 >> 3) & 29)
-		var py := y + ((nh2 >> 9) & 29)
-		ci.draw_circle(Vector2(float(px), float(py)), 1.5, Color(1.0, 1.0, 1.0))
+		var nh := (x * 33871 + y * 84109) ^ (i * 71203)
+		var px := x + 3 + ((nh >> 3) & 24)
+		var py := y + 2 + ((nh >> 8) & 8)
+		ci.draw_circle(Vector2(float(px), float(py)), 1.6, snow)
+	# Icicle hanging under the ridge — sparse.
+	if hv % 6 == 0:
+		var ix := float(x) + 18.0
+		var iy := float(y) + 6.0
+		ci.draw_line(Vector2(ix, iy), Vector2(ix, iy + 4.0),
+				Color(0.72, 0.82, 0.95), 1.5)
 
 
 func _draw_forest_edge(ci: CanvasItem, hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
@@ -1761,105 +2125,68 @@ func _draw_clearing(ci: CanvasItem, hv: int, x: int, y: int, _cx: float, _cy: fl
 		ci.draw_rect(Rect2(gx, gy, 1, 2), Color(0.24, 0.42, 0.16))
 
 
-func _draw_ashlands_hills(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
-	# Volcanic slope — dark charred rock, cracks, ember flecks. Seamless
-	# (world-coord seeded) so a cluster reads as one lava plateau.
-	var base := Color(0.34, 0.16, 0.08)
-	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
-	# Dark charred rock chunks.
-	var rock := Color(0.20, 0.10, 0.06)
-	for i in range(6):
-		var nh := (x * 91129 + y * 42421) ^ (i * 33619)
-		var sx := x + ((nh >> 3) & 27)
-		var sy := y + ((nh >> 8) & 27)
-		var sz := 2 + ((nh >> 12) & 2)
-		ci.draw_rect(Rect2(sx, sy, sz, sz), rock)
-	# Lava cracks — glowing orange lines.
+func _draw_ashlands_hills(ci: CanvasItem, hv: int, x: int, y: int, cx: float, cy: float) -> void:
+	# Dark charred cliff face with lava seams glowing through the fractures.
+	_draw_cliff_hill_base(ci, hv, x, y, cx, cy, Color(0.30, 0.15, 0.08))
+	# Lava-glow cracks — bright orange lines cutting diagonally through
+	# the rock, overwriting the darker fractures from the base helper.
 	var lava := Color(0.98, 0.42, 0.10)
 	for i in range(2):
-		var nh2 := (x * 24631 + y * 78493) ^ (i * 62983)
-		var sx2 := x + 2 + ((nh2 >> 3) & 25)
-		var sy2 := y + 2 + ((nh2 >> 8) & 25)
-		var dx := 3 - int((nh2 >> 12) & 5)
-		var dy := 2 + int((nh2 >> 15) & 3)
-		ci.draw_line(Vector2(float(sx2), float(sy2)),
-				Vector2(float(sx2 + dx), float(sy2 + dy)), lava, 1.0)
-	# Ember specks.
+		var nh := (x * 24631 + y * 78493) ^ (i * 62983)
+		var sx := x + 2 + ((nh >> 3) & 25)
+		var sy := y + 4 + ((nh >> 8) & 20)
+		var dx := 3 - int((nh >> 12) & 5)
+		var dy := 2 + int((nh >> 15) & 3)
+		ci.draw_line(Vector2(float(sx), float(sy)),
+				Vector2(float(sx + dx), float(sy + dy)), lava, 1.0)
+	# Ember specks at the rock's base — hot rocks catching light.
 	for i in range(3):
-		var nh3 := (x * 55927 + y * 14713) ^ (i * 88129)
-		var ex := x + ((nh3 >> 3) & 29)
-		var ey := y + ((nh3 >> 9) & 29)
+		var nh2 := (x * 55927 + y * 14713) ^ (i * 88129)
+		var ex := x + ((nh2 >> 3) & 29)
+		var ey := y + 16 + ((nh2 >> 9) & 12)
 		ci.draw_rect(Rect2(ex, ey, 1, 1), Color(1.0, 0.55, 0.15))
 
 
-func _draw_helheim_hills(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
-	# Otherworldly purple ridge — dark stones + wisp glows. Seamless.
-	var base := Color(0.28, 0.08, 0.38)
-	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
-	# Rock chunks in a darker hue.
-	var rock := Color(0.16, 0.04, 0.24)
-	for i in range(6):
-		var nh := (x * 38491 + y * 61283) ^ (i * 47927)
-		var rx := x + ((nh >> 3) & 27)
-		var ry := y + ((nh >> 8) & 27)
-		var sz := 2 + ((nh >> 12) & 2)
-		ci.draw_rect(Rect2(rx, ry, sz, sz), rock)
-	# Wisp glow specks.
+func _draw_helheim_hills(ci: CanvasItem, hv: int, x: int, y: int, cx: float, cy: float) -> void:
+	# Deep purple cliff — otherworldly ridge with wisps floating around it.
+	_draw_cliff_hill_base(ci, hv, x, y, cx, cy, Color(0.32, 0.14, 0.42))
+	# Wisp glows — soft purple orbs on the rock face + at the base.
+	var wisp := Color(0.72, 0.60, 0.95, 0.65)
 	for i in range(3):
-		var nh2 := (x * 71203 + y * 29473) ^ (i * 54781)
-		var sx := x + ((nh2 >> 3) & 29)
-		var sy := y + ((nh2 >> 9) & 29)
-		ci.draw_circle(Vector2(float(sx), float(sy)), 1.4,
-				Color(0.72, 0.60, 0.95, 0.65))
+		var nh := (x * 71203 + y * 29473) ^ (i * 54781)
+		var sx := x + 3 + ((nh >> 3) & 24)
+		var sy := y + 4 + ((nh >> 8) & 22)
+		ci.draw_circle(Vector2(float(sx), float(sy)), 1.4, wisp)
 
 
-func _draw_rocky_hills(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
-	# Grey stone mountain terrain. Dense scree covers the whole tile so
-	# adjacent tiles blend into one big rocky region. Seamless.
-	var base := Color(0.42, 0.40, 0.36)
-	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
-	# Dense scree stones — 8 per tile.
-	for i in range(8):
-		var nh := (x * 17389 + y * 82471) ^ (i * 26981)
-		var sx := x + ((nh >> 3) & 27)
-		var sy := y + ((nh >> 8) & 27)
-		var sz := 2 + ((nh >> 12) & 2)
-		var stone_shade: Color = base.darkened(0.25) if ((nh >> 16) & 1) == 0 else base.darkened(0.40)
-		ci.draw_rect(Rect2(sx, sy, sz, sz), stone_shade)
-		# Small shadow on the south edge.
-		ci.draw_rect(Rect2(sx, sy + sz - 1, sz, 1), Color(0.22, 0.20, 0.18))
-	# Occasional bright highlight (rock catching light).
-	for i in range(2):
-		var nh2 := (x * 33871 + y * 92401) ^ (i * 51119)
-		var hx := x + ((nh2 >> 3) & 29)
-		var hy := y + ((nh2 >> 9) & 29)
-		ci.draw_rect(Rect2(hx, hy, 1, 1), Color(0.72, 0.68, 0.62))
+func _draw_rocky_hills(ci: CanvasItem, hv: int, x: int, y: int, cx: float, cy: float) -> void:
+	# The "default" cliff-tinted hill — grey rock face, matches base cliff
+	# palette. Reads as an unremarkable rocky ridge — foothills.
+	_draw_cliff_hill_base(ci, hv, x, y, cx, cy, Color(0.42, 0.40, 0.36))
+	# Bright scree specks catching the top light — 3 tiny highlights.
+	var hi := Color(0.78, 0.74, 0.66)
+	for i in range(3):
+		var nh := (x * 33871 + y * 92401) ^ (i * 51119)
+		var hx := x + 4 + ((nh >> 3) & 24)
+		var hy := y + 4 + ((nh >> 9) & 8)
+		ci.draw_rect(Rect2(hx, hy, 1, 1), hi)
 
 
-func _draw_sand_hills(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
-	# Dune slopes — tan sand with continuous ripple lines that flow across
-	# tile seams. Ripple phase uses world x (not local i) so a cluster of
-	# sand_hills tiles forms one big undulating dune field.
-	var base := Color(0.80, 0.70, 0.48)
-	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
-	# Ripple crests — sinusoidal, phase indexed by world x for seam-free flow.
-	var crest := base.darkened(0.18)
-	var trough := base.darkened(0.10)
-	for row in range(4):
-		var yy: float = float(y + 4 + row * 7)
-		for i in range(0, TILE, 1):
+func _draw_sand_hills(ci: CanvasItem, hv: int, x: int, y: int, cx: float, cy: float) -> void:
+	# Sandstone cliff face — warm tan cliff tinted like weathered dune-rock.
+	_draw_cliff_hill_base(ci, hv, x, y, cx, cy, Color(0.66, 0.54, 0.36))
+	# Wind-worn sand ripples across the lower portion — thin horizontal
+	# curves suggesting drift accumulation at the cliff base.
+	var sand := Color(0.85, 0.72, 0.48)
+	var dark := Color(0.55, 0.42, 0.26)
+	for row in range(2):
+		var yy: float = float(y + 22 + row * 4)
+		for i in range(0, TILE, 2):
 			var wx: int = x + i
-			# Continuous phase — every tile picks up where the previous left off.
 			var phase: float = float(wx) * 0.42 + float(row) * 1.1
 			var wave: float = sin(phase)
-			var col: Color = crest if wave > 0.0 else trough
-			ci.draw_rect(Rect2(wx, int(yy + wave * 1.4), 1, 1), col)
-	# Scattered sand grains for texture.
-	for i in range(4):
-		var nh := (x * 63151 + y * 47921) ^ (i * 12583)
-		var gx := x + ((nh >> 3) & 29)
-		var gy := y + ((nh >> 9) & 29)
-		ci.draw_rect(Rect2(gx, gy, 1, 1), base.darkened(0.22))
+			var col: Color = sand if wave > 0.0 else dark
+			ci.draw_rect(Rect2(wx, int(yy + wave * 0.8), 1, 1), col)
 
 
 func _draw_cliff_scree(ci: CanvasItem, hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
@@ -2043,6 +2370,7 @@ func _draw_stone_bridge(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _c
 	# Running-bond brick pattern. Two rows of 4 bricks each, offset by half.
 	var mortar := base.darkened(0.35)
 	# Row 1 (top half) — full-tile brick divisions at 0, 8, 16, 24.
+	@warning_ignore("integer_division")
 	var row1_y: int = deck_top + deck_h / 2
 	ci.draw_line(Vector2(float(x), float(row1_y)),
 			Vector2(float(x + TILE), float(row1_y)), mortar, 1.0)
@@ -2072,8 +2400,760 @@ func _draw_bridge_water_band(ci: CanvasItem, x: int, y: int, h: int) -> void:
 	for i in range(0, TILE, 2):
 		var wx: int = x + i
 		var phase: float = float(wx) * 0.42 + t * 2.0
+		@warning_ignore("integer_division")
 		var wy: float = float(y + h / 2) + sin(phase) * float(h) * 0.35
 		ci.draw_rect(Rect2(wx, int(wy), 1, 1), ripple)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ── Expansion #4: 44 new biomes (IDs 50..93). ────────────────────────────────
+# Every draw here uses world-coord-seeded hashes so patterns don't line up
+# across tile seams (carpet-style seamless tiling). Compact bodies — the goal
+# is visual distinction at a glance, not photo-realism.
+
+# ── Grass-family variants (in shader's is_grass block 50..56) ────────────────
+
+func _draw_plains_wildflower(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	var base := Color(0.36, 0.60, 0.24)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Flower dots — cycle through 4 colors (yellow / pink / white / purple).
+	var flowers := [Color(0.98, 0.90, 0.20), Color(0.95, 0.55, 0.75),
+			Color(0.98, 0.98, 0.95), Color(0.72, 0.42, 0.88)]
+	for i in range(5):
+		var nh := (x * 73856 + y * 19349) ^ (i * 83492)
+		var fx := x + 3 + ((nh >> 3) & 26)
+		var fy := y + 3 + ((nh >> 8) & 26)
+		ci.draw_circle(Vector2(float(fx), float(fy)), 1.4,
+				flowers[(nh >> 12) & 3])
+
+func _draw_plains_dry(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	var base := Color(0.60, 0.62, 0.34)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Dry grass tufts + bare-earth patches.
+	var earth := Color(0.55, 0.44, 0.24)
+	for i in range(3):
+		var nh := (x * 42713 + y * 91247) ^ (i * 55927)
+		var ex := x + 4 + ((nh >> 3) & 24)
+		var ey := y + 4 + ((nh >> 8) & 24)
+		ci.draw_circle(Vector2(float(ex), float(ey)), 2.5, earth)
+	for i in range(4):
+		var nh := (x * 13721 + y * 79231) ^ (i * 22579)
+		var gx := x + ((nh >> 3) & 29)
+		var gy := y + ((nh >> 9) & 29)
+		ci.draw_rect(Rect2(gx, gy, 1, 2), Color(0.72, 0.68, 0.32))
+
+func _draw_oak_dense(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	var base := Color(0.14, 0.30, 0.10)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Dense canopy shadows — big overlapping dark blobs.
+	var shade := Color(0.06, 0.18, 0.06)
+	for i in range(3):
+		var nh := (x * 91129 + y * 42421) ^ (i * 33619)
+		var cx := x + 4 + ((nh >> 3) & 24)
+		var cy := y + 4 + ((nh >> 8) & 24)
+		ci.draw_circle(Vector2(float(cx), float(cy)), 5.0, shade)
+	# Occasional bright leaf catching light.
+	for i in range(2):
+		var nh := (x * 24631 + y * 78493) ^ (i * 62983)
+		var lx := x + ((nh >> 3) & 29)
+		var ly := y + ((nh >> 9) & 29)
+		ci.draw_rect(Rect2(lx, ly, 1, 1), Color(0.35, 0.55, 0.18))
+
+func _draw_oak_autumn(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	var base := Color(0.42, 0.32, 0.14)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Fallen autumn leaves — orange/red/yellow scatter.
+	var leaves := [Color(0.92, 0.42, 0.15), Color(0.98, 0.65, 0.20),
+			Color(0.75, 0.20, 0.10)]
+	for i in range(6):
+		var nh := (x * 55927 + y * 14713) ^ (i * 88129)
+		var lx := x + ((nh >> 3) & 29)
+		var ly := y + ((nh >> 9) & 29)
+		ci.draw_circle(Vector2(float(lx), float(ly)), 1.5,
+				leaves[(nh >> 12) % 3])
+
+func _draw_dark_root_tangle(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	var base := Color(0.10, 0.22, 0.10)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Tangled root lines crisscrossing the tile.
+	var root := Color(0.28, 0.18, 0.08)
+	for i in range(4):
+		var nh := (x * 38491 + y * 61283) ^ (i * 47927)
+		var sx := x + 2 + ((nh >> 3) & 26)
+		var sy := y + 2 + ((nh >> 8) & 26)
+		var ex := sx + 4 - int((nh >> 12) & 8)
+		var ey := sy + 4 - int((nh >> 16) & 8)
+		ci.draw_line(Vector2(float(sx), float(sy)),
+				Vector2(float(ex), float(ey)), root, 1.5)
+
+func _draw_dark_mushroom_ring(ci: CanvasItem, _hv: int, x: int, y: int, cx: float, cy: float) -> void:
+	var base := Color(0.14, 0.26, 0.12)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Ring of small red-cap mushrooms.
+	var cap := Color(0.80, 0.15, 0.15)
+	var stem := Color(0.95, 0.90, 0.82)
+	for i in range(6):
+		var ang := float(i) * TAU / 6.0
+		var mx := cx + cos(ang) * 10.0
+		var my := cy + sin(ang) * 10.0
+		ci.draw_rect(Rect2(int(mx) - 1, int(my), 2, 3), stem)
+		ci.draw_colored_polygon(PackedVector2Array([
+				Vector2(mx - 2.5, my), Vector2(mx + 2.5, my),
+				Vector2(mx, my - 3)]), cap)
+
+func _draw_swamp_deep_mud(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	var base := Color(0.24, 0.20, 0.12)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Wet mud puddles + bubbles.
+	var wet := Color(0.16, 0.14, 0.08)
+	for i in range(3):
+		var nh := (x * 24631 + y * 78493) ^ (i * 62983)
+		var px := x + 4 + ((nh >> 3) & 24)
+		var py := y + 4 + ((nh >> 8) & 24)
+		ci.draw_circle(Vector2(float(px), float(py)), 4.0, wet)
+	# Bubble highlights.
+	for i in range(2):
+		var nh := (x * 55927 + y * 14713) ^ (i * 88129)
+		var bx := x + ((nh >> 3) & 29)
+		var by := y + ((nh >> 9) & 29)
+		ci.draw_circle(Vector2(float(bx), float(by)), 0.8,
+				Color(0.55, 0.55, 0.40, 0.55))
+
+# ── Water variants (in shader's is_water block 57..58) ───────────────────────
+
+func _draw_ocean_kelp(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	var base := Color(0.08, 0.18, 0.28)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Vertical kelp strands.
+	var kelp := Color(0.15, 0.35, 0.20, 0.85)
+	for i in range(3):
+		var nh := (x * 42713 + y * 91247) ^ (i * 55927)
+		var kx := x + 4 + ((nh >> 3) & 24)
+		var y1 := y + ((nh >> 8) & 8)
+		var y2 := y + TILE - int(((nh >> 12) & 6))
+		ci.draw_line(Vector2(float(kx), float(y1)),
+				Vector2(float(kx), float(y2)), kelp, 2.0)
+	# Ripple on top.
+	var t: float = float(Time.get_ticks_msec()) / 1000.0
+	for i in range(0, TILE, 4):
+		var wx := x + i
+		var wy: float = float(y + 4) + sin(t * 2.0 + float(wx) * 0.4) * 1.0
+		ci.draw_circle(Vector2(float(wx), wy), 0.6,
+				Color(0.40, 0.60, 0.75, 0.60))
+
+func _draw_ocean_deep(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	var base := Color(0.02, 0.06, 0.32)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Slightly darker abyssal streaks (currents in the deep).
+	var dark := Color(0.01, 0.03, 0.18)
+	for i in range(2):
+		var nh := (x * 91129 + y * 42421) ^ (i * 33619)
+		var dy := y + 6 + ((nh >> 3) & 20)
+		ci.draw_line(Vector2(float(x), float(dy)),
+				Vector2(float(x + TILE), float(dy + 1)), dark, 1.5)
+	# Occasional faint bioluminescence speck.
+	if (x * 13 + y * 17) % 11 == 0:
+		ci.draw_circle(Vector2(float(x) + 16.0, float(y) + 16.0), 0.9,
+				Color(0.55, 0.85, 0.95, 0.65))
+
+# ── Farming (59..63) ─────────────────────────────────────────────────────────
+
+func _draw_wheat_field(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	var base := Color(0.82, 0.70, 0.30)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Vertical wheat stalks — dense.
+	var stalk := Color(0.62, 0.50, 0.20)
+	var grain := Color(0.98, 0.85, 0.42)
+	for i in range(0, TILE, 3):
+		var sx := x + i + ((x * 7 + i) % 2)
+		if sx >= x + TILE:
+			continue
+		ci.draw_line(Vector2(float(sx), float(y + 6)),
+				Vector2(float(sx), float(y + TILE - 2)), stalk, 1.0)
+		# Grain head on top.
+		ci.draw_rect(Rect2(sx - 1, y + 4, 2, 3), grain)
+
+func _draw_tilled_soil(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	var base := Color(0.38, 0.25, 0.15)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Furrow lines running horizontally.
+	var furrow := base.darkened(0.30)
+	for row in range(4):
+		var fy := y + 4 + row * 7
+		ci.draw_line(Vector2(float(x), float(fy)),
+				Vector2(float(x + TILE), float(fy)), furrow, 1.5)
+	# Small clod highlights on the ridges.
+	var hi := base.lightened(0.15)
+	for row in range(3):
+		var hy := y + 7 + row * 7
+		ci.draw_line(Vector2(float(x + 2), float(hy)),
+				Vector2(float(x + TILE - 2), float(hy)), hi, 0.8)
+
+func _draw_pasture(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	var base := Color(0.48, 0.68, 0.28)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Shorter grass than plains + occasional cow-pat.
+	var short := Color(0.42, 0.60, 0.24)
+	for i in range(5):
+		var nh := (x * 47143 + y * 65867) ^ (i * 24029)
+		var gx := x + ((nh >> 3) & 29)
+		var gy := y + ((nh >> 9) & 29)
+		ci.draw_rect(Rect2(gx, gy, 1, 1), short)
+	if ((x * 11 + y * 29) & 7) == 0:
+		ci.draw_circle(Vector2(float(x) + 16.0, float(y) + 20.0), 2.0,
+				Color(0.36, 0.28, 0.16))
+
+func _draw_vineyard(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	var base := Color(0.44, 0.48, 0.28)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Vine rows — brown trellis lines with purple grape clusters.
+	var trellis := Color(0.42, 0.28, 0.14)
+	var grape := Color(0.42, 0.20, 0.55)
+	for row in range(3):
+		var ry := y + 5 + row * 9
+		ci.draw_line(Vector2(float(x), float(ry)),
+				Vector2(float(x + TILE), float(ry)), trellis, 1.5)
+		# Two grape clusters per row.
+		ci.draw_circle(Vector2(float(x) + 8.0, float(ry + 3)), 2.0, grape)
+		ci.draw_circle(Vector2(float(x) + 22.0, float(ry + 3)), 2.0, grape)
+
+func _draw_orchard(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	var base := Color(0.34, 0.52, 0.22)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# One canopy tree centered in the tile.
+	var canopy := Color(0.20, 0.42, 0.15)
+	var trunk := Color(0.35, 0.22, 0.10)
+	var fruit := Color(0.85, 0.20, 0.15)
+	ci.draw_rect(Rect2(x + 15, y + 16, 2, 8), trunk)
+	ci.draw_circle(Vector2(float(x) + 16.0, float(y) + 13.0), 7.0, canopy)
+	# Three visible fruits.
+	ci.draw_circle(Vector2(float(x) + 13.0, float(y) + 11.0), 1.2, fruit)
+	ci.draw_circle(Vector2(float(x) + 18.0, float(y) + 14.0), 1.2, fruit)
+	ci.draw_circle(Vector2(float(x) + 16.0, float(y) + 10.0), 1.2, fruit)
+
+# ── Ruins / damage (64..69) ──────────────────────────────────────────────────
+
+func _draw_rubble(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	var base := Color(0.48, 0.44, 0.40)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Scattered stone chunks of varying sizes.
+	for i in range(6):
+		var nh := (x * 82471 + y * 39847) ^ (i * 91201)
+		var sx := x + ((nh >> 3) & 27)
+		var sy := y + ((nh >> 8) & 27)
+		var sz := 2 + ((nh >> 12) & 3)
+		var shade: Color = base.darkened(0.15) if ((nh >> 16) & 1) == 0 \
+				else base.darkened(0.30)
+		ci.draw_rect(Rect2(sx, sy, sz, sz), shade)
+
+func _draw_broken_wall(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	var base := Color(0.55, 0.53, 0.48)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Broken stone-brick pattern — some bricks missing, some cracked.
+	var brick := base.darkened(0.10)
+	var mortar := base.darkened(0.35)
+	var missing := base.darkened(0.55)
+	for row in range(4):
+		for col in range(4):
+			var bx := x + col * 8 + (row % 2) * 4
+			var by := y + row * 8
+			if bx + 6 >= x + TILE or by + 6 >= y + TILE:
+				continue
+			# Deterministic pattern: some bricks missing.
+			if ((bx * 3 + by * 5) & 7) < 5:
+				ci.draw_rect(Rect2(bx, by, 6, 6), brick)
+				ci.draw_rect(Rect2(bx, by + 5, 6, 1), mortar)
+			else:
+				ci.draw_rect(Rect2(bx, by, 6, 6), missing)
+
+func _draw_cracked_earth(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	var base := Color(0.55, 0.42, 0.28)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Cracks — dark jagged lines across the tile.
+	var crack := base.darkened(0.55)
+	for i in range(4):
+		var nh := (x * 78493 + y * 21073) ^ (i * 59217)
+		var sx := x + ((nh >> 3) & 28)
+		var sy := y + ((nh >> 8) & 28)
+		var ex := sx + 4 - int((nh >> 12) & 8)
+		var ey := sy + 5 - int((nh >> 16) & 10)
+		ci.draw_line(Vector2(float(sx), float(sy)),
+				Vector2(float(ex), float(ey)), crack, 1.0)
+
+func _draw_scorched_earth(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	var base := Color(0.22, 0.16, 0.12)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Charred patches + occasional smoldering ember.
+	var char_col := Color(0.10, 0.06, 0.04)
+	for i in range(3):
+		var nh := (x * 33871 + y * 84109) ^ (i * 71203)
+		var cx := x + 3 + ((nh >> 3) & 25)
+		var cy := y + 3 + ((nh >> 8) & 25)
+		ci.draw_circle(Vector2(float(cx), float(cy)), 3.5, char_col)
+	if ((x * 13 + y * 17) & 5) == 0:
+		ci.draw_circle(Vector2(float(x) + 16.0, float(y) + 20.0), 1.0,
+				Color(1.0, 0.42, 0.10))
+
+func _draw_cemetery(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	var base := Color(0.32, 0.36, 0.30)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# One headstone centered in the tile.
+	var stone := Color(0.65, 0.65, 0.62)
+	var stone_dk := Color(0.42, 0.42, 0.40)
+	# Rounded top gravestone shape.
+	ci.draw_rect(Rect2(x + 12, y + 12, 8, 12), stone)
+	ci.draw_circle(Vector2(float(x) + 16.0, float(y) + 12.0), 4.0, stone)
+	# Cross carved on the face.
+	ci.draw_line(Vector2(float(x) + 16.0, float(y) + 14.0),
+			Vector2(float(x) + 16.0, float(y) + 20.0), stone_dk, 1.2)
+	ci.draw_line(Vector2(float(x) + 13.0, float(y) + 16.0),
+			Vector2(float(x) + 19.0, float(y) + 16.0), stone_dk, 1.2)
+	# Grass tufts around the base.
+	for i in range(3):
+		var nh := (x * 47143 + y * 65867) ^ (i * 24029)
+		var gx := x + ((nh >> 3) & 29)
+		var gy := y + 24 + ((nh >> 9) & 6)
+		ci.draw_rect(Rect2(gx, gy, 1, 2), Color(0.25, 0.42, 0.20))
+
+func _draw_ancient_ruins(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	var base := Color(0.55, 0.52, 0.46)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Broken column stub — vertical rectangle with jagged top.
+	var col := Color(0.70, 0.65, 0.58)
+	var col_dk := Color(0.45, 0.42, 0.36)
+	ci.draw_rect(Rect2(x + 12, y + 8, 8, 20), col)
+	ci.draw_rect(Rect2(x + 12, y + 28, 8, 2), col_dk)
+	# Jagged broken top. Every zigzag vertex must stay AT or ABOVE the
+	# baseline (y+8) — the closing edge runs along y+8, so a vertex dipping
+	# below it makes the polygon self-intersect and triangulation fails.
+	ci.draw_colored_polygon(PackedVector2Array([
+			Vector2(float(x) + 12.0, float(y) + 8.0),
+			Vector2(float(x) + 14.0, float(y) + 4.0),
+			Vector2(float(x) + 16.0, float(y) + 7.0),
+			Vector2(float(x) + 18.0, float(y) + 5.0),
+			Vector2(float(x) + 20.0, float(y) + 8.0)]), col)
+	# Moss patch.
+	ci.draw_circle(Vector2(float(x) + 14.0, float(y) + 20.0), 2.0,
+			Color(0.35, 0.55, 0.28, 0.75))
+
+# ── Volcanic / fire (70..74) ─────────────────────────────────────────────────
+
+func _draw_lava_flow(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	var base := Color(0.20, 0.08, 0.05)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Bright molten stream running across the tile.
+	var t: float = float(Time.get_ticks_msec()) / 1000.0
+	var lava := Color(0.98, 0.42, 0.10)
+	var hot := Color(1.0, 0.85, 0.30)
+	for i in range(0, TILE, 1):
+		var wx := x + i
+		var y_center: float = float(y) + 16.0 + sin(t * 1.5 + float(wx) * 0.3) * 3.0
+		# Wide molten band.
+		ci.draw_rect(Rect2(wx, int(y_center) - 3, 1, 6), lava)
+		# Bright core.
+		ci.draw_rect(Rect2(wx, int(y_center) - 1, 1, 2), hot)
+	# Cool crust edges above + below.
+	ci.draw_rect(Rect2(x, y, TILE, 6), base.lightened(0.10))
+	ci.draw_rect(Rect2(x, y + TILE - 6, TILE, 6), base.lightened(0.10))
+
+func _draw_basalt(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	var base := Color(0.18, 0.16, 0.18)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Hexagonal basalt columns — approximated as staggered rectangles.
+	var col := base.lightened(0.12)
+	var edge := base.darkened(0.20)
+	for row in range(3):
+		for c in range(3):
+			var bx := x + c * 10 + (row % 2) * 5
+			var by := y + row * 10
+			if bx + 8 >= x + TILE or by + 8 >= y + TILE:
+				continue
+			ci.draw_rect(Rect2(bx, by, 8, 8), col)
+			ci.draw_rect(Rect2(bx, by, 8, 1), edge)
+			ci.draw_rect(Rect2(bx, by + 7, 8, 1), edge)
+
+func _draw_ash_dune(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	var base := Color(0.42, 0.38, 0.35)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Wind-drifted ash ripples (like sand but darker, greyer).
+	var drift := base.darkened(0.15)
+	for row in range(4):
+		var yy := float(y + 4 + row * 7)
+		for i in range(0, TILE, 2):
+			var wx: int = x + i
+			var phase: float = float(wx) * 0.42 + float(row) * 1.1
+			var wave: float = sin(phase)
+			var col: Color = drift if wave > 0.0 else base.lightened(0.05)
+			ci.draw_rect(Rect2(wx, int(yy + wave * 1.4), 1, 1), col)
+
+func _draw_geothermal_vent(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	var base := Color(0.32, 0.28, 0.24)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Dark vent hole in the center + steam rising.
+	ci.draw_circle(Vector2(float(x) + 16.0, float(y) + 18.0), 5.0,
+			Color(0.10, 0.06, 0.04))
+	ci.draw_circle(Vector2(float(x) + 16.0, float(y) + 18.0), 3.0,
+			Color(0.98, 0.55, 0.15, 0.75))
+	# Rising steam plume — animated.
+	var t: float = float(Time.get_ticks_msec()) / 1000.0
+	var steam := Color(0.85, 0.85, 0.85, 0.45)
+	for i in range(3):
+		var sy: float = float(y) + 12.0 - float(i) * 4.0 + sin(t + float(i)) * 1.0
+		var sx: float = float(x) + 16.0 + cos(t * 0.8 + float(i)) * 2.0
+		ci.draw_circle(Vector2(sx, sy), 2.0 + float(i) * 0.5,
+				Color(steam.r, steam.g, steam.b, steam.a - float(i) * 0.12))
+
+func _draw_obsidian_shard(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	var base := Color(0.08, 0.06, 0.12)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Sharp glass shards — angular triangles with bright edges.
+	var shard := Color(0.20, 0.16, 0.24)
+	var edge := Color(0.55, 0.45, 0.65, 0.85)
+	for i in range(4):
+		var nh := (x * 71203 + y * 29473) ^ (i * 54781)
+		var sx := x + 4 + ((nh >> 3) & 24)
+		var sy := y + 4 + ((nh >> 8) & 24)
+		ci.draw_colored_polygon(PackedVector2Array([
+				Vector2(float(sx), float(sy - 3)),
+				Vector2(float(sx + 3), float(sy + 2)),
+				Vector2(float(sx - 2), float(sy + 3))]), shard)
+		ci.draw_line(Vector2(float(sx), float(sy - 3)),
+				Vector2(float(sx + 3), float(sy + 2)), edge, 1.0)
+
+# ── Vegetation variety (75..81) ──────────────────────────────────────────────
+
+func _draw_tall_grass(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	var base := Color(0.30, 0.58, 0.22)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Dense tall grass blades — 12 vertical lines.
+	var blade := Color(0.22, 0.48, 0.16)
+	var blade_tip := Color(0.42, 0.68, 0.28)
+	for i in range(0, TILE, 3):
+		var bx := x + i + ((x + i) % 2)
+		if bx >= x + TILE:
+			continue
+		var h := 6 + ((bx * 7) % 4)
+		ci.draw_line(Vector2(float(bx), float(y + TILE)),
+				Vector2(float(bx), float(y + TILE - h)), blade, 1.0)
+		ci.draw_rect(Rect2(bx, y + TILE - h, 1, 2), blade_tip)
+
+func _draw_reeds(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	var base := Color(0.30, 0.40, 0.22)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Tall reed stalks with brown seed heads.
+	var stalk := Color(0.42, 0.58, 0.24)
+	var head := Color(0.55, 0.35, 0.15)
+	for i in range(5):
+		var nh := (x * 17389 + y * 42107) ^ (i * 55403)
+		var rx := x + 2 + ((nh >> 3) & 27)
+		var top_y := y + 4 + ((nh >> 8) & 6)
+		ci.draw_line(Vector2(float(rx), float(y + TILE - 2)),
+				Vector2(float(rx), float(top_y)), stalk, 1.0)
+		ci.draw_rect(Rect2(rx - 1, top_y - 2, 2, 3), head)
+
+func _draw_lily_pads(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	# Water background.
+	var water := Color(0.22, 0.42, 0.55)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), water)
+	# Ripple.
+	var ripple := water.lightened(0.15)
+	var t: float = float(Time.get_ticks_msec()) / 1000.0
+	for i in range(0, TILE, 4):
+		var wx := x + i
+		var wy: float = float(y + 10) + sin(t * 2.0 + float(wx) * 0.4) * 1.0
+		ci.draw_rect(Rect2(wx, int(wy), 1, 1), ripple)
+	# 2-3 lily pads floating.
+	var pad := Color(0.32, 0.55, 0.24)
+	var flower := Color(0.98, 0.92, 0.95)
+	for i in range(2):
+		var nh := (x * 42713 + y * 91247) ^ (i * 55927)
+		var px := x + 5 + ((nh >> 3) & 22)
+		var py := y + 5 + ((nh >> 8) & 22)
+		ci.draw_circle(Vector2(float(px), float(py)), 4.0, pad)
+		# Notch cut into the pad (the classic lily pad shape).
+		ci.draw_colored_polygon(PackedVector2Array([
+				Vector2(float(px), float(py)),
+				Vector2(float(px + 4), float(py - 1)),
+				Vector2(float(px + 4), float(py + 1))]), water)
+		if ((nh >> 12) & 3) == 0:
+			ci.draw_circle(Vector2(float(px - 1), float(py)), 1.2, flower)
+
+func _draw_dead_grass(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	var base := Color(0.55, 0.52, 0.30)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Yellowed dry grass tufts + occasional bare patches.
+	var yellow := Color(0.72, 0.65, 0.30)
+	for i in range(5):
+		var nh := (x * 91129 + y * 42421) ^ (i * 33619)
+		var gx := x + ((nh >> 3) & 29)
+		var gy := y + ((nh >> 9) & 29)
+		ci.draw_rect(Rect2(gx, gy, 1, 3), yellow)
+	# Bare earth spot.
+	for i in range(2):
+		var nh := (x * 24631 + y * 78493) ^ (i * 62983)
+		var bx := x + 4 + ((nh >> 3) & 22)
+		var by := y + 4 + ((nh >> 8) & 22)
+		ci.draw_circle(Vector2(float(bx), float(by)), 2.5,
+				Color(0.55, 0.44, 0.24))
+
+func _draw_burnt_grass(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	var base := Color(0.30, 0.26, 0.16)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Charred grass — black-tipped stalks + ash specks.
+	var stalk := Color(0.15, 0.12, 0.08)
+	for i in range(6):
+		var nh := (x * 55927 + y * 14713) ^ (i * 88129)
+		var sx := x + ((nh >> 3) & 29)
+		var sy := y + 4 + ((nh >> 8) & 22)
+		ci.draw_line(Vector2(float(sx), float(sy + 3)),
+				Vector2(float(sx), float(sy)), stalk, 1.0)
+	# Ash specks.
+	for i in range(4):
+		var nh := (x * 33871 + y * 84109) ^ (i * 71203)
+		var ax := x + ((nh >> 3) & 29)
+		var ay := y + ((nh >> 9) & 29)
+		ci.draw_rect(Rect2(ax, ay, 1, 1), Color(0.55, 0.52, 0.48))
+
+func _draw_birch_forest(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	var base := Color(0.42, 0.58, 0.28)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# White birch trunks with black horizontal streaks.
+	var trunk := Color(0.90, 0.88, 0.82)
+	var streak := Color(0.15, 0.12, 0.10)
+	for i in range(2):
+		var nh := (x * 82471 + y * 39847) ^ (i * 91201)
+		var tx := x + 6 + ((nh >> 3) & 20)
+		ci.draw_rect(Rect2(tx, y + 4, 3, TILE - 8), trunk)
+		# Black bark streaks.
+		for si in range(3):
+			var sy := y + 6 + si * 8
+			ci.draw_line(Vector2(float(tx), float(sy)),
+					Vector2(float(tx + 3), float(sy)), streak, 1.0)
+
+func _draw_bamboo_stand(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	var base := Color(0.32, 0.52, 0.24)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Vertical bamboo stalks — pale green with darker segment joints.
+	var bamboo := Color(0.72, 0.85, 0.42)
+	var joint := Color(0.35, 0.42, 0.18)
+	for i in range(4):
+		var nh := (x * 63151 + y * 24631) ^ (i * 47921)
+		var bx := x + 4 + ((nh >> 3) & 24)
+		ci.draw_rect(Rect2(bx, y + 4, 2, TILE - 8), bamboo)
+		# 3 joints per stalk.
+		for j in range(3):
+			ci.draw_rect(Rect2(bx, y + 6 + j * 7, 2, 1), joint)
+
+# ── Norse cultural (82..86) ──────────────────────────────────────────────────
+
+func _draw_rune_stone_ground(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	var base := Color(0.40, 0.44, 0.42)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# One large flat stone with a rune carved on it.
+	var stone := Color(0.55, 0.55, 0.52)
+	var carve := Color(0.20, 0.18, 0.14)
+	ci.draw_rect(Rect2(x + 6, y + 10, 20, 14), stone)
+	ci.draw_rect(Rect2(x + 6, y + 22, 20, 2), stone.darkened(0.15))
+	# Rune — simple angular glyph (algiz-like).
+	ci.draw_line(Vector2(float(x + 16), float(y + 12)),
+			Vector2(float(x + 16), float(y + 22)), carve, 1.5)
+	ci.draw_line(Vector2(float(x + 12), float(y + 14)),
+			Vector2(float(x + 16), float(y + 12)), carve, 1.5)
+	ci.draw_line(Vector2(float(x + 20), float(y + 14)),
+			Vector2(float(x + 16), float(y + 12)), carve, 1.5)
+
+func _draw_grave_mound(ci: CanvasItem, _hv: int, x: int, y: int, cx: float, cy: float) -> void:
+	var base := Color(0.28, 0.34, 0.22)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Domed grass mound + upright stones marking the burial.
+	var mound := Color(0.35, 0.48, 0.22)
+	var stone := Color(0.55, 0.55, 0.52)
+	# Half-oval mound (simulated via overlapping ellipses of shrinking radius).
+	for i in range(3):
+		var w := 22 - i * 4
+		ci.draw_circle(Vector2(cx, cy + 4.0 + float(i) * 1.0),
+				float(w) * 0.5, mound)
+	# Two upright marker stones.
+	ci.draw_rect(Rect2(x + 10, y + 8, 2, 6), stone)
+	ci.draw_rect(Rect2(x + 20, y + 8, 2, 6), stone)
+
+func _draw_longhouse_floor(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	# Dark plank floor + running board joints — like wood_floor but darker.
+	var base := Color(0.38, 0.26, 0.14)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	var dark := base.darkened(0.30)
+	# Horizontal plank seams every 8 px.
+	for row in range(4):
+		var sy := y + 4 + row * 8
+		ci.draw_line(Vector2(float(x), float(sy)),
+				Vector2(float(x + TILE), float(sy)), dark, 1.0)
+	# Vertical plank breaks staggered per row.
+	for row in range(4):
+		var vx := x + 6 + ((row * 11) % 20)
+		var vy := y + row * 8
+		ci.draw_line(Vector2(float(vx), float(vy)),
+				Vector2(float(vx), float(vy + 8)), dark, 1.0)
+
+func _draw_fire_pit_indoor(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	var base := Color(0.24, 0.20, 0.16)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Ring of stones + burning logs + fire glow.
+	var stone := Color(0.42, 0.40, 0.38)
+	for i in range(8):
+		var ang := float(i) * TAU / 8.0
+		var sx := 16.0 + cos(ang) * 10.0
+		var sy := 16.0 + sin(ang) * 10.0
+		ci.draw_circle(Vector2(float(x) + sx, float(y) + sy), 2.0, stone)
+	# Charred logs in the center.
+	ci.draw_line(Vector2(float(x + 12), float(y + 16)),
+			Vector2(float(x + 20), float(y + 16)), Color(0.20, 0.12, 0.08), 3.0)
+	# Flickering flame — animated.
+	var t: float = float(Time.get_ticks_msec()) / 1000.0
+	var flame_r := 3.0 + sin(t * 5.0) * 0.5
+	ci.draw_circle(Vector2(float(x) + 16.0, float(y) + 14.0), flame_r,
+			Color(0.98, 0.55, 0.10))
+	ci.draw_circle(Vector2(float(x) + 16.0, float(y) + 14.0), flame_r * 0.5,
+			Color(1.0, 0.90, 0.42))
+
+func _draw_fur_rug(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	var base := Color(0.55, 0.42, 0.28)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Furry texture — dense diagonal strokes suggesting matted fur.
+	var fur := base.darkened(0.15)
+	var fur_hi := base.lightened(0.10)
+	for i in range(0, TILE, 2):
+		var sx := x + i
+		var sy_start := y + ((sx + y) % 3)
+		ci.draw_line(Vector2(float(sx), float(sy_start)),
+				Vector2(float(sx + 2), float(sy_start + 3)), fur, 0.8)
+	for i in range(0, TILE, 3):
+		var sx := x + i + ((x + i) % 2)
+		if sx >= x + TILE:
+			continue
+		ci.draw_rect(Rect2(sx, y + 15 + ((sx * 3) % 4), 1, 2), fur_hi)
+
+# ── Remaining intra-biome variants (87..93) ──────────────────────────────────
+
+func _draw_pine_snow_dust(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	var base := Color(0.24, 0.36, 0.24)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Pine needles + snow-dust patches.
+	var needle := Color(0.10, 0.20, 0.08)
+	for i in range(4):
+		var nh := (x * 12583 + y * 96731) ^ (i * 28471)
+		var nx := x + ((nh >> 3) & 29)
+		var ny := y + ((nh >> 9) & 29)
+		var dx := 2 - int((nh >> 15) & 5)
+		var dy := 1 + int((nh >> 18) & 3)
+		ci.draw_line(Vector2(float(nx), float(ny)),
+				Vector2(float(nx + dx), float(ny + dy)), needle, 1.0)
+	# White snow-dust drifts.
+	var snow := Color(0.95, 0.98, 1.0, 0.85)
+	for i in range(3):
+		var nh := (x * 55927 + y * 14713) ^ (i * 88129)
+		var sx := x + ((nh >> 3) & 27)
+		var sy := y + ((nh >> 9) & 27)
+		ci.draw_circle(Vector2(float(sx), float(sy)), 3.0, snow)
+
+func _draw_pine_needle_bed(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	var base := Color(0.24, 0.30, 0.16)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Dense carpet of fallen needles — many short brown lines.
+	var needle := Color(0.42, 0.28, 0.14)
+	for i in range(10):
+		var nh := (x * 91129 + y * 42421) ^ (i * 33619)
+		var nx := x + ((nh >> 3) & 30)
+		var ny := y + ((nh >> 9) & 30)
+		var dx := 2 - int((nh >> 15) & 5)
+		var dy := 1 + int((nh >> 18) & 3)
+		ci.draw_line(Vector2(float(nx), float(ny)),
+				Vector2(float(nx + dx), float(ny + dy)), needle, 1.0)
+
+func _draw_swamp_bubbling(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	var base := Color(0.20, 0.28, 0.18)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Muddy base + rising bubbles (animated).
+	var mud := Color(0.28, 0.22, 0.14)
+	ci.draw_circle(Vector2(float(x) + 16.0, float(y) + 20.0), 8.0, mud)
+	var t: float = float(Time.get_ticks_msec()) / 1000.0
+	# 3 bubbles rising with staggered phase.
+	for i in range(3):
+		var phase := t * 1.2 + float(i) * 2.0
+		var by: float = float(y) + 24.0 - fmod(phase * 6.0, 18.0)
+		var bx: float = float(x) + 12.0 + float(i) * 4.0
+		var r := 1.5 - fmod(phase * 6.0, 18.0) / 12.0
+		if r > 0.4:
+			ci.draw_circle(Vector2(bx, by), r,
+					Color(0.55, 0.60, 0.42, 0.75))
+
+func _draw_mountain_alpine(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	var base := Color(0.50, 0.55, 0.48)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Rocky base + alpine wildflowers.
+	var rock := Color(0.42, 0.42, 0.40)
+	for i in range(3):
+		var nh := (x * 78493 + y * 21073) ^ (i * 59217)
+		var rx := x + ((nh >> 3) & 26)
+		var ry := y + ((nh >> 8) & 26)
+		ci.draw_circle(Vector2(float(rx), float(ry)), 3.5, rock)
+	# Small blue/purple alpine flowers.
+	var flowers := [Color(0.42, 0.55, 0.92), Color(0.72, 0.42, 0.88),
+			Color(0.95, 0.85, 0.20)]
+	for i in range(3):
+		var nh := (x * 33871 + y * 92401) ^ (i * 51119)
+		var fx := x + ((nh >> 3) & 29)
+		var fy := y + ((nh >> 9) & 29)
+		ci.draw_circle(Vector2(float(fx), float(fy)), 1.2,
+				flowers[(nh >> 12) % 3])
+
+func _draw_mountain_granite(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	var base := Color(0.48, 0.46, 0.44)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Speckled granite texture — dense small dots of varying shade.
+	for i in range(15):
+		var nh := (x * 17389 + y * 82471) ^ (i * 26981)
+		var sx := x + ((nh >> 3) & 30)
+		var sy := y + ((nh >> 8) & 30)
+		var shade_choice := (nh >> 12) & 3
+		var col: Color = base.darkened(0.30) if shade_choice == 0 \
+				else base.darkened(0.15) if shade_choice == 1 \
+				else base.lightened(0.15) if shade_choice == 2 \
+				else base
+		ci.draw_rect(Rect2(sx, sy, 1, 1), col)
+
+func _draw_snow_pristine(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	var base := Color(0.96, 0.98, 1.0)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Pure fresh powder — very subtle blue tint variation.
+	var blue_tint := Color(0.88, 0.92, 0.98)
+	for i in range(4):
+		var nh := (x * 47143 + y * 65867) ^ (i * 24029)
+		var sx := x + ((nh >> 3) & 27)
+		var sy := y + ((nh >> 8) & 27)
+		ci.draw_circle(Vector2(float(sx), float(sy)), 3.0, blue_tint)
+	# A few sparkle specks.
+	for i in range(3):
+		var nh := (x * 13721 + y * 79231) ^ (i * 22579)
+		var px := x + ((nh >> 3) & 29)
+		var py := y + ((nh >> 9) & 29)
+		ci.draw_rect(Rect2(px, py, 1, 1), Color(1.0, 1.0, 1.0))
+
+func _draw_snow_tracks(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	var base := Color(0.85, 0.88, 0.94)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	# Footprint tracks — pairs of small oval indentations running across.
+	var track := Color(0.62, 0.68, 0.78)
+	var track_dk := Color(0.48, 0.55, 0.65)
+	for i in range(3):
+		var nh := (x * 82471 + y * 39847) ^ (i * 91201)
+		var tx := x + 4 + ((nh >> 3) & 22)
+		var ty := y + 6 + ((nh >> 8) & 18)
+		# Left print.
+		ci.draw_circle(Vector2(float(tx), float(ty)), 1.8, track)
+		ci.draw_circle(Vector2(float(tx), float(ty)), 0.8, track_dk)
+		# Right print offset diagonally.
+		ci.draw_circle(Vector2(float(tx + 3), float(ty + 3)), 1.8, track)
+		ci.draw_circle(Vector2(float(tx + 3), float(ty + 3)), 0.8, track_dk)
 
 
 # ── Atlas bake helper ─────────────────────────────────────────────────────────

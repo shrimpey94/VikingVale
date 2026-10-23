@@ -13,6 +13,7 @@ extends CanvasLayer
 const Catalog = preload("res://scripts/AdminCatalog.gd")
 const UITheme = preload("res://scripts/ui/UITheme.gd")
 const Boats   = preload("res://scripts/Boat.gd")
+const ShopCat = preload("res://scripts/ShopCatalog.gd")
 const TILE := 32.0
 
 const PAINT_BIOMES: Array = [
@@ -35,6 +36,31 @@ const PAINT_BIOMES: Array = [
 	"reef", "tidepool", "wet_sand", "driftwood_shore",
 	# Bridges — walkable over water.
 	"wood_bridge", "stone_bridge",
+	# ── Expansion #4 (44 biomes) ─────────────────────────────────────
+	# Grass-family intra-biome variants.
+	"plains_wildflower", "plains_dry",
+	"oak_dense", "oak_autumn",
+	"dark_root_tangle", "dark_mushroom_ring",
+	"swamp_deep_mud",
+	# Water variants.
+	"ocean_kelp", "ocean_deep",
+	# Farming.
+	"wheat_field", "tilled_soil", "pasture", "vineyard", "orchard",
+	# Ruins / damage.
+	"rubble", "broken_wall", "cracked_earth", "scorched_earth",
+	"cemetery", "ancient_ruins",
+	# Volcanic / fire.
+	"lava_flow", "basalt", "ash_dune", "geothermal_vent", "obsidian_shard",
+	# Vegetation variety.
+	"tall_grass", "reeds", "lily_pads", "dead_grass", "burnt_grass",
+	"birch_forest", "bamboo_stand",
+	# Norse cultural.
+	"rune_stone_ground", "grave_mound", "longhouse_floor",
+	"fire_pit_indoor", "fur_rug",
+	# Remaining intra-biome variants.
+	"pine_snow_dust", "pine_needle_bed", "swamp_bubbling",
+	"mountain_alpine", "mountain_granite",
+	"snow_pristine", "snow_tracks",
 	"(erase)",
 ]
 
@@ -44,24 +70,44 @@ const PAINT_BIOMES: Array = [
 # picker logic. Tiles tab renders one Label row per category then a
 # GridContainer with one Button per biome.
 const _TILE_CATEGORIES: Array = [
-	["Grass",       ["plains", "meadow", "tundra", "clearing"]],
-	["Forest",      ["oak_forest", "pine_forest", "dark_forest"]],
-	["Wetlands",    ["swamp", "farm_crops"]],
-	["Rock/Mtn",    ["mountain", "rocky", "cliff"]],
-	["Water",       ["coast", "ocean", "shallow_water", "reef", "tidepool"]],
+	["Grass",       ["plains", "plains_wildflower", "plains_dry",
+					 "meadow", "tundra", "clearing",
+					 "tall_grass", "dead_grass", "burnt_grass"]],
+	["Forest",      ["oak_forest", "oak_dense", "oak_autumn",
+					 "pine_forest", "pine_snow_dust", "pine_needle_bed",
+					 "dark_forest", "dark_root_tangle", "dark_mushroom_ring",
+					 "birch_forest", "bamboo_stand"]],
+	["Wetlands",    ["swamp", "swamp_deep_mud", "swamp_bubbling",
+					 "reeds", "lily_pads", "farm_crops"]],
+	["Rock/Mtn",    ["mountain", "mountain_alpine", "mountain_granite",
+					 "rocky", "cliff",
+					 "basalt", "obsidian_shard"]],
+	["Water",       ["coast", "ocean", "ocean_kelp", "ocean_deep",
+					 "shallow_water", "reef", "tidepool"]],
 	["Path/Town",   ["town", "road", "dirt_path"]],
-	["Snow/Fire",   ["snow", "helheim", "ashlands"]],
+	["Snow/Fire",   ["snow", "snow_pristine", "snow_tracks",
+					 "helheim", "ashlands",
+					 "lava_flow", "ash_dune", "geothermal_vent"]],
 	["Beach",       ["sand", "wet_sand", "driftwood_shore"]],
 	["Hills",       ["plains_hills", "oak_hills", "pine_hills", "snow_hills",
 					 "ashlands_hills", "helheim_hills", "rocky_hills", "sand_hills"]],
 	["Transitions", ["forest_edge", "swamp_edge", "shore_grass", "snow_line", "cliff_scree"]],
 	["Variety",     ["moss_rock", "volcanic_glass"]],
+	["Farming",     ["wheat_field", "tilled_soil", "pasture", "vineyard", "orchard"]],
+	["Ruins",       ["rubble", "broken_wall", "cracked_earth", "scorched_earth",
+					 "cemetery", "ancient_ruins"]],
+	["Norse",       ["rune_stone_ground", "grave_mound", "longhouse_floor",
+					 "fire_pit_indoor"]],
 	["Bridges",     ["wood_bridge", "stone_bridge"]],
 	["Interior",    ["wood_floor", "stone_floor", "red_carpet", "hearth_stone",
-					 "wall_wood", "wall_stone"]],
+					 "wall_wood", "wall_stone", "fur_rug"]],
 ]
 
-enum Mode { OFF, PLACE, DELETE, MOVE, TILE, FLOOD, TINT, PASSABILITY, STRUCTURE }
+enum Mode { OFF, PLACE, DELETE, MOVE, ROTATE, TILE, FLOOD, TINT, PASSABILITY, STRUCTURE, SCULPT_RAISE, SCULPT_LOWER,
+	ROAD_ADD, ROAD_MOVE, ROAD_LINK, ROAD_DELETE, INSPECT }
+
+## Roads tab — how close (world px) a click must be to a node to hit it.
+const ROAD_HIT_RADIUS := 40.0
 
 ## Category-grouped roster of all 18 Construction buildables. Same shape as
 ## _TILE_CATEGORIES — the Structures tab renders one Label per category
@@ -124,8 +170,21 @@ const _BAR_TIERS: Array = [
 # pseudo-mode replaces all brush-size options.
 const BRUSH_SIZES := [1, 3, 5, 7]
 
+## Category tabs above the Place-Entity dropdown. Same pattern the recipe
+## window uses: "All" always exists and lists every entry; a specific tab
+## narrows the dropdown to only entries whose `_entity_category_for()`
+## returns that tab name. Categories in the order they render.
+const _ENTITY_TAB_NAMES: Array = [
+	"All", "Trees", "Rocks", "Fishing", "Foraging",
+	"Stations", "Walls", "Doors", "Monsters", "NPCs",
+]
+
 var _mode: int = Mode.OFF
 var _entries: Array = []
+## Active entity category tab. Rebuilds the OptionButton's items on change.
+var _active_entity_tab: String = "All"
+## Tab buttons keyed by name so radio-toggling doesn't need to walk children.
+var _entity_tab_btns: Dictionary = {}
 
 var _panel:     PanelContainer = null
 var _overlay:   Control        = null
@@ -154,6 +213,18 @@ var _tab_accounts_btn: Button     = null
 var _tab_tiles_btn:  Button        = null
 var _tab_structures_btn: Button    = null
 var _structures_section: VBoxContainer = null
+# Height tab — raise/lower terrain sculpt (3D client only; inert in 2D).
+var _tab_height_btn: Button        = null
+var _height_section: VBoxContainer = null
+# Roads tab — admin-drawn road/path network (dots + edges) the bot travels.
+var _tab_roads_btn: Button        = null
+var _roads_section: VBoxContainer = null
+var _roads_status_lbl: Label      = null
+## The node the editor currently has selected (-1 = none). ROAD_ADD chains new
+## nodes off it; ROAD_LINK toggles an edge between two picked nodes.
+var _road_selected: int = -1
+## Node being dragged in ROAD_MOVE (-1 = none).
+var _road_drag: int = -1
 # Structures tab state — the kind + wood/bar tier the admin has picked.
 var _selected_structure_kind: String = "wall"
 var _selected_wood_tier: String = "oak"
@@ -169,6 +240,18 @@ var _selected_biome: String = "plains"
 # Container for the swatch Button widgets — used to re-tint the selected
 # swatch's border when the pick changes.
 var _swatch_buttons: Dictionary = {}   # biome name → Button
+## Persistent expand/collapse state for the Tiles-tab category groups.
+## Keys are category names; values are bool "expanded". Missing key =
+## collapsed. Defaults seeded in _build_tiles_section — Grass/Forest/
+## Water/Hills expanded by default; everything else collapsed.
+var _tile_categories_expanded: Dictionary = {}
+## Category header buttons keyed by category name — so a category
+## rebuild (e.g. after atlas_ready) can refresh the arrow glyph without
+## walking children.
+var _tile_category_headers: Dictionary = {}
+## Category swatch grids keyed by category name — used to toggle
+## visibility on header click.
+var _tile_category_grids: Dictionary = {}
 var _help_body: VBoxContainer = null
 var _help_toggle_btn: Button = null
 # Tint editor widgets — numeric readouts + preview swatch.
@@ -178,6 +261,17 @@ var _tint_preview: ColorRect = null
 # Accounts tab state
 var _accounts_search: LineEdit    = null
 var _accounts_list_root: VBoxContainer = null
+## Season-reset field checkboxes (owner-only). field key → CheckBox.
+var _reset_checks: Dictionary = {}
+## Resettable player fields — [key, label]. Server maps each to a wipe.
+const _SEASON_RESET_FIELDS: Array = [
+	["skill_xp", "Levels (all skills)"], ["inventory", "Backpack"],
+	["bank", "Bank items"], ["equipment", "Equipment"],
+	["gold", "Gold"], ["bank_gold", "Bank gold"], ["pvp_tokens", "PvP tokens"],
+	["position", "Position → spawn"], ["recipe_counts", "Recipe practice"],
+	["discovered_towns", "Map discovery"], ["quests", "Quest progress"],
+	["reputation", "Reputation"], ["thralls", "Thralls"],
+]
 
 # Tile editor v2 state — brush size, flood mode, tint sliders, brush preview
 var _brush_size: int = 1
@@ -204,6 +298,34 @@ var _drag_pos: Vector2 = Vector2.ZERO
 var _painting: bool      = false
 var _last_tile: Vector2i = Vector2i(-9999, -9999)
 
+# ── Undo stack ───────────────────────────────────────────────────────────────
+## LIFO of reverse-ops for entity edits (place/delete/move/rotate/edit). Each
+## entry is a Dictionary {"op": String, ...}. Tile paints are NOT tracked (yet).
+var _undo_stack: Array = []
+const _UNDO_MAX := 40
+## True while replaying an undo, so the reverse-op's own echoes don't push new
+## entries (e.g. undo-delete re-places → we must not record that as undoable).
+var _undoing: bool = false
+## Count of admin_placed echoes to ignore when pushing a place→delete undo entry
+## (an undo-delete triggers a place whose echo must NOT become a new undo step).
+var _suppress_placed_undo: int = 0
+var _undo_btn: Button = null
+## World-px of the entity when a Move drag started (source for the move undo).
+var _drag_old_pos: Vector2 = Vector2.ZERO
+
+## SEPARATE undo for tile PAINTING (biome only). Each entry is one paint stroke =
+## an Array of {tx, ty, prior} (prior "" means the tile had no override → re-clear
+## to undo). Flood / tint / passability are NOT tracked. Its own button so a bad
+## paint drag never disturbs the entity-edit undo above.
+var _tile_undo_stack: Array = []
+const _TILE_UNDO_MAX := 25
+## Tiles touched in the current in-progress paint drag (committed on mouse-up).
+var _tile_stroke: Array = []
+## "tx,ty" → true for tiles already captured this stroke, so a re-touched tile
+## keeps its ORIGINAL prior biome (not the freshly-painted one).
+var _tile_stroke_seen: Dictionary = {}
+var _tile_undo_btn: Button = null
+
 func _ready() -> void:
 	layer = 250
 	_entries = Catalog.entries()
@@ -216,6 +338,7 @@ func _ready() -> void:
 	# inventory-view RichTextLabel when the server responds to our requests.
 	Events.admin_player_list_received.connect(_on_admin_player_list_received)
 	Events.admin_inventory_view_received.connect(_on_admin_inventory_view_received)
+	Events.admin_entity_placed.connect(_on_admin_entity_placed)
 
 # ── UI construction ────────────────────────────────────────────────────────────
 func _build_overlay() -> void:
@@ -254,29 +377,50 @@ func _build_panel() -> void:
 	var tab_row := HBoxContainer.new()
 	tab_row.add_theme_constant_override("separation", 4)
 	vb.add_child(tab_row)
+	# Restricted mapper role — sees only World (entity placement) + Tiles
+	# (paint/save/bake). Structures / Items / Accounts stay full-admin-only.
+	# `is_full_admin()` returns false for the mapper rank; owner + admin
+	# both pass and see every tab.
+	var full_admin: bool = GameManager.is_full_admin()
 	_tab_world_btn      = _tab_button("World", true)
 	_tab_tiles_btn      = _tab_button("Tiles", false)
+	_tab_height_btn     = _tab_button("Height", false)
+	_tab_roads_btn      = _tab_button("Roads", false)
 	_tab_structures_btn = _tab_button("Structures", false)
 	_tab_items_btn      = _tab_button("Items", false)
 	_tab_accounts_btn   = _tab_button("Accounts", false)
 	_tab_world_btn.pressed.connect(func() -> void: _show_tab("world"))
 	_tab_tiles_btn.pressed.connect(func() -> void: _show_tab("tiles"))
+	_tab_height_btn.pressed.connect(func() -> void: _show_tab("height"))
+	_tab_roads_btn.pressed.connect(func() -> void: _show_tab("roads"))
 	_tab_structures_btn.pressed.connect(func() -> void: _show_tab("structures"))
 	_tab_items_btn.pressed.connect(func() -> void: _show_tab("items"))
 	_tab_accounts_btn.pressed.connect(func() -> void: _show_tab("accounts"))
 	tab_row.add_child(_tab_world_btn)
 	tab_row.add_child(_tab_tiles_btn)
-	tab_row.add_child(_tab_structures_btn)
-	tab_row.add_child(_tab_items_btn)
-	tab_row.add_child(_tab_accounts_btn)
+	tab_row.add_child(_tab_height_btn)
+	tab_row.add_child(_tab_roads_btn)   # map-editing tool — mappers get it too
+	if full_admin:
+		tab_row.add_child(_tab_structures_btn)
+		tab_row.add_child(_tab_items_btn)
+		tab_row.add_child(_tab_accounts_btn)
 
 	_world_section      = _build_world_section()
 	_tiles_section      = _build_tiles_section()
+	_height_section     = _build_height_section()
+	_roads_section      = _build_roads_section()
 	_structures_section = _build_structures_section()
 	_items_section      = _build_items_section()
 	_accounts_section   = _build_accounts_section()
 	vb.add_child(_world_section)
 	vb.add_child(_tiles_section)
+	vb.add_child(_height_section)
+	vb.add_child(_roads_section)
+	_height_section.visible = false
+	_roads_section.visible = false
+	# Full-admin-only sections still get built (so the tab buttons above
+	# have targets if a rank changes mid-session) but stay invisible and
+	# uninstantiated in the tab row when the local player is only a mapper.
 	vb.add_child(_structures_section)
 	vb.add_child(_items_section)
 	vb.add_child(_accounts_section)
@@ -308,17 +452,93 @@ func _build_world_section() -> VBoxContainer:
 	row.add_child(_mode_button("Place",  Mode.PLACE))
 	row.add_child(_mode_button("Delete", Mode.DELETE))
 	row.add_child(_mode_button("Move",   Mode.MOVE))
-	row.add_child(_mode_button("Off",    Mode.OFF))
+	row.add_child(_mode_button("Rotate", Mode.ROTATE))
+	# Inspect — click a placed entity to edit its properties live (v1.6.x).
+	var row2 := HBoxContainer.new()
+	row2.add_theme_constant_override("separation", 4)
+	vb.add_child(row2)
+	row2.add_child(_mode_button("Inspect / Edit", Mode.INSPECT))
+	row2.add_child(_mode_button("Off",    Mode.OFF))
+
+	# Undo — reverses the last place/delete/move/rotate/edit (Ctrl+Z too).
+	_undo_btn = Button.new()
+	_undo_btn.add_theme_stylebox_override("normal", UITheme.sb(UITheme.BTN_N, UITheme.BORDER, 2))
+	_undo_btn.add_theme_stylebox_override("hover",  UITheme.sb(UITheme.BTN_H, UITheme.GOLD, 2))
+	_undo_btn.add_theme_color_override("font_color", UITheme.TEXT)
+	_undo_btn.tooltip_text = "Reverse the last entity edit (place / delete / move / rotate / property change). Ctrl+Z."
+	_undo_btn.pressed.connect(_do_undo)
+	vb.add_child(_undo_btn)
+	_refresh_undo_btn()
+
+	# Browser — searchable list of loaded entities; jump to or edit any of them.
+	var browse_btn := Button.new()
+	browse_btn.text = "🔍  Find / Browse entities"
+	browse_btn.add_theme_stylebox_override("normal", UITheme.sb(UITheme.BTN_N, UITheme.BORDER, 1))
+	browse_btn.add_theme_stylebox_override("hover",  UITheme.sb(UITheme.BTN_H, UITheme.GOLD, 1))
+	browse_btn.add_theme_color_override("font_color", UITheme.TEXT)
+	browse_btn.pressed.connect(_open_entity_browser)
+	vb.add_child(browse_btn)
+
+	# Validator — scans loaded entities for broken references (bad shop, door to
+	# nowhere, out-of-bounds, blank names) and lists them with jump-to.
+	var validate_btn := Button.new()
+	validate_btn.text = "🩺  Validate world"
+	validate_btn.add_theme_stylebox_override("normal", UITheme.sb(UITheme.BTN_N, UITheme.BORDER, 1))
+	validate_btn.add_theme_stylebox_override("hover",  UITheme.sb(UITheme.BTN_H, UITheme.GOLD, 1))
+	validate_btn.add_theme_color_override("font_color", UITheme.TEXT)
+	validate_btn.pressed.connect(_open_validator)
+	vb.add_child(validate_btn)
 
 	var el := Label.new()
 	el.text = "Entity:"
 	el.add_theme_color_override("font_color", UITheme.DIM)
 	el.add_theme_font_size_override("font_size", 11)
 	vb.add_child(el)
+	# Category tab row. Small buttons above the entity dropdown that filter
+	# which _entries appear inside it. Same pattern as the Tiles + Crafting
+	# tabs; Place/Delete/Move behavior + the Level SpinBox are untouched.
+	_entity_tab_btns = {}
+	var tab_wrap := VBoxContainer.new()
+	tab_wrap.add_theme_constant_override("separation", 3)
+	vb.add_child(tab_wrap)
+	var tab_row_a := HBoxContainer.new()
+	tab_row_a.add_theme_constant_override("separation", 3)
+	tab_wrap.add_child(tab_row_a)
+	var tab_row_b := HBoxContainer.new()
+	tab_row_b.add_theme_constant_override("separation", 3)
+	tab_wrap.add_child(tab_row_b)
+	# Compute per-tab counts once so tab labels can show "(N)" without
+	# rebuilding the dropdown each time.
+	var counts: Dictionary = {}
+	for tab_name: String in _ENTITY_TAB_NAMES:
+		counts[tab_name] = 0
+	counts["All"] = _entries.size()
+	for entry_v: Variant in _entries:
+		var cat: String = _entity_category_for(entry_v as Dictionary)
+		if counts.has(cat):
+			counts[cat] = int(counts[cat]) + 1
+	# Split tabs across two rows so the panel stays narrow (5 per row).
+	for i: int in range(_ENTITY_TAB_NAMES.size()):
+		var tab: String = _ENTITY_TAB_NAMES[i]
+		var b := Button.new()
+		b.text = "%s (%d)" % [tab, int(counts[tab])]
+		b.add_theme_font_size_override("font_size", 10)
+		b.toggle_mode = true
+		b.button_pressed = (tab == _active_entity_tab)
+		# Radio-style: on press, deactivate other tabs and refilter.
+		b.pressed.connect(func() -> void:
+			_active_entity_tab = tab
+			for other_v in _entity_tab_btns.keys():
+				var other: String = other_v
+				(_entity_tab_btns[other] as Button).button_pressed = (other == tab)
+			_populate_entity_dropdown())
+		if i < 5:
+			tab_row_a.add_child(b)
+		else:
+			tab_row_b.add_child(b)
+		_entity_tab_btns[tab] = b
 	_type_opt = OptionButton.new()
-	for i in range(_entries.size()):
-		var e: Dictionary = _entries[i]
-		_type_opt.add_item("%s  (%s)" % [str(e["label"]), str(e["kind"])], i)
+	_populate_entity_dropdown()
 	vb.add_child(_type_opt)
 
 	# Level adjuster — visible only when the picked entity is a monster.
@@ -340,10 +560,12 @@ func _build_world_section() -> VBoxContainer:
 	_level_spin.value     = 1
 	_level_spin.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_level_row.add_child(_level_spin)
-	_type_opt.item_selected.connect(_on_entity_picked)
-	# Seed the initial visibility + level for whatever index the dropdown
-	# is starting on (defaults to 0).
-	_on_entity_picked(_type_opt.selected if _type_opt.selected >= 0 else 0)
+	# item_selected signal already wired inside _populate_entity_dropdown.
+	# Seed the initial visibility + level for whatever id the dropdown is
+	# starting on (first entry of the currently active tab).
+	if _type_opt.selected >= 0:
+		# Pass the visual index — _on_entity_picked resolves to the entry id.
+		_on_entity_picked(_type_opt.selected)
 
 	# Tile / tint / passability widgets live in the Tiles tab now.
 
@@ -366,6 +588,19 @@ func _build_world_section() -> VBoxContainer:
 		+ "biome generation changes. Owner-only.")
 	bake_btn.pressed.connect(_on_bake_terrain)
 	vb.add_child(bake_btn)
+
+	# v1.7 B2a — bake the node→drop map so the server grants gather loot itself.
+	var bake_nodes_btn := Button.new()
+	bake_nodes_btn.text = "⛏  Bake: nodes + loot + recipes + fish"
+	bake_nodes_btn.add_theme_stylebox_override("normal", UITheme.sb(UITheme.BTN_N, UITheme.BORDER, 1))
+	bake_nodes_btn.add_theme_stylebox_override("hover",  UITheme.sb(UITheme.BTN_H, UITheme.GOLD, 1))
+	bake_nodes_btn.add_theme_color_override("font_color", UITheme.TEXT)
+	bake_nodes_btn.tooltip_text = ("Snapshot every gatherable node's drop, every monster's loot, "
+		+ "and every craft recipe, then upload them. The server then grants gather loot, rolls kill "
+		+ "loot, and crafts items authoritatively (anti-cheat). Re-run whenever drops/loot/recipes "
+		+ "change. Owner-only.")
+	bake_nodes_btn.pressed.connect(_on_bake_nodes)
+	vb.add_child(bake_nodes_btn)
 
 	var hint := Label.new()
 	hint.add_theme_color_override("font_color", UITheme.DIM)
@@ -394,35 +629,69 @@ func _build_tiles_section() -> VBoxContainer:
 	mode_row.add_child(_mode_button("Tint", Mode.TINT))
 	mode_row.add_child(_mode_button("Pass", Mode.PASSABILITY))
 
-	# ── Biome swatch grid, category-grouped. ──
+	# ── Biome swatch grid — categorized, collapsible, and inside a
+	# ScrollContainer so a 90+ biome catalog doesn't push the tint editor
+	# off-screen. Grass / Forest / Water / Hills expand by default; the
+	# rest collapse so a fresh open of the panel is compact. ──
 	var swatch_lbl := Label.new()
 	swatch_lbl.text = "Biome (click a swatch to select):"
 	swatch_lbl.add_theme_color_override("font_color", UITheme.DIM)
 	swatch_lbl.add_theme_font_size_override("font_size", 11)
 	vb.add_child(swatch_lbl)
 
+	# Seed the default expand state on first build.
+	if _tile_categories_expanded.is_empty():
+		for tc: Array in _TILE_CATEGORIES:
+			var tc_name: String = str(tc[0])
+			_tile_categories_expanded[tc_name] = tc_name in \
+					["Grass", "Forest", "Water", "Hills"]
+
+	var swatch_scroll := ScrollContainer.new()
+	swatch_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	swatch_scroll.custom_minimum_size = Vector2(0, 260)
+	swatch_scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	# Cap the vertical growth so mode row + tint editor stay above the
+	# fold. If the panel gains vertical space, the scroll can grow into it.
+	swatch_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	vb.add_child(swatch_scroll)
+	var swatch_inner := VBoxContainer.new()
+	swatch_inner.add_theme_constant_override("separation", 4)
+	swatch_inner.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	swatch_scroll.add_child(swatch_inner)
+
 	var ground := get_tree().get_first_node_in_group("ground")
 	for cat: Array in _TILE_CATEGORIES:
 		var cat_name: String = str(cat[0])
 		var biomes: Array = cat[1] as Array
-		# Category header row.
-		var header := Label.new()
-		header.text = cat_name
+		var is_expanded: bool = bool(_tile_categories_expanded.get(cat_name, false))
+		# Category header — clickable toggle. Arrow glyph reflects state.
+		var header := Button.new()
+		header.text = "%s  %s  (%d)" % [
+			("▾" if is_expanded else "▸"), cat_name, biomes.size()]
 		header.add_theme_color_override("font_color", UITheme.GOLD)
 		header.add_theme_font_size_override("font_size", 11)
-		vb.add_child(header)
-		# Grid of Buttons — one row per category, 8 swatches per row.
+		header.alignment = HORIZONTAL_ALIGNMENT_LEFT
+		header.flat = true
+		swatch_inner.add_child(header)
+		_tile_category_headers[cat_name] = header
+		# Grid of Buttons — 8 swatches per row.
 		var grid := GridContainer.new()
 		grid.columns = 8
 		grid.add_theme_constant_override("h_separation", 3)
 		grid.add_theme_constant_override("v_separation", 3)
-		vb.add_child(grid)
+		grid.visible = is_expanded
+		swatch_inner.add_child(grid)
+		_tile_category_grids[cat_name] = grid
 		for biome_name in biomes:
 			var name_str: String = str(biome_name)
 			var b := _make_swatch_button(name_str, cat_name, ground)
 			b.pressed.connect(func() -> void: _on_swatch_picked(name_str))
 			grid.add_child(b)
 			_swatch_buttons[name_str] = b
+		# Wire header toggle after the grid exists so the lambda captures
+		# both. Bind cat_name so all headers share the same handler shape.
+		header.pressed.connect(func() -> void:
+			_toggle_tile_category(cat_name))
 	# If the atlas isn't ready yet (rare — bake takes ~2 frames), listen
 	# for atlas_ready and swap the color-chip swatches for real tile
 	# thumbnails when it fires.
@@ -441,6 +710,15 @@ func _build_tiles_section() -> VBoxContainer:
 	erase_btn.add_theme_stylebox_override("hover",  UITheme.sb(UITheme.BTN_H, UITheme.GOLD, 1))
 	erase_btn.pressed.connect(func() -> void: _on_swatch_picked("(erase)"))
 	erase_row.add_child(erase_btn)
+	# Tile paint's OWN undo (biome strokes only) — kept separate from the World
+	# tab's entity undo so the two never step on each other.
+	_tile_undo_btn = Button.new()
+	_tile_undo_btn.add_theme_stylebox_override("normal", UITheme.sb(UITheme.BTN_N, UITheme.BORDER, 1))
+	_tile_undo_btn.add_theme_stylebox_override("hover",  UITheme.sb(UITheme.BTN_H, UITheme.GOLD, 1))
+	_tile_undo_btn.tooltip_text = "Undo the last biome paint stroke (flood / tint / passability aren't tracked)."
+	_tile_undo_btn.pressed.connect(_do_tile_undo)
+	erase_row.add_child(_tile_undo_btn)
+	_refresh_tile_undo_btn()
 
 	# ── Brush size — reused from the old World-tab widget. ──
 	var brush_lbl := Label.new()
@@ -545,6 +823,29 @@ func _build_tiles_section() -> VBoxContainer:
 func _on_swatch_picked(name_str: String) -> void:
 	_selected_biome = name_str
 	_apply_swatch_highlight(name_str)
+
+
+## Flip the expand/collapse state for one Tiles-tab category. Rewrites the
+## header's arrow glyph + toggles the grid's visibility. State persists on
+## the panel so the same categories stay open across panel opens.
+func _toggle_tile_category(cat_name: String) -> void:
+	var is_expanded: bool = bool(_tile_categories_expanded.get(cat_name, false))
+	is_expanded = not is_expanded
+	_tile_categories_expanded[cat_name] = is_expanded
+	var grid: Node = _tile_category_grids.get(cat_name, null)
+	if grid != null and grid is Control:
+		(grid as Control).visible = is_expanded
+	var header: Node = _tile_category_headers.get(cat_name, null)
+	if header != null and header is Button:
+		# Find the biome count from _TILE_CATEGORIES so the label stays
+		# consistent with the seed at build time.
+		var count: int = 0
+		for cat: Array in _TILE_CATEGORIES:
+			if str(cat[0]) == cat_name:
+				count = (cat[1] as Array).size()
+				break
+		(header as Button).text = "%s  %s  (%d)" % [
+			("▾" if is_expanded else "▸"), cat_name, count]
 
 
 ## Builds one swatch Button. Prefers the real baked atlas thumbnail when
@@ -679,6 +980,208 @@ func _refresh_tint_preview() -> void:
 	col.g = clampf(col.g * (1.0 + bright), 0.0, 1.0)
 	col.b = clampf(col.b * (1.0 + bright), 0.0, 1.0)
 	_tint_preview.color = col
+
+## Builds the Height tab — raise/lower terrain sculpt. Only meaningful in the 3D
+## client (World3D.sculpt_at); in the 2D client the mode is inert (no height).
+## Uses the Tiles-tab brush size. Drag with LMB to sculpt.
+func _build_height_section() -> VBoxContainer:
+	var vb := VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 6)
+	var mode_row := HBoxContainer.new()
+	mode_row.add_theme_constant_override("separation", 4)
+	mode_row.add_child(_mode_button("Raise",  Mode.SCULPT_RAISE))
+	mode_row.add_child(_mode_button("Lower",  Mode.SCULPT_LOWER))
+	mode_row.add_child(_mode_button("Off",    Mode.OFF))
+	vb.add_child(mode_row)
+	var hint := Label.new()
+	hint.text = "Pick Raise or Lower, then LMB-drag the ground to sculpt. Brush = the Tiles-tab brush size. Edits blend into the biome base and save automatically (3D client only)."
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	hint.custom_minimum_size = Vector2(240, 0)
+	hint.add_theme_color_override("font_color", UITheme.DIM)
+	hint.add_theme_font_size_override("font_size", 11)
+	vb.add_child(hint)
+	return vb
+
+## Builds the Roads tab — an in-world editor for the admin-drawn road/path
+## network the autoplay bot follows. Modes:
+##   Add    — click empty ground to drop a node; if a node is selected it also
+##            links selected→new + selects the new one (so successive clicks
+##            draw a connected line). Click ON a node instead just selects it.
+##   Move   — drag a node to reposition it.
+##   Link   — click node A then node B to toggle the road between them.
+##   Delete — click a node to remove it (and every road touching it).
+## The graph draws as gold thick lines + amber dots over the world; every edit
+## pushes the whole doc to the server (persisted + synced to all clients).
+func _build_roads_section() -> VBoxContainer:
+	var vb := VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 6)
+
+	var mode_row := HBoxContainer.new()
+	mode_row.add_theme_constant_override("separation", 4)
+	vb.add_child(mode_row)
+	mode_row.add_child(_mode_button("Add",    Mode.ROAD_ADD))
+	mode_row.add_child(_mode_button("Move",   Mode.ROAD_MOVE))
+	mode_row.add_child(_mode_button("Link",   Mode.ROAD_LINK))
+	mode_row.add_child(_mode_button("Delete", Mode.ROAD_DELETE))
+	mode_row.add_child(_mode_button("Off",    Mode.OFF))
+
+	_roads_status_lbl = Label.new()
+	_roads_status_lbl.add_theme_color_override("font_color", UITheme.GOLD)
+	_roads_status_lbl.add_theme_font_size_override("font_size", 11)
+	vb.add_child(_roads_status_lbl)
+
+	var deselect_btn := Button.new()
+	deselect_btn.text = "Deselect node"
+	deselect_btn.add_theme_stylebox_override("normal", UITheme.sb(UITheme.BTN_N, UITheme.BORDER, 1))
+	deselect_btn.add_theme_stylebox_override("hover",  UITheme.sb(UITheme.BTN_H, UITheme.GOLD, 1))
+	deselect_btn.pressed.connect(func() -> void: _road_select(-1))
+	vb.add_child(deselect_btn)
+
+	var hint := Label.new()
+	hint.text = ("Add: click ground to drop a dot; with a dot selected each new "
+		+ "click links to it (draws a line). Click a dot to select it. "
+		+ "Move: drag a dot. Link: click two dots to join/split. Delete: click a "
+		+ "dot to remove it. Saved server-side; the auto-player follows these roads.")
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	hint.custom_minimum_size = Vector2(240, 0)
+	hint.add_theme_color_override("font_color", UITheme.DIM)
+	hint.add_theme_font_size_override("font_size", 11)
+	vb.add_child(hint)
+
+	_update_roads_status()
+	return vb
+
+## Refreshes the Roads-tab status line (node/edge count + current selection).
+func _update_roads_status() -> void:
+	if _roads_status_lbl == null:
+		return
+	var sel_txt := ("none" if _road_selected < 0 else ("#%d" % _road_selected))
+	_roads_status_lbl.text = "Nodes: %d   Roads: %d   Selected: %s" % [
+		GameManager.road_nodes.size(), GameManager.road_edges.size(), sel_txt]
+
+## Set the selected node + mirror it to the world overlay's gold ring.
+func _road_select(node_id: int) -> void:
+	_road_selected = node_id
+	var w := _world()
+	if w != null and w.has_method("set_road_selected_node"):
+		w.call("set_road_selected_node", node_id)
+	_update_roads_status()
+
+## Node id nearest to a world position within ROAD_HIT_RADIUS, else -1.
+func _road_node_at(wpos: Vector2) -> int:
+	var best_id: int = -1
+	var best_d: float = ROAD_HIT_RADIUS
+	for n: Variant in GameManager.road_nodes:
+		var d := n as Dictionary
+		var p := Vector2(float(d.get("x", 0.0)), float(d.get("y", 0.0)))
+		var dist := wpos.distance_to(p)
+		if dist <= best_d:
+			best_d = dist
+			best_id = int(d.get("id", -1))
+	return best_id
+
+## Persist + broadcast the whole graph, then redraw the overlay. Called after
+## every mutation (the graph is small, so a full push each edit is cheap).
+func _road_push() -> void:
+	NetworkManager.send_admin_road_set(GameManager.road_nodes, GameManager.road_edges)
+	var w := _world()
+	if w != null and w.has_method("set_road_selected_node"):
+		# Force an overlay redraw (selection unchanged) so local edits show
+		# instantly, before the server's echo comes back.
+		w.call("set_road_selected_node", _road_selected)
+	_update_roads_status()
+
+## Add a node at a world position; returns its new id. Optionally link it to the
+## currently-selected node so successive Add clicks draw a connected path.
+func _road_add_node(wpos: Vector2, link_from_selected: bool) -> int:
+	var nid := GameManager.road_next_node_id()
+	GameManager.road_nodes.append({"id": nid, "x": wpos.x, "y": wpos.y})
+	if link_from_selected and _road_selected >= 0 and _road_selected != nid:
+		_road_add_edge(_road_selected, nid)
+	return nid
+
+## Toggle the undirected edge a-b (add if absent, remove if present).
+func _road_toggle_edge(a: int, b: int) -> void:
+	if a == b:
+		return
+	if not _road_add_edge(a, b):
+		_road_remove_edge(a, b)
+
+## Add edge a-b if it isn't already there. Returns true if one was added.
+func _road_add_edge(a: int, b: int) -> bool:
+	for e: Variant in GameManager.road_edges:
+		if not (e is Array) or (e as Array).size() != 2:
+			continue
+		var x := int((e as Array)[0]); var y := int((e as Array)[1])
+		if (x == a and y == b) or (x == b and y == a):
+			return false
+	GameManager.road_edges.append([a, b])
+	return true
+
+func _road_remove_edge(a: int, b: int) -> void:
+	for i in range(GameManager.road_edges.size() - 1, -1, -1):
+		var e: Variant = GameManager.road_edges[i]
+		if not (e is Array) or (e as Array).size() != 2:
+			continue
+		var x := int((e as Array)[0]); var y := int((e as Array)[1])
+		if (x == a and y == b) or (x == b and y == a):
+			GameManager.road_edges.remove_at(i)
+
+## Remove a node + every road touching it.
+func _road_delete_node(nid: int) -> void:
+	for i in range(GameManager.road_nodes.size() - 1, -1, -1):
+		if int((GameManager.road_nodes[i] as Dictionary).get("id", -1)) == nid:
+			GameManager.road_nodes.remove_at(i)
+	for i in range(GameManager.road_edges.size() - 1, -1, -1):
+		var e: Variant = GameManager.road_edges[i]
+		if not (e is Array) or (e as Array).size() != 2:
+			continue
+		if int((e as Array)[0]) == nid or int((e as Array)[1]) == nid:
+			GameManager.road_edges.remove_at(i)
+
+func _road_move_node(nid: int, wpos: Vector2) -> void:
+	for n: Variant in GameManager.road_nodes:
+		var d := n as Dictionary
+		if int(d.get("id", -1)) == nid:
+			d["x"] = wpos.x
+			d["y"] = wpos.y
+			return
+
+# ── Roads-tab click handlers ────────────────────────────────────────────────
+## ROAD_ADD: clicking an existing dot just selects it; clicking empty ground
+## drops a new dot (linked to the selected one, if any) and selects it — so
+## successive clicks paint a connected line.
+func _road_click_add(wpos: Vector2) -> void:
+	var hit := _road_node_at(wpos)
+	if hit >= 0:
+		_road_select(hit)
+		return
+	var nid := _road_add_node(wpos, true)
+	_road_select(nid)
+	_road_push()
+
+## ROAD_LINK: first click selects a dot; second click on a different dot toggles
+## the road between them (kept selected so you can chain links).
+func _road_click_link(wpos: Vector2) -> void:
+	var hit := _road_node_at(wpos)
+	if hit < 0:
+		return
+	if _road_selected < 0 or _road_selected == hit:
+		_road_select(hit)
+		return
+	_road_toggle_edge(_road_selected, hit)
+	_road_select(hit)
+	_road_push()
+
+## ROAD_DELETE: click a dot to remove it and every road touching it.
+func _road_click_delete(wpos: Vector2) -> void:
+	var hit := _road_node_at(wpos)
+	if hit < 0:
+		return
+	_road_delete_node(hit)
+	if _road_selected == hit:
+		_road_select(-1)
+	_road_push()
 
 ## Builds the Structures tab — categorized picker for all 18 Construction
 ## buildables + wood/metal tier selectors. Click STRUCTURE mode button →
@@ -926,14 +1429,28 @@ func _tab_button(text: String, active: bool) -> Button:
 func _show_tab(which: String) -> void:
 	if _world_section != null:      _world_section.visible      = which == "world"
 	if _tiles_section != null:      _tiles_section.visible      = which == "tiles"
+	if _height_section != null:     _height_section.visible     = which == "height"
+	if _roads_section != null:      _roads_section.visible      = which == "roads"
 	if _structures_section != null: _structures_section.visible = which == "structures"
 	if _items_section != null:      _items_section.visible      = which == "items"
 	if _accounts_section != null:   _accounts_section.visible   = which == "accounts"
 	_paint_tab(_tab_world_btn,      which == "world")
 	_paint_tab(_tab_tiles_btn,      which == "tiles")
+	_paint_tab(_tab_height_btn,     which == "height")
+	_paint_tab(_tab_roads_btn,      which == "roads")
 	_paint_tab(_tab_structures_btn, which == "structures")
 	_paint_tab(_tab_items_btn,      which == "items")
 	_paint_tab(_tab_accounts_btn,   which == "accounts")
+	# Show the road overlay only while the Roads tab is open; leaving it hides
+	# the dev lines and drops any active road edit mode.
+	var w := _world()
+	if w != null and w.has_method("set_road_overlay_visible"):
+		w.call("set_road_overlay_visible", which == "roads")
+	if which != "roads" and _mode in [Mode.ROAD_ADD, Mode.ROAD_MOVE,
+			Mode.ROAD_LINK, Mode.ROAD_DELETE]:
+		_set_mode(Mode.OFF)
+	if which == "roads":
+		_update_roads_status()
 	# Lazy first-fetches per tab so the admin doesn't have to hit a manual
 	# refresh after opening it.
 	if which == "items" and _items_player_opt != null \
@@ -955,9 +1472,72 @@ func _paint_tab(btn: Button, active: bool) -> void:
 ## status, last-login timestamp, lockout indicator, with three actions:
 ## Reset (mail a token), Unlock, Verify-email. All routes are gated by
 ## _is_admin on the server side; the client just sends.
+## Owner-only "seasonal reset" — checkboxes (preset ALL on) for which player
+## fields to wipe across every account. Destructive → type-to-confirm. The server
+## backs the DB up + kicks everyone. Great for major updates / season resets, and
+## it's the clean-slate that lets B3 (server inventory) flip without item risk.
+func _build_season_reset() -> Control:
+	var panel := PanelContainer.new()
+	panel.add_theme_stylebox_override("panel",
+		UITheme.sb(Color(0.10, 0.03, 0.03, 0.94), Color(0.90, 0.35, 0.30), 2))
+	var vb := VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 3)
+	panel.add_child(vb)
+	var title := Label.new()
+	title.text = "⚠ Season Reset (owner)"
+	title.add_theme_color_override("font_color", Color(0.95, 0.55, 0.45))
+	title.add_theme_font_size_override("font_size", 11)
+	vb.add_child(title)
+	# Checkboxes in a 2-wide grid, all preset ON.
+	var grid := GridContainer.new()
+	grid.columns = 2
+	vb.add_child(grid)
+	_reset_checks = {}
+	for entry: Array in _SEASON_RESET_FIELDS:
+		var cb := CheckBox.new()
+		cb.text = str(entry[1])
+		cb.button_pressed = true          # preset all on; uncheck to preserve
+		cb.add_theme_font_size_override("font_size", 10)
+		grid.add_child(cb)
+		_reset_checks[str(entry[0])] = cb
+	var btn := Button.new()
+	btn.text = "🔄  Reset Season (ALL players)"
+	btn.add_theme_stylebox_override("normal", UITheme.sb(UITheme.BTN_A, Color(0.90, 0.35, 0.30), 2))
+	btn.add_theme_color_override("font_color", Color(0.98, 0.75, 0.70))
+	btn.pressed.connect(_on_season_reset_pressed)
+	vb.add_child(btn)
+	return panel
+
+func _on_season_reset_pressed() -> void:
+	var fields: Array = []
+	for k_v: Variant in _reset_checks.keys():
+		if (_reset_checks[k_v] as CheckBox).button_pressed:
+			fields.append(str(k_v))
+	if fields.is_empty():
+		Events.chat_message.emit("[Reset] Nothing checked.")
+		return
+	var dlg := ConfirmationDialog.new()
+	dlg.title = "Season Reset — ALL PLAYERS"
+	dlg.dialog_text = ("Wipe %d field(s) on EVERY account:\n  %s\n\nThe server backs up "
+		+ "first, then kicks everyone. This cannot be undone in-game.") % [
+			fields.size(), ", ".join(fields)]
+	dlg.ok_button_text = "Reset the Season"
+	dlg.confirmed.connect(func() -> void:
+		NetworkManager.send_admin_season_reset(fields)
+		Events.chat_message.emit("[Reset] Sent — the server will apply it + kick everyone.")
+		dlg.queue_free())
+	dlg.canceled.connect(dlg.queue_free)
+	dlg.close_requested.connect(dlg.queue_free)
+	add_child(dlg)
+	dlg.popup_centered(Vector2i(420, 200))
+
 func _build_accounts_section() -> VBoxContainer:
 	var vb := VBoxContainer.new()
 	vb.add_theme_constant_override("separation", 6)
+
+	# ── Season Reset (owner-only) — collapsible so it doesn't dominate the tab. ──
+	if NetworkManager.my_admin_rank == "owner":
+		vb.add_child(_build_season_reset())
 
 	# Search row.
 	var search_row := HBoxContainer.new()
@@ -1034,6 +1614,21 @@ func _build_account_row(a: Dictionary) -> PanelContainer:
 	name_lbl.add_theme_font_size_override("font_size", 12)
 	name_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	head.add_child(name_lbl)
+	# Rank chip — owner / admin / mapper / blank. Small colored label to
+	# the right of the username so the owner sees at a glance who's
+	# already elevated before deciding whether to grant mapper.
+	var rank_str := str(a.get("admin_rank", ""))
+	if rank_str != "":
+		var rank_lbl := Label.new()
+		rank_lbl.text = rank_str.to_upper()
+		rank_lbl.add_theme_font_size_override("font_size", 9)
+		var rank_col: Color = Color(0.55, 0.85, 0.55)
+		match rank_str:
+			"owner":  rank_col = Color(0.95, 0.40, 0.15)
+			"admin":  rank_col = Color(0.95, 0.75, 0.20)
+			"mapper": rank_col = Color(0.55, 0.75, 1.00)
+		rank_lbl.add_theme_color_override("font_color", rank_col)
+		head.add_child(rank_lbl)
 	var locked_until := float(a.get("locked_until", 0.0))
 	if locked_until > Time.get_unix_time_from_system():
 		var lock_lbl := Label.new()
@@ -1092,7 +1687,57 @@ func _build_account_row(a: Dictionary) -> PanelContainer:
 			NetworkManager.send_admin_list_accounts(_accounts_search.text)))
 	btn_row.add_child(verify_btn)
 
+	# Mapper rank management — owner-only (server enforces). Button label
+	# swaps to Revoke when the account already has mapper rank, and the
+	# row hides both buttons entirely for owner + admin (mapper is a
+	# down-grade path, not lateral).
+	var rank_now := str(a.get("admin_rank", ""))
+	if rank_now == "":
+		var grant_btn := _account_action_btn("Grant Mapper")
+		grant_btn.pressed.connect(func() -> void:
+			NetworkManager.send_admin_grant_mapper(username)
+			get_tree().create_timer(0.3).timeout.connect(func() -> void:
+				NetworkManager.send_admin_list_accounts(_accounts_search.text)))
+		btn_row.add_child(grant_btn)
+	elif rank_now == "mapper":
+		var revoke_btn := _account_action_btn("Revoke Mapper")
+		revoke_btn.pressed.connect(func() -> void:
+			NetworkManager.send_admin_revoke_mapper(username)
+			get_tree().create_timer(0.3).timeout.connect(func() -> void:
+				NetworkManager.send_admin_list_accounts(_accounts_search.text)))
+		btn_row.add_child(revoke_btn)
+
+	# Delete — OWNER ONLY (server also enforces _is_owner), never for the owner
+	# account itself. Destructive, so it goes through a type-the-name confirm.
+	if NetworkManager.my_admin_rank == "owner" and rank_now != "owner":
+		var del_btn := _account_action_btn("Delete")
+		del_btn.add_theme_color_override("font_color", Color(0.95, 0.35, 0.30))
+		del_btn.pressed.connect(func() -> void: _confirm_delete_account(username))
+		btn_row.add_child(del_btn)
+
 	return row
+
+## Destructive account deletion (owner only). A plain confirm — the server
+## re-checks _is_owner and refuses the owner/self, so a clear Delete/Cancel is
+## enough. (An earlier type-to-confirm LineEdit added straight to the dialog
+## laid out badly and left the OK button stuck disabled, so it never sent.)
+func _confirm_delete_account(username: String) -> void:
+	var dlg := ConfirmationDialog.new()
+	dlg.title = "Delete Account"
+	dlg.dialog_text = ("Permanently delete \"%s\" and ALL its data?\n"
+		+ "This cannot be undone.") % username
+	dlg.ok_button_text = "Delete Permanently"
+	dlg.confirmed.connect(func() -> void:
+		NetworkManager.send_admin_delete_account(username)
+		# Re-fetch the list shortly after so the row disappears on success.
+		get_tree().create_timer(0.4).timeout.connect(func() -> void:
+			NetworkManager.send_admin_list_accounts(_accounts_search.text))
+		dlg.queue_free())
+	dlg.canceled.connect(dlg.queue_free)
+	# Free the dialog if it's closed with the [X] too, so it doesn't leak.
+	dlg.close_requested.connect(dlg.queue_free)
+	add_child(dlg)
+	dlg.popup_centered(Vector2i(380, 150))
 
 func _account_action_btn(text: String) -> Button:
 	var b := Button.new()
@@ -1212,6 +1857,48 @@ func _on_save_map() -> void:
 ## Bake the server-side passability bitmap from Ground.biome_at_world and
 ## upload it. Server gates monster movement against the bitmap, blocking
 ## chase paths across water/coast. Owner-only — server rejects non-owner.
+## v1.7 B2a — bake the node→drop map on the World node + upload it. The server
+## then grants gather loot authoritatively. One-time (re-run on generation change).
+func _on_bake_nodes() -> void:
+	var w := _world() as Object
+	if not w.has_method("bake_node_map"):
+		Events.chat_message.emit("[Bake] Node bake not available in this client (2D only).")
+		return
+	Events.chat_message.emit("[Bake] Snapshotting node drops…")
+	var node_map: Dictionary = w.call("bake_node_map")
+	if node_map.is_empty():
+		Events.chat_message.emit("[Bake] No nodes found — is the world loaded?")
+		return
+	NetworkManager.send_admin_upload_node_map(node_map)
+	Events.chat_message.emit("[Bake] Uploaded %d node drops to the server." % node_map.size())
+	# B3 — also bake + upload the monster-loot table (server rolls kill loot).
+	if w.has_method("bake_monster_loot"):
+		var loot_map: Dictionary = w.call("bake_monster_loot")
+		if not loot_map.is_empty():
+			NetworkManager.send_admin_upload_monster_loot(loot_map)
+			Events.chat_message.emit("[Bake] Uploaded monster loot for %d monsters." % [
+				loot_map.size() - 1])   # minus the universal _soul entry
+	# ⑤ — also bake + upload the craft-recipe table (server crafts from it).
+	# Lives on the HUD (recipe consts), so reach it via the "hud" group.
+	var hud := get_tree().get_first_node_in_group("hud")
+	if hud != null and hud.has_method("bake_recipes"):
+		var recipe_map: Dictionary = hud.call("bake_recipes")
+		if not recipe_map.is_empty():
+			NetworkManager.send_admin_upload_recipes(recipe_map)
+			Events.chat_message.emit("[Bake] Uploaded %d craft recipes to the server." % recipe_map.size())
+	# ⑥ — also bake + upload the fishing species table (server grants catches).
+	if hud != null and hud.has_method("bake_fishing"):
+		var fish_map: Dictionary = hud.call("bake_fishing")
+		if not fish_map.is_empty():
+			NetworkManager.send_admin_upload_fish(fish_map)
+			Events.chat_message.emit("[Bake] Uploaded %d fish species to the server." % fish_map.size())
+	# ⑥ — also bake + upload the sea-monster loot table (server grants boat-fight wins).
+	if hud != null and hud.has_method("bake_sea_loot"):
+		var sea_map: Dictionary = hud.call("bake_sea_loot")
+		if not sea_map.is_empty():
+			NetworkManager.send_admin_upload_sea_loot(sea_map)
+			Events.chat_message.emit("[Bake] Uploaded sea loot for %d monsters." % sea_map.size())
+
 func _on_bake_terrain() -> void:
 	var ground := get_tree().get_first_node_in_group("ground")
 	if ground == null:
@@ -1239,6 +1926,7 @@ func _mode_button(text: String, mode: int) -> Button:
 func _set_mode(mode: int) -> void:
 	_mode = mode
 	_drag_id = ""
+	_road_drag = -1
 	_painting = false
 	_overlay.mouse_filter = (Control.MOUSE_FILTER_IGNORE if mode == Mode.OFF
 							 else Control.MOUSE_FILTER_STOP)
@@ -1257,10 +1945,18 @@ func _update_mode_label() -> void:
 		Mode.PLACE:        _mode_lbl.text = "Mode: PLACE — click map"
 		Mode.DELETE:       _mode_lbl.text = "Mode: DELETE — click entity"
 		Mode.MOVE:         _mode_lbl.text = "Mode: MOVE — drag entity"
+		Mode.ROTATE:       _mode_lbl.text = "Mode: ROTATE — L-click +45°, R-click -45°"
+		Mode.INSPECT:      _mode_lbl.text = "Mode: INSPECT — click an entity to edit"
 		Mode.TILE:         _mode_lbl.text = "Mode: TILE — drag to paint"
 		Mode.STRUCTURE:    _mode_lbl.text = "Mode: STRUCTURE — click to place"
 		Mode.TINT:         _mode_lbl.text = "Mode: TINT — drag to color"
 		Mode.PASSABILITY:  _mode_lbl.text = "Mode: PASS — drag to block / unblock"
+		Mode.SCULPT_RAISE: _mode_lbl.text = "Mode: RAISE — drag to raise ground"
+		Mode.SCULPT_LOWER: _mode_lbl.text = "Mode: LOWER — drag to lower ground"
+		Mode.ROAD_ADD:     _mode_lbl.text = "Mode: ROAD ADD — click to drop/link a dot"
+		Mode.ROAD_MOVE:    _mode_lbl.text = "Mode: ROAD MOVE — drag a dot"
+		Mode.ROAD_LINK:    _mode_lbl.text = "Mode: ROAD LINK — click two dots"
+		Mode.ROAD_DELETE:  _mode_lbl.text = "Mode: ROAD DELETE — click a dot"
 		_:                 _mode_lbl.text = "Mode: off"
 
 func _toggle_panel() -> void:
@@ -1275,12 +1971,21 @@ func _toggle_panel() -> void:
 # ── Input ──────────────────────────────────────────────────────────────────────
 func _input(event: InputEvent) -> void:
 	if event is InputEventKey and (event as InputEventKey).pressed \
-			and not (event as InputEventKey).echo \
-			and (event as InputEventKey).keycode == KEY_F10:
-		_toggle_panel()
-		get_viewport().set_input_as_handled()
+			and not (event as InputEventKey).echo:
+		var k := event as InputEventKey
+		if k.keycode == KEY_F10:
+			_toggle_panel()
+			get_viewport().set_input_as_handled()
+		elif k.keycode == KEY_Z and k.ctrl_pressed and _panel != null and _panel.visible:
+			_do_undo()
+			get_viewport().set_input_as_handled()
 
 func _screen_to_world(screen_pos: Vector2) -> Vector2:
+	# 3D client (World3D) converts the screen click to a world px via a ground ray;
+	# the 2D World has no such method so it falls back to the canvas transform.
+	var w := _world()
+	if w != null and w.has_method("world_pos_from_screen"):
+		return w.call("world_pos_from_screen", screen_pos)
 	return get_viewport().get_canvas_transform().affine_inverse() * screen_pos
 
 func _world() -> Node:
@@ -1291,7 +1996,9 @@ func _on_overlay_input(event: InputEvent) -> void:
 		return
 	if event is InputEventMouseButton:
 		var mb := event as InputEventMouseButton
-		if mb.button_index != MOUSE_BUTTON_LEFT:
+		# ROTATE uses BOTH buttons (L = +45°, R = -45°); everything else is L only.
+		var rotate_rmb := _mode == Mode.ROTATE and mb.button_index == MOUSE_BUTTON_RIGHT
+		if mb.button_index != MOUSE_BUTTON_LEFT and not rotate_rmb:
 			return
 		var wpos := _screen_to_world(mb.position)
 		if mb.pressed and NetworkManager.state != NetworkManager.NetState.LOGGED_IN:
@@ -1301,28 +2008,84 @@ func _on_overlay_input(event: InputEvent) -> void:
 				if mb.pressed: _place_at(wpos)
 			Mode.DELETE:
 				if mb.pressed: _delete_at(wpos)
+			Mode.INSPECT:
+				if mb.pressed: _inspect_at(wpos)
 			Mode.MOVE:
 				if mb.pressed:
 					_drag_id = str((_world() as Object).call("admin_entity_at", wpos, 44.0))
+					if _drag_id != "" and (_world() as Object).has_method("admin_entity_pos"):
+						_drag_old_pos = (_world() as Object).call("admin_entity_pos", _drag_id)
 				elif _drag_id != "":
+					if _drag_id.begins_with("a:"):
+						_push_undo({"op": "move", "id": _drag_id,
+							"x": _drag_old_pos.x, "y": _drag_old_pos.y})
 					NetworkManager.send_admin_move(_drag_id, _drag_pos.x, _drag_pos.y)
 					_drag_id = ""
+			Mode.ROTATE:
+				# Click an entity to rotate it a step; server persists + syncs it.
+				if mb.pressed:
+					var rid := str((_world() as Object).call("admin_entity_at", wpos, 44.0))
+					if rid != "":
+						var step := (PI / 4.0) if mb.button_index == MOUSE_BUTTON_LEFT else -(PI / 4.0)
+						var cur := 0.0
+						if (_world() as Object).has_method("admin_entity_rot"):
+							cur = float((_world() as Object).call("admin_entity_rot", rid))
+						if rid.begins_with("a:"):
+							_push_undo({"op": "rotate", "id": rid, "rot": cur})
+						NetworkManager.send_admin_rotate(rid, cur + step)
 			Mode.TILE, Mode.TINT, Mode.PASSABILITY:
 				_painting = mb.pressed
 				if mb.pressed:
 					_last_tile = Vector2i(-9999, -9999)
+					_tile_stroke = []          # start capturing this stroke
+					_tile_stroke_seen = {}
 					_paint_at(wpos)
+				else:
+					_commit_tile_stroke()      # mouse-up → bank the stroke for undo
+			Mode.SCULPT_RAISE, Mode.SCULPT_LOWER:
+				_painting = mb.pressed
+				if mb.pressed:
+					_sculpt_at(wpos, _mode == Mode.SCULPT_RAISE)
 			Mode.STRUCTURE:
 				if mb.pressed: _place_structure_at(wpos)
+			Mode.ROAD_ADD:
+				if mb.pressed: _road_click_add(wpos)
+			Mode.ROAD_LINK:
+				if mb.pressed: _road_click_link(wpos)
+			Mode.ROAD_DELETE:
+				if mb.pressed: _road_click_delete(wpos)
+			Mode.ROAD_MOVE:
+				if mb.pressed:
+					_road_drag = _road_node_at(wpos)
+					if _road_drag >= 0:
+						_road_select(_road_drag)
+				elif _road_drag >= 0:
+					_road_move_node(_road_drag, wpos)
+					_road_push()      # commit the final position
+					_road_drag = -1
 		_overlay.accept_event()
 	elif event is InputEventMouseMotion:
 		var wpos := _screen_to_world((event as InputEventMouseMotion).position)
 		_last_mouse_world = wpos
 		if _mode == Mode.MOVE and _drag_id != "":
 			_drag_pos = wpos
+		elif _mode == Mode.ROAD_MOVE and _road_drag >= 0:
+			# Live-follow the cursor (local only — the push happens on release).
+			_road_move_node(_road_drag, wpos)
+			var w := _world()
+			if w != null and w.has_method("set_road_selected_node"):
+				w.call("set_road_selected_node", _road_selected)
 		elif _mode in [Mode.TILE, Mode.TINT, Mode.PASSABILITY] and _painting:
 			_paint_at(wpos)
+		elif _mode in [Mode.SCULPT_RAISE, Mode.SCULPT_LOWER] and _painting:
+			_sculpt_at(wpos, _mode == Mode.SCULPT_RAISE)
 		_update_brush_preview()
+
+## Sculpt terrain height at a world px (3D client only; inert in 2D).
+func _sculpt_at(wpos: Vector2, raise: bool) -> void:
+	var w := _world()
+	if w != null and w.has_method("sculpt_at"):
+		w.call("sculpt_at", wpos, raise, _brush_size)
 
 func _place_at(wpos: Vector2) -> void:
 	var idx := _type_opt.get_selected_id()
@@ -1342,10 +2105,94 @@ func _place_at(wpos: Vector2) -> void:
 ## for resources and NPCs. Wired to OptionButton.item_selected and also
 ## called once during _build_world_section so the initial selection's
 ## visibility is correct.
-func _on_entity_picked(idx: int) -> void:
-	if idx < 0 or idx >= _entries.size() or _level_row == null:
+## Category classifier for the Place-Entity dropdown. Mirrors the Tiles
+## tab's tab pattern: reads the entry's `kind` + `data.type_str` and
+## returns the tab it belongs under. Any unclassified entry falls into
+## "Stations" so the picker never silently drops an entry.
+func _entity_category_for(entry: Dictionary) -> String:
+	var kind: String = str(entry.get("kind", ""))
+	if kind == "monster":
+		return "Monsters"
+	if kind == "npc":
+		return "NPCs"
+	# kind == "resource" — split by type_str.
+	var data: Dictionary = entry.get("data", {}) as Dictionary
+	var t: String = str(data.get("type_str", ""))
+	match t:
+		"tree":
+			return "Trees"
+		"rock", "essence":
+			return "Rocks"
+		"fish":
+			return "Fishing"
+		"herb", "stick", "stone":
+			return "Foraging"
+		"wall", "fortified_wall":
+			return "Walls"
+		"door":
+			return "Doors"
+		"forge", "fire", "bank", "building", "crafting", "archery", \
+		"runestone", "construction", "auction_house":
+			return "Stations"
+	return "Stations"
+
+
+## Rebuild _type_opt's items to only include entries whose category matches
+## the active tab. Each `add_item` uses the entry's original `_entries`
+## index as the item id so `_place_at` + `_on_entity_picked` keep reading
+## from `_entries[id]` unchanged. The selection is reset to the first
+## matching entry so the Level SpinBox visibility + seed stays coherent.
+func _populate_entity_dropdown() -> void:
+	if _type_opt == null:
 		return
-	var e: Dictionary = _entries[idx]
+	_type_opt.clear()
+	# Track whether we've already wired the selection signal — clear() drops
+	# item widgets but not the signal connection.
+	if not _type_opt.item_selected.is_connected(_on_entity_picked):
+		_type_opt.item_selected.connect(_on_entity_picked)
+	var first_id: int = -1
+	for i in range(_entries.size()):
+		var e: Dictionary = _entries[i]
+		if _active_entity_tab != "All" \
+				and _entity_category_for(e) != _active_entity_tab:
+			continue
+		# Kind suffix only shown on the "All" tab so the tab-specific views
+		# stay clean — you already picked "Monsters", no need to repeat it.
+		var label: String
+		if _active_entity_tab == "All":
+			label = "%s  (%s)" % [str(e["label"]), str(e["kind"])]
+		else:
+			label = str(e["label"])
+		_type_opt.add_item(label, i)
+		if first_id < 0:
+			first_id = i
+	if first_id >= 0:
+		# Find the item index whose id == first_id and select it.
+		for k in range(_type_opt.item_count):
+			if _type_opt.get_item_id(k) == first_id:
+				_type_opt.select(k)
+				# Pass the VISUAL index — _on_entity_picked resolves back
+				# to the entries id via get_item_id.
+				_on_entity_picked(k)
+				break
+
+
+func _on_entity_picked(idx: int) -> void:
+	# The OptionButton's `item_selected` signal reports the item's VISUAL
+	# index inside the popup, not the id we stashed at add_item time. On
+	# filtered tabs (Monsters/NPCs/etc.) the visual index no longer matches
+	# the `_entries` position, so we always resolve via `get_item_id` first.
+	# Bug before the fix: selecting anything past index 0 on the Monsters
+	# tab could land on a chicken (id 0) or a completely different `_entries`
+	# row whose kind wasn't "monster", hiding the Level SpinBox.
+	if _type_opt == null or _level_row == null:
+		return
+	if idx < 0 or idx >= _type_opt.item_count:
+		return
+	var entry_id: int = _type_opt.get_item_id(idx)
+	if entry_id < 0 or entry_id >= _entries.size():
+		return
+	var e: Dictionary = _entries[entry_id]
 	var is_monster := str(e.get("kind", "")) == "monster"
 	_level_row.visible = is_monster
 	if is_monster and _level_spin != null:
@@ -1361,8 +2208,568 @@ func _subtype_of(e: Dictionary) -> String:
 
 func _delete_at(wpos: Vector2) -> void:
 	var id := str((_world() as Object).call("admin_entity_at", wpos, 44.0))
-	if id != "":
-		NetworkManager.send_admin_delete(id)
+	if id == "":
+		return
+	# Capture the entity so the delete is undoable (a: entities only — we can
+	# re-place them from their cached data; procedural deletes aren't reversible).
+	if id.begins_with("a:") and (_world() as Object).has_method("admin_entity_info"):
+		var info: Dictionary = (_world() as Object).call("admin_entity_info", id)
+		if not info.is_empty():
+			_push_undo({"op": "place",
+				"kind": str(info.get("kind", "")),
+				"subtype": str(info.get("subtype", "")),
+				"x": float(info.get("x", 0.0)), "y": float(info.get("y", 0.0)),
+				"data": (info.get("data", {}) as Dictionary).duplicate(true)})
+	NetworkManager.send_admin_delete(id)
+
+# ── Undo stack ───────────────────────────────────────────────────────────────
+## Record a reverse-op unless we're mid-undo. `entry.op` is the operation that
+## REVERSES what the admin just did (a place is undone by a delete, etc.).
+func _push_undo(entry: Dictionary) -> void:
+	if _undoing:
+		return
+	_undo_stack.append(entry)
+	if _undo_stack.size() > _UNDO_MAX:
+		_undo_stack.pop_front()
+	_refresh_undo_btn()
+
+## Echo of a successful place — records the delete that would reverse it. The
+## suppress counter skips the echo produced BY an undo-delete's re-place.
+func _on_admin_entity_placed(id: String, _kind: String, _subtype: String,
+		_x: float, _y: float) -> void:
+	if id.is_empty():
+		return
+	if _suppress_placed_undo > 0:
+		_suppress_placed_undo -= 1
+		return
+	_push_undo({"op": "delete", "id": id})
+
+## Pop and replay the last reverse-op.
+func _do_undo() -> void:
+	if _undo_stack.is_empty():
+		Events.chat_message.emit("[Admin] Nothing to undo.")
+		return
+	var entry: Dictionary = _undo_stack.pop_back()
+	_undoing = true
+	match str(entry.get("op", "")):
+		"delete":
+			NetworkManager.send_admin_delete(str(entry["id"]))
+		"place":
+			# Re-placing produces an admin_placed echo we must not re-record.
+			_suppress_placed_undo += 1
+			NetworkManager.send_admin_place(str(entry["kind"]), str(entry["subtype"]),
+				float(entry["x"]), float(entry["y"]), entry.get("data", {}))
+		"move":
+			NetworkManager.send_admin_move(str(entry["id"]),
+				float(entry["x"]), float(entry["y"]))
+		"rotate":
+			NetworkManager.send_admin_rotate(str(entry["id"]), float(entry["rot"]))
+		"edit":
+			NetworkManager.send_admin_edit_entity(str(entry["id"]),
+				entry.get("patch", {}) as Dictionary)
+	_undoing = false
+	_refresh_undo_btn()
+	Events.chat_message.emit("[Admin] Undid last edit  (%d left)." % _undo_stack.size())
+
+func _refresh_undo_btn() -> void:
+	if _undo_btn == null:
+		return
+	var n := _undo_stack.size()
+	_undo_btn.text = "↶  Undo  (%d)" % n
+	_undo_btn.disabled = n == 0
+
+# ── Tile-paint undo (separate stack, biome strokes only) ─────────────────────
+## Record a tile's pre-paint override biome once per stroke (dedup by coord).
+func _capture_tile_prior(tx: int, ty: int) -> void:
+	var key := "%d,%d" % [tx, ty]
+	if _tile_stroke_seen.has(key):
+		return
+	_tile_stroke_seen[key] = true
+	var prior := ""
+	var g := get_tree().get_first_node_in_group("ground")
+	if g != null and g.has_method("override_biome_at"):
+		prior = str(g.call("override_biome_at", tx, ty))
+	_tile_stroke.append({"tx": tx, "ty": ty, "prior": prior})
+
+## Mouse-up on a paint drag — bank the captured stroke onto the tile-undo stack.
+func _commit_tile_stroke() -> void:
+	if _tile_stroke.is_empty():
+		return
+	_tile_undo_stack.append(_tile_stroke)
+	if _tile_undo_stack.size() > _TILE_UNDO_MAX:
+		_tile_undo_stack.pop_front()
+	_tile_stroke = []
+	_tile_stroke_seen = {}
+	_refresh_tile_undo_btn()
+
+## Replay the last stroke's priors — restore each tile to what it was ("" → clear).
+func _do_tile_undo() -> void:
+	if _tile_undo_stack.is_empty():
+		Events.chat_message.emit("[Admin] No tile paint to undo.")
+		return
+	var stroke: Array = _tile_undo_stack.pop_back()
+	for entry_v: Variant in stroke:
+		var e: Dictionary = entry_v
+		var tx := int(e["tx"]); var ty := int(e["ty"])
+		var prior := str(e["prior"])
+		if prior == "":
+			NetworkManager.send_admin_tile_clear(tx, ty)
+		else:
+			NetworkManager.send_admin_tile_set(tx, ty, prior)
+	_refresh_tile_undo_btn()
+	Events.chat_message.emit("[Admin] Undid tile paint  (%d strokes left)." % _tile_undo_stack.size())
+
+func _refresh_tile_undo_btn() -> void:
+	if _tile_undo_btn == null:
+		return
+	var n := _tile_undo_stack.size()
+	_tile_undo_btn.text = "↶ Undo paint (%d)" % n
+	_tile_undo_btn.disabled = n == 0
+
+# ── Entity browser ───────────────────────────────────────────────────────────
+## Searchable list of loaded editable entities. Each row: name → Go (teleport)
+## + Edit (Inspect popup). a:-entities can be edited; others can only be jumped to.
+func _open_entity_browser() -> void:
+	var w := _world() as Object
+	if not w.has_method("admin_entity_list"):
+		Events.chat_message.emit("[Admin] Browser not available in this client.")
+		return
+
+	var dim := ColorRect.new()
+	dim.color = Color(0, 0, 0, 0.45)
+	dim.set_anchors_preset(Control.PRESET_FULL_RECT)
+	dim.mouse_filter = Control.MOUSE_FILTER_STOP
+	add_child(dim)
+
+	var panel := PanelContainer.new()
+	panel.add_theme_stylebox_override("panel", UITheme.sb(UITheme.BG, UITheme.GOLD, 2))
+	panel.set_anchors_preset(Control.PRESET_CENTER)
+	panel.custom_minimum_size = Vector2(360, 460)
+	dim.add_child(panel)
+
+	var vb := VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 6)
+	panel.add_child(vb)
+
+	var title := Label.new()
+	title.text = "🔍  Entity Browser"
+	title.add_theme_color_override("font_color", UITheme.GOLD)
+	vb.add_child(title)
+
+	var search := LineEdit.new()
+	search.placeholder_text = "filter by name…"
+	search.add_theme_font_size_override("font_size", 12)
+	vb.add_child(search)
+
+	var count_lbl := Label.new()
+	count_lbl.add_theme_color_override("font_color", UITheme.DIM)
+	count_lbl.add_theme_font_size_override("font_size", 10)
+	vb.add_child(count_lbl)
+
+	var scroll := ScrollContainer.new()
+	scroll.custom_minimum_size = Vector2(340, 360)
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	vb.add_child(scroll)
+	var list_root := VBoxContainer.new()
+	list_root.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	list_root.add_theme_constant_override("separation", 2)
+	scroll.add_child(list_root)
+
+	search.text_changed.connect(func(_t: String) -> void:
+		_fill_browser(list_root, count_lbl, search.text, dim))
+	_fill_browser(list_root, count_lbl, "", dim)
+
+	var close_btn := Button.new()
+	close_btn.text = "Close"
+	close_btn.pressed.connect(func() -> void: dim.queue_free())
+	vb.add_child(close_btn)
+
+## (Re)build the browser rows filtered by `filter`. `dim` is the popup root so a
+## Go/Edit action can close it.
+func _fill_browser(list_root: VBoxContainer, count_lbl: Label,
+		filter: String, dim: Control) -> void:
+	for c: Node in list_root.get_children():
+		c.queue_free()
+	var w := _world() as Object
+	var entities: Array = w.call("admin_entity_list") if w.has_method("admin_entity_list") else []
+	var needle := filter.strip_edges().to_lower()
+	var shown := 0
+	for e_v: Variant in entities:
+		if not (e_v is Dictionary):
+			continue
+		var e: Dictionary = e_v
+		var nm := str(e.get("name", "?"))
+		var id := str(e.get("id", ""))
+		if needle != "" and not nm.to_lower().contains(needle):
+			continue
+		shown += 1
+		if shown > 300:   # keep the list bounded
+			break
+		list_root.add_child(_browser_row(nm, id, e.get("pos", Vector2.ZERO), dim))
+	count_lbl.text = "%d shown (of %d loaded)" % [shown, entities.size()]
+
+func _browser_row(nm: String, id: String, pos: Variant, dim: Control) -> HBoxContainer:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 4)
+	var editable := id.begins_with("a:")
+	var name_lbl := Label.new()
+	name_lbl.text = nm
+	name_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	name_lbl.add_theme_font_size_override("font_size", 11)
+	name_lbl.add_theme_color_override("font_color",
+		UITheme.GOLD if editable else UITheme.TEXT)
+	name_lbl.tooltip_text = id
+	row.add_child(name_lbl)
+	var go_btn := Button.new()
+	go_btn.text = "Go"
+	go_btn.tooltip_text = "Teleport to this entity."
+	go_btn.add_theme_font_size_override("font_size", 10)
+	go_btn.pressed.connect(func() -> void:
+		var w := _world() as Object
+		if w.has_method("admin_teleport") and pos is Vector2:
+			w.call("admin_teleport", pos)
+		dim.queue_free())
+	row.add_child(go_btn)
+	var edit_btn := Button.new()
+	edit_btn.text = "Edit"
+	edit_btn.add_theme_font_size_override("font_size", 10)
+	edit_btn.tooltip_text = "Edit properties."
+	edit_btn.pressed.connect(func() -> void:
+		var w := _world() as Object
+		if w.has_method("admin_entity_info"):
+			var info: Dictionary = w.call("admin_entity_info", id)
+			if not info.is_empty():
+				dim.queue_free()
+				_open_entity_editor(id, info))
+	row.add_child(edit_btn)
+	return row
+
+# ── World validator ──────────────────────────────────────────────────────────
+## Scan every LOADED editable entity for broken references. Client-side + read-only.
+## Returns [{id, name, pos, issue}]. Checks: out-of-bounds, shopkeeper with an
+## invalid/empty shop_id, a: door with no interior_id, blank NPC name.
+func _run_validation() -> Array:
+	var problems: Array = []
+	var w := _world() as Object
+	var wmax := 300.0 * TILE
+	var seen: Dictionary = {}
+	for grp: String in ["interactable", "monster"]:
+		for n: Node in get_tree().get_nodes_in_group(grp):
+			if not (n is Node2D) or not n.has_meta("edit_id"):
+				continue
+			var id := str(n.get_meta("edit_id"))
+			if seen.has(id):
+				continue
+			seen[id] = true
+			var pos: Vector2 = (n as Node2D).global_position
+			var nm := _validator_name(n)
+			if pos.x < 0.0 or pos.y < 0.0 or pos.x > wmax or pos.y > wmax:
+				problems.append({"id": id, "name": nm, "pos": pos, "issue": "outside world bounds"})
+			var ntype: Variant = n.get("npc_type")
+			if ntype is String and str(ntype) != "":
+				var shop_id := str(n.get("shop_id"))
+				if str(ntype) == "shopkeeper" or shop_id != "":
+					if shop_id == "" or not ShopCat.SHOPS.has(shop_id):
+						problems.append({"id": id, "name": nm, "pos": pos,
+							"issue": "shopkeeper — invalid shop_id '%s'" % shop_id})
+				if str(n.get("npc_name_str")).strip_edges() == "":
+					problems.append({"id": id, "name": nm, "pos": pos, "issue": "blank NPC name"})
+			# a: door → interior must be set (needs the stored data dict).
+			if id.begins_with("a:") and w.has_method("admin_entity_info"):
+				var info: Dictionary = w.call("admin_entity_info", id)
+				var data: Dictionary = (info.get("data", {}) as Dictionary) \
+					if info.get("data") is Dictionary else {}
+				if str(data.get("type_str", "")) == "door" \
+						and str(data.get("interior_id", "")) == "":
+					problems.append({"id": id, "name": nm, "pos": pos, "issue": "door leads nowhere (no interior)"})
+	return problems
+
+func _validator_name(n: Node) -> String:
+	for prop: String in ["npc_name_str", "display_name"]:
+		var v: Variant = n.get(prop)
+		if v is String and not (v as String).is_empty():
+			return v as String
+	var mt: Variant = n.get("monster_type")
+	if mt is String and not (mt as String).is_empty():
+		return (mt as String).capitalize()
+	return str(n.get_meta("edit_id"))
+
+func _open_validator() -> void:
+	var problems := _run_validation()
+
+	var dim := ColorRect.new()
+	dim.color = Color(0, 0, 0, 0.45)
+	dim.set_anchors_preset(Control.PRESET_FULL_RECT)
+	dim.mouse_filter = Control.MOUSE_FILTER_STOP
+	add_child(dim)
+
+	var panel := PanelContainer.new()
+	panel.add_theme_stylebox_override("panel", UITheme.sb(UITheme.BG, UITheme.GOLD, 2))
+	panel.set_anchors_preset(Control.PRESET_CENTER)
+	panel.custom_minimum_size = Vector2(380, 440)
+	dim.add_child(panel)
+
+	var vb := VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 6)
+	panel.add_child(vb)
+
+	var title := Label.new()
+	title.text = "🩺  World Validator"
+	title.add_theme_color_override("font_color", UITheme.GOLD)
+	vb.add_child(title)
+
+	var summary := Label.new()
+	summary.add_theme_font_size_override("font_size", 11)
+	if problems.is_empty():
+		summary.text = "No problems found in loaded entities. ✔"
+		summary.add_theme_color_override("font_color", Color(0.55, 0.85, 0.55))
+	else:
+		summary.text = "%d issue(s) found (loaded entities only):" % problems.size()
+		summary.add_theme_color_override("font_color", Color(0.95, 0.65, 0.30))
+	vb.add_child(summary)
+
+	var scroll := ScrollContainer.new()
+	scroll.custom_minimum_size = Vector2(360, 340)
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	vb.add_child(scroll)
+	var list_root := VBoxContainer.new()
+	list_root.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	list_root.add_theme_constant_override("separation", 3)
+	scroll.add_child(list_root)
+	for p_v: Variant in problems:
+		list_root.add_child(_problem_row(p_v as Dictionary, dim))
+
+	var close_btn := Button.new()
+	close_btn.text = "Close"
+	close_btn.pressed.connect(func() -> void: dim.queue_free())
+	vb.add_child(close_btn)
+
+func _problem_row(p: Dictionary, dim: Control) -> VBoxContainer:
+	var box := VBoxContainer.new()
+	box.add_theme_constant_override("separation", 1)
+	var top := HBoxContainer.new()
+	top.add_theme_constant_override("separation", 4)
+	box.add_child(top)
+	var nm_lbl := Label.new()
+	nm_lbl.text = str(p.get("name", "?"))
+	nm_lbl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	nm_lbl.add_theme_font_size_override("font_size", 11)
+	nm_lbl.add_theme_color_override("font_color", UITheme.GOLD)
+	top.add_child(nm_lbl)
+	var id := str(p.get("id", ""))
+	var pos: Variant = p.get("pos", Vector2.ZERO)
+	var go_btn := Button.new()
+	go_btn.text = "Go"
+	go_btn.add_theme_font_size_override("font_size", 10)
+	go_btn.pressed.connect(func() -> void:
+		var w := _world() as Object
+		if w.has_method("admin_teleport") and pos is Vector2:
+			w.call("admin_teleport", pos)
+		dim.queue_free())
+	top.add_child(go_btn)
+	if id.begins_with("a:"):
+		var edit_btn := Button.new()
+		edit_btn.text = "Edit"
+		edit_btn.add_theme_font_size_override("font_size", 10)
+		edit_btn.pressed.connect(func() -> void:
+			var w := _world() as Object
+			if w.has_method("admin_entity_info"):
+				var info: Dictionary = w.call("admin_entity_info", id)
+				if not info.is_empty():
+					dim.queue_free()
+					_open_entity_editor(id, info))
+		top.add_child(edit_btn)
+	var issue := Label.new()
+	issue.text = "⚠ " + str(p.get("issue", ""))
+	issue.add_theme_font_size_override("font_size", 10)
+	issue.add_theme_color_override("font_color", Color(0.95, 0.60, 0.30))
+	box.add_child(issue)
+	return box
+
+# ── Inspect / edit a placed entity ──────────────────────────────────────────
+## INSPECT click: find the entity under the cursor, read its cached wire data
+## from World, and open the property editor. Only admin-placed (a:) entities are
+## editable — procedural entities have no per-field override on the server.
+func _inspect_at(wpos: Vector2) -> void:
+	var id := str((_world() as Object).call("admin_entity_at", wpos, 44.0))
+	if id == "":
+		return
+	# Admin-placed (a:) AND pre-existing NPCs/bosses (n:/b:) are editable — the
+	# world synthesizes editable info for the latter.
+	var info: Dictionary = {}
+	if (_world() as Object).has_method("admin_entity_info"):
+		var v: Variant = (_world() as Object).call("admin_entity_info", id)
+		if v is Dictionary:
+			info = v
+	if info.is_empty():
+		Events.chat_message.emit("[Admin] Nothing editable here.")
+		return
+	_open_entity_editor(id, info)
+
+## Popup property editor. Fields are chosen by entity kind; on Apply only the
+## CHANGED fields are sent to the server as a patch (admin_edit_entity).
+func _open_entity_editor(id: String, info: Dictionary) -> void:
+	var kind := str(info.get("kind", ""))
+	var subtype := str(info.get("subtype", ""))
+	var data: Dictionary = (info.get("data", {}) as Dictionary) \
+		if info.get("data") is Dictionary else {}
+
+	# Dimmer that eats clicks behind the panel.
+	var dim := ColorRect.new()
+	dim.color = Color(0, 0, 0, 0.45)
+	dim.set_anchors_preset(Control.PRESET_FULL_RECT)
+	dim.mouse_filter = Control.MOUSE_FILTER_STOP
+	add_child(dim)
+
+	var panel := PanelContainer.new()
+	panel.add_theme_stylebox_override("panel", UITheme.sb(UITheme.BG, UITheme.GOLD, 2))
+	panel.set_anchors_preset(Control.PRESET_CENTER)
+	panel.custom_minimum_size = Vector2(320, 0)
+	dim.add_child(panel)
+
+	var vb := VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 6)
+	panel.add_child(vb)
+
+	var title := Label.new()
+	title.text = "✎ Edit  %s  (%s)" % [
+		subtype.capitalize().replace("_", " "), kind]
+	title.add_theme_color_override("font_color", UITheme.GOLD)
+	vb.add_child(title)
+
+	# data-key → {"ctrl": Control, "type": String, "orig": Variant}
+	var fields: Dictionary = {}
+	match kind:
+		"monster":
+			_add_ro_row(vb, "Type", subtype)
+			fields["level"] = _add_int_row(vb, "Level", int(data.get("level", 1)), 1, 99)
+		"npc":
+			fields["npc_name"]      = _add_str_row(vb, "Name", str(data.get("npc_name", "")))
+			fields["quest_text"]    = _add_text_row(vb, "Dialogue", str(data.get("quest_text", "")))
+			fields["shop_id"]       = _add_str_row(vb, "Shop id", str(data.get("shop_id", "")))
+			fields["wander_radius"] = _add_float_row(vb, "Wander px",
+				float(data.get("wander_radius", 32.0)), 0.0, 256.0)
+		_:
+			# resource / station / wall / farm_plot — generic props.
+			fields["display_name"] = _add_str_row(vb, "Name", str(data.get("display_name", "")))
+			fields["level"]        = _add_int_row(vb, "Req level", int(data.get("level", 1)), 1, 99)
+			fields["action"]       = _add_str_row(vb, "Action", str(data.get("action", "Interact")))
+
+	var btn_row := HBoxContainer.new()
+	btn_row.add_theme_constant_override("separation", 8)
+	vb.add_child(btn_row)
+	var apply_btn := Button.new()
+	apply_btn.text = "Apply"
+	apply_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	apply_btn.add_theme_stylebox_override("normal", UITheme.sb(UITheme.BTN_A, UITheme.GOLD, 2))
+	apply_btn.add_theme_color_override("font_color", UITheme.GOLD)
+	btn_row.add_child(apply_btn)
+	var cancel_btn := Button.new()
+	cancel_btn.text = "Cancel"
+	cancel_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	btn_row.add_child(cancel_btn)
+
+	cancel_btn.pressed.connect(func() -> void: dim.queue_free())
+	apply_btn.pressed.connect(func() -> void:
+		var patch := _collect_patch(fields)
+		if patch.is_empty():
+			Events.chat_message.emit("[Admin] No changes.")
+		else:
+			# Reverse patch = the OLD value of each changed field, so Undo restores it.
+			var rev: Dictionary = {}
+			for k_v: Variant in patch.keys():
+				rev[str(k_v)] = (fields[str(k_v)] as Dictionary)["orig"]
+			_push_undo({"op": "edit", "id": id, "patch": rev})
+			NetworkManager.send_admin_edit_entity(id, patch)
+		dim.queue_free())
+
+## Reads each field control, returning only the values that CHANGED from orig.
+func _collect_patch(fields: Dictionary) -> Dictionary:
+	var patch: Dictionary = {}
+	for key_v: Variant in fields.keys():
+		var key := str(key_v)
+		var f: Dictionary = fields[key]
+		var ctrl: Variant = f["ctrl"]
+		var new_val: Variant
+		match str(f["type"]):
+			"int":   new_val = int((ctrl as SpinBox).value)
+			"float": new_val = float((ctrl as SpinBox).value)
+			"str":   new_val = (ctrl as LineEdit).text
+			"text":  new_val = (ctrl as TextEdit).text
+			_:       continue
+		if new_val != f["orig"]:
+			patch[key] = new_val
+	return patch
+
+## ── Editor row builders (each returns the field descriptor for _collect_patch) ──
+func _editor_label(text: String) -> Label:
+	var l := Label.new()
+	l.text = text
+	l.custom_minimum_size = Vector2(90, 0)
+	l.add_theme_color_override("font_color", UITheme.DIM)
+	l.add_theme_font_size_override("font_size", 11)
+	return l
+
+func _add_ro_row(vb: VBoxContainer, label: String, value: String) -> void:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 6)
+	vb.add_child(row)
+	row.add_child(_editor_label(label))
+	var l := Label.new()
+	l.text = value
+	l.add_theme_color_override("font_color", UITheme.TEXT)
+	l.add_theme_font_size_override("font_size", 11)
+	row.add_child(l)
+
+func _add_str_row(vb: VBoxContainer, label: String, value: String) -> Dictionary:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 6)
+	vb.add_child(row)
+	row.add_child(_editor_label(label))
+	var le := LineEdit.new()
+	le.text = value
+	le.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	le.add_theme_font_size_override("font_size", 11)
+	row.add_child(le)
+	return {"ctrl": le, "type": "str", "orig": value}
+
+func _add_text_row(vb: VBoxContainer, label: String, value: String) -> Dictionary:
+	vb.add_child(_editor_label(label))
+	var te := TextEdit.new()
+	te.text = value
+	te.wrap_mode = TextEdit.LINE_WRAPPING_BOUNDARY
+	te.custom_minimum_size = Vector2(300, 64)
+	te.add_theme_font_size_override("font_size", 11)
+	vb.add_child(te)
+	return {"ctrl": te, "type": "text", "orig": value}
+
+func _add_int_row(vb: VBoxContainer, label: String, value: int, lo: int, hi: int) -> Dictionary:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 6)
+	vb.add_child(row)
+	row.add_child(_editor_label(label))
+	var sb := SpinBox.new()
+	sb.min_value = lo
+	sb.max_value = hi
+	sb.step = 1
+	sb.value = clampi(value, lo, hi)
+	sb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_child(sb)
+	return {"ctrl": sb, "type": "int", "orig": int(sb.value)}
+
+func _add_float_row(vb: VBoxContainer, label: String, value: float, lo: float, hi: float) -> Dictionary:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 6)
+	vb.add_child(row)
+	row.add_child(_editor_label(label))
+	var sb := SpinBox.new()
+	sb.min_value = lo
+	sb.max_value = hi
+	sb.step = 1
+	sb.value = clampf(value, lo, hi)
+	sb.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_child(sb)
+	return {"ctrl": sb, "type": "float", "orig": float(sb.value)}
 
 # ── Brush + tint + passability UI helpers ──────────────────────────────────
 func _on_brush_size_selected(idx: int) -> void:
@@ -1588,6 +2995,7 @@ func _paint_at(wpos: Vector2) -> void:
 	# 1×1 brush — fast path: keep the existing single-tile message so we
 	# don't pay the bulk overhead for the most common case.
 	if _brush_size <= 1:
+		_capture_tile_prior(t.x, t.y)
 		if biome == "(erase)":
 			NetworkManager.send_admin_tile_clear(t.x, t.y)
 		else:
@@ -1606,5 +3014,6 @@ func _paint_at(wpos: Vector2) -> void:
 		biome_or_null = biome
 	for c: Variant in coords3:
 		var v: Vector2i = c
+		_capture_tile_prior(v.x, v.y)
 		bulk.append({"tx": v.x, "ty": v.y, "biome": biome_or_null})
 	NetworkManager.send_admin_tile_set_bulk(bulk)

@@ -11,7 +11,7 @@ config_version=5
 [application]
 
 config/name="VikingVale"
-run/main_scene="res://world.tscn"
+run/main_scene="res://boot.tscn"
 config/features=PackedStringArray("4.6", "Forward Plus")
 config/icon="res://icon.svg"
 
@@ -23,6 +23,7 @@ ThrallManager="*res://scripts/autoloads/ThrallManager.gd"
 NetworkManager="*res://scripts/autoloads/NetworkManager.gd"
 AudioManager="*res://scripts/autoloads/AudioManager.gd"
 NorseMusic="*res://scripts/autoloads/audio/NorseMusic.gd"
+AudioMixerPanel="*res://scripts/ui/AudioMixerPanel.gd"
 PlayerMods="*res://scripts/autoloads/PlayerMods.gd"
 TouchInput="*res://scripts/autoloads/TouchInput.gd"
 PetManager="*res://scripts/autoloads/PetManager.gd"

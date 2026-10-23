@@ -31,6 +31,14 @@ const SHOPS: Dictionary = {
 			{"id": "wooden_pickaxe",        "name": "Wooden Pickaxe",       "color": [0.50, 0.34, 0.14, 1.0], "max":   5, "restock_per_tick":  0.5},
 			{"id": "wooden_fishing_pole",   "name": "Wooden Fishing Pole",  "color": [0.45, 0.28, 0.08, 1.0], "max":   5, "restock_per_tick":  0.5},
 			{"id": "fishing_pole",          "name": "Fishing Pole",         "color": [0.48, 0.30, 0.08, 1.0], "max":   3, "restock_per_tick":  0.3},
+			# Low-tier farming seeds — an on-ramp for new farmers (higher tiers forage-only).
+			{"id": "wheat_seed",            "name": "Wheat Seed",           "color": [0.90, 0.80, 0.30, 1.0], "max":  40, "restock_per_tick":  4.0},
+			{"id": "carrot_seed",           "name": "Carrot Seed",          "color": [0.90, 0.55, 0.20, 1.0], "max":  40, "restock_per_tick":  4.0},
+			{"id": "barley_seed",           "name": "Barley Seed",          "color": [0.82, 0.72, 0.40, 1.0], "max":  30, "restock_per_tick":  3.0},
+			{"id": "cabbage_seed",          "name": "Cabbage Seed",         "color": [0.45, 0.72, 0.36, 1.0], "max":  30, "restock_per_tick":  3.0},
+			{"id": "rye_seed",              "name": "Rye Seed",             "color": [0.72, 0.62, 0.32, 1.0], "max":  25, "restock_per_tick":  2.5},
+			{"id": "corn_seed",             "name": "Corn Seed",            "color": [0.92, 0.80, 0.25, 1.0], "max":  20, "restock_per_tick":  2.0},
+			{"id": "potato_seed",           "name": "Potato Seed",          "color": [0.72, 0.56, 0.36, 1.0], "max":  20, "restock_per_tick":  2.0},
 		],
 	},
 
@@ -61,11 +69,19 @@ const SHOPS: Dictionary = {
 		"buy_multiplier": 1.0,
 		"stock_template": [
 			{"id": "earthworm",     "name": "Earthworm",     "color": [0.55, 0.30, 0.20, 1.0], "max": 50, "restock_per_tick": 10.0},
+			{"id": "shrimp_bait",   "name": "Shrimp Bait",   "color": [0.95, 0.62, 0.55, 1.0], "max": 40, "restock_per_tick":  5.0},
 			{"id": "fatty_lard",    "name": "Fatty Lard",    "color": [0.92, 0.86, 0.62, 1.0], "max": 20, "restock_per_tick":  2.0},
+			{"id": "calming_chum",  "name": "Calming Chum",  "color": [0.55, 0.72, 0.66, 1.0], "max": 15, "restock_per_tick":  1.5},
+			{"id": "glimmer_roe",   "name": "Glimmer Roe",   "color": [0.95, 0.85, 0.45, 1.0], "max":  8, "restock_per_tick":  0.5},
 			{"id": "raw_fish",      "name": "Raw Fish",      "color": [0.70, 0.90, 0.95, 1.0], "max": 30, "restock_per_tick":  3.0},
 			{"id": "raw_salmon",    "name": "Raw Salmon",    "color": [0.95, 0.55, 0.30, 1.0], "max": 15, "restock_per_tick":  1.0},
 			{"id": "cooked_fish",   "name": "Cooked Fish",   "color": [0.85, 0.65, 0.35, 1.0], "max": 12, "restock_per_tick":  1.0},
 			{"id": "cooked_salmon", "name": "Cooked Salmon", "color": [0.95, 0.52, 0.28, 1.0], "max":  8, "restock_per_tick":  0.5},
+			# Premium tackle — low stock, slow restock (the deep-water lures).
+			{"id": "runic_lure",    "name": "Runic Lure",    "color": [0.40, 0.60, 0.85, 1.0], "max":  3, "restock_per_tick":  0.15},
+			{"id": "trophy_spoon",  "name": "Trophy Spoon",  "color": [0.85, 0.85, 0.90, 1.0], "max":  2, "restock_per_tick":  0.10},
+			{"id": "serpent_lure",  "name": "Serpent Lure",  "color": [0.30, 0.65, 0.45, 1.0], "max":  2, "restock_per_tick":  0.10},
+			{"id": "kraken_bait",   "name": "Kraken Bait",   "color": [0.35, 0.10, 0.45, 1.0], "max":  3, "restock_per_tick":  0.15},
 		],
 	},
 
@@ -97,6 +113,12 @@ const SHOPS: Dictionary = {
 			{"id": "copper_bar",   "name": "Copper Bar",   "color": [0.80, 0.50, 0.20, 1.0], "max": 10, "restock_per_tick": 1.0},
 			{"id": "gold_amulet",  "name": "Gold Amulet",  "color": [0.95, 0.80, 0.15, 1.0], "max":  2, "restock_per_tick": 0.1},
 			{"id": "ironwood_bow", "name": "Ironwood Bow", "color": [0.28, 0.14, 0.06, 1.0], "max":  2, "restock_per_tick": 0.1},
+			# Rare Jewelcrafting gems — very low stock + slow restock so they're
+			# a genuine high-coin luxury buy, not a reliable supply. Price comes
+			# from ItemPrices (opal 1.2k / amethyst 4k / diamond 12k).
+			{"id": "opal",         "name": "Opal",         "color": [0.82, 0.90, 0.95, 1.0], "max":  3, "restock_per_tick": 0.10},
+			{"id": "amethyst",     "name": "Amethyst",     "color": [0.62, 0.38, 0.85, 1.0], "max":  2, "restock_per_tick": 0.05},
+			{"id": "diamond",      "name": "Diamond",      "color": [0.85, 0.95, 1.00, 1.0], "max":  1, "restock_per_tick": 0.02},
 		],
 	},
 }

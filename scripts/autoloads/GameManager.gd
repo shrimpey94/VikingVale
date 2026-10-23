@@ -4,6 +4,7 @@ extends Node
 
 const GearDB    = preload("res://scripts/Equipment.gd")
 const Fishing   = preload("res://scripts/Fishing.gd")
+const Farming   = preload("res://scripts/Farming.gd")
 # Backstory uses `class_name Backstory` so it's globally available — no
 # preload const needed (would shadow the class_name symbol under strict mode).
 
@@ -11,7 +12,8 @@ var player_skill_xp: Dictionary = {
 	"woodcutting":  0,
 	"mining":        0,
 	"fishing":       0,
-	"foraging":      0,
+	# Foraging was merged into Farming (Phase 1); its slot is now Jewelcrafting.
+	"jewelcrafting": 0,
 	"smithing":      0,
 	"cooking":       0,
 	"crafting":      0,
@@ -25,7 +27,25 @@ var player_skill_xp: Dictionary = {
 	"soul":          0,
 }
 
+## Foraging → Farming merge (Phase 1). Any legacy "foraging" skill reference
+## (herb/mushroom/berry nodes, old quests) redirects to "farming" so the
+## existing string literals keep working without a mass rewrite.
+func _canonical_skill(skill: String) -> String:
+	return "farming" if skill == "foraging" else skill
+
 const RESPAWN_POS := Vector2(7823, 4488)  # Bjorn's Landing coastal spawn — matches server-side INSERT default for new accounts
+## Player's world px captured right before a 2D↔3D toggle (P7), so the new scene
+## spawns them exactly where they were instead of at RESPAWN_POS (which would be a
+## free fast-travel exploit). Vector2(-1,-1) = "none" (fresh boot uses the login pos).
+var switch_pos: Vector2 = Vector2(-1, -1)
+
+## First-login opening prologue (OpeningPrologue.gd runs as a persistent director on the
+## tree root, so the book/white mask the 2D→3D→2D scene switches). `intro_active` = a
+## director is running — worlds must NOT start their own or re-show the book across the
+## switches. `intro_need_backstory` = defer character creation until AFTER the cinematic
+## (the director shows BackstorySelectScreen at the end, in whatever scene we land in).
+var intro_active: bool = false
+var intro_need_backstory: bool = false
 
 const BONE_XP: Dictionary = {
 	"rat_bone":     5,
@@ -33,6 +53,11 @@ const BONE_XP: Dictionary = {
 	"goblin_ear":   10,
 	"draugr_shard": 30,
 	"dragon_scale": 50,
+	# Generic Soul-skill remains — dropped by ANY monster (~50% chance, tiered by
+	# the monster's level, see Monster.SOUL_DROPS). Bury for Soul XP like any bone.
+	"bone_fragment": 8,
+	"cursed_bone":   20,
+	"soul_essence":  45,
 }
 
 ## Cooked foods → HP healed when eaten (left-click in inventory). Higher cooking
@@ -55,12 +80,52 @@ const FOOD_HEAL: Dictionary = {
 	"elder_fish_platter": 42, "giants_feast": 46,
 	# Lv 55–80 tiers (rarer ingredients, big heals)
 	"leviathan_stew": 55, "kraken_platter": 66, "feast_of_valhalla": 80,
+	# Pure-farming baseline dishes — playtest integration (crops → cooking).
+	"wheat_bread": 5, "carrot_stew": 12, "moonwheat_loaf": 40,
+	# Farming crop dishes (1.6.2) — basics + flagship dishes.
+	"barley_porridge": 6, "steamed_cabbage": 6, "dark_bread": 8, "roasted_corn": 8,
+	"boiled_potato": 9, "garden_salad": 15, "sweet_loaf": 14, "farmers_stew": 20,
+	"ale": 10, "stuffed_pepper": 16, "melon_slice": 24, "apple_pie": 36,
+	"berry_fruit_bowl": 30, "peach_cobbler": 42, "fine_wine": 46,
 }
 
 ## Inventory items: Array of { "id", "name", "qty", "color" }
 var inventory: Array[Dictionary] = []
 var bank_inventory: Array[Dictionary] = []
 var gold: int = 0
+
+## Banked gold reserve (Phase 3 #3) — server-owned, moved via deposit/withdraw.
+## Display-only mirror; the server is authoritative (synced by bank_gold_set).
+var bank_gold: int = 0
+
+## PvP Tokens — a SERVER-OWNED currency (Phase 1d), not an inventory item.
+## Earned on PvP kills, spent at the PvP-Token NPC to permanently upgrade a
+## gear piece. The server is authoritative: this local copy is display-only and
+## is overwritten by every `pvp_tokens_set` / login payload. Never mutate it to
+## grant tokens — only the server does that.
+var pvp_tokens: int = 0
+
+## Practice-makes-perfect counters — recipe_id → total attempts (success
+## + fail). Feeds the cook/smith/farm success formula: every 100 attempts
+## on a specific recipe adds +5% to that recipe's success chance, cap +30%.
+## Persisted server-side in the players.recipe_counts JSON column.
+var recipe_success_counts: Dictionary = {}
+
+## Bump the counter for `recipe_id` — call on every craft attempt regardless
+## of outcome. The next save round-trip persists to disk. Safe to call from
+## anywhere on the client; caps at 999999 as a sanity guard.
+func bump_recipe_count(recipe_id: String) -> void:
+	if recipe_id == "":
+		return
+	var cur: int = int(recipe_success_counts.get(recipe_id, 0))
+	recipe_success_counts[recipe_id] = mini(999999, cur + 1)
+
+## Per-recipe practice bonus — every 100 attempts adds +5% success, cap
+## +30%. Returned as a float in [0.0, 0.30] for the success roll.
+func practice_bonus_for(recipe_id: String) -> float:
+	@warning_ignore("integer_division")
+	var bumps: int = int(recipe_success_counts.get(recipe_id, 0)) / 100
+	return minf(0.30, float(bumps) * 0.05)
 
 ## Quest definitions ── type: "kill" | "collect"
 const QUESTS: Array = [
@@ -135,6 +200,179 @@ var current_boat_max_hp: int = 0
 ## reaching into the Player node's private state.
 var is_sailing: bool = false
 
+## PvP flag — WoW-style toggle with a WoW-style safe-mode grace after a
+## PvP death. Three states:
+##   pvp_flagged == true  → PvP ON, damage-taking active
+##   pvp_flagged == false + pvp_safe_until > now → SAFE MODE (post-death
+##       grace, no PvP damage in or out, cannot be attacked). Clicking the
+##       toggle DURING safe mode ends the grace early and flips straight
+##       back to PvP ON — the user asked for an override.
+##   pvp_flagged == false + pvp_safe_until <= now → PvP OFF
+## Turning ON from OFF costs a `PVP_COOLDOWN_SEC` lockout during which the
+## flag can't be turned off (prevents flicker exploits).
+const PVP_COOLDOWN_SEC: float = 300.0
+const PVP_SAFE_MODE_SEC: float = 60.0
+var pvp_flagged: bool = false
+var pvp_locked_until: float = 0.0
+var pvp_safe_until: float = 0.0
+
+## Interior decouple (bug batch 2026-07): interiors live at a far-off y≈12000
+## island, so reading the raw player position for the minimap / biome music
+## would show a wrong biome. While inside, consumers read `overworld_anchor`
+## (the building's real exterior position) instead of the player position.
+## Set by World._on_interior_entered / cleared on exit.
+# ── Admin-drawn road/path network (v1.6.9) ──────────────────────────────────
+## Waypoint graph the admin draws in-world (Roads tab) + the server persists.
+## `road_nodes` = [{id:int, x:float, y:float}] · `road_edges` = [[a_id,b_id],…].
+## The autoplay bot routes over it (road_path) for real road-following travel;
+## NetworkManager keeps these in sync via set_road_graph on the road_graph msg.
+var road_nodes: Array = []
+var road_edges: Array = []
+
+var in_interior: bool = false
+var overworld_anchor: Vector2 = Vector2.ZERO
+## Which interior the LOCAL player is currently in ("" = outside). Other players
+## are only rendered when their interior_id matches this, so building occupants
+## see each other and outsiders are hidden while you're inside.
+var current_interior_id: String = ""
+
+## The position the minimap / biome-audio should treat as "where you are":
+## the building's exterior spot while inside, else the live player position.
+func overworld_pos(player_pos: Vector2) -> Vector2:
+	return overworld_anchor if in_interior else player_pos
+
+# ── Road network sync + routing ─────────────────────────────────────────────
+## Called by NetworkManager when a road_graph message arrives (login + edits).
+func set_road_graph(nodes: Array, edges: Array) -> void:
+	road_nodes = nodes
+	road_edges = edges
+
+## Next free node id — max existing + 1 (the admin editor assigns ids locally).
+func road_next_node_id() -> int:
+	var m: int = 0
+	for n: Variant in road_nodes:
+		m = maxi(m, int((n as Dictionary).get("id", 0)))
+	return m + 1
+
+func _road_node_pos(nid: int) -> Vector2:
+	for n: Variant in road_nodes:
+		var d := n as Dictionary
+		if int(d.get("id", -1)) == nid:
+			return Vector2(float(d.get("x", 0.0)), float(d.get("y", 0.0)))
+	return Vector2.INF
+
+func _road_nearest_node(pos: Vector2) -> int:
+	var best_id: int = -1
+	var best_d: float = INF
+	for n: Variant in road_nodes:
+		var d := n as Dictionary
+		var np := Vector2(float(d.get("x", 0.0)), float(d.get("y", 0.0)))
+		var dist := pos.distance_to(np)
+		if dist < best_d:
+			best_d = dist
+			best_id = int(d.get("id", -1))
+	return best_id
+
+## Adjacency built on demand — the graph is small (dozens of nodes).
+func _road_adjacency() -> Dictionary:
+	var adj: Dictionary = {}
+	for e: Variant in road_edges:
+		if not (e is Array) or (e as Array).size() != 2:
+			continue
+		var a := int((e as Array)[0])
+		var b := int((e as Array)[1])
+		if not adj.has(a): adj[a] = []
+		if not adj.has(b): adj[b] = []
+		(adj[a] as Array).append(b)
+		(adj[b] as Array).append(a)
+	return adj
+
+## Shortest sequence of world waypoints from `from_world` to `to_world` along the
+## drawn road graph: nearest node to the start → BFS → nearest node to the goal,
+## then the goal itself. Empty if there's no graph (caller falls back to a
+## straight line). BFS is fine — edges are unweighted hops between hand-placed
+## nodes that already sit on the roads.
+func road_path(from_world: Vector2, to_world: Vector2) -> PackedVector2Array:
+	var out := PackedVector2Array()
+	if road_nodes.size() < 2:
+		return out
+	var start := _road_nearest_node(from_world)
+	var goal := _road_nearest_node(to_world)
+	if start < 0 or goal < 0:
+		return out
+	if start == goal:
+		out.append(_road_node_pos(goal))
+		out.append(to_world)
+		return out
+	var adj := _road_adjacency()
+	# Breadth-first search for the fewest-hops path.
+	var came: Dictionary = {start: start}
+	var queue: Array = [start]
+	var found := false
+	while not queue.is_empty():
+		var cur: int = queue.pop_front()
+		if cur == goal:
+			found = true
+			break
+		for nb_v: Variant in adj.get(cur, []):
+			var nb := int(nb_v)
+			if not came.has(nb):
+				came[nb] = cur
+				queue.append(nb)
+	if not found:
+		return out
+	# Walk the predecessor chain back to the start, then reverse into waypoints.
+	var chain: Array = []
+	var node := goal
+	while node != start:
+		chain.append(node)
+		node = int(came[node])
+	chain.append(start)
+	chain.reverse()
+	for nid_v: Variant in chain:
+		out.append(_road_node_pos(int(nid_v)))
+	out.append(to_world)   # final approach off the last node to the actual goal
+	return out
+
+func is_pvp_safe() -> bool:
+	return not pvp_flagged and Time.get_unix_time_from_system() < pvp_safe_until
+
+## Attempt to change PvP state. Returns "" on success, otherwise a
+## user-facing reason string ("Locked for 4m 12s"). Enabling is always
+## free and starts the lockout window. Disabling only succeeds after
+## the lockout elapses. Clicking during safe mode overrides — flips
+## straight back to full PvP ON and clears the grace timer.
+func request_pvp_toggle(want_on: bool) -> String:
+	var now: float = Time.get_unix_time_from_system()
+	# Safe-mode override — user pressing the button during grace opts BACK IN.
+	if is_pvp_safe():
+		pvp_safe_until = 0.0
+		pvp_flagged = true
+		pvp_locked_until = now + PVP_COOLDOWN_SEC
+		return ""
+	if want_on == pvp_flagged:
+		return ""
+	if want_on:
+		pvp_flagged = true
+		pvp_locked_until = now + PVP_COOLDOWN_SEC
+		pvp_safe_until = 0.0
+		return ""
+	if now < pvp_locked_until:
+		var rem: int = int(ceil(pvp_locked_until - now))
+		@warning_ignore("integer_division")
+		var mins: int = rem / 60
+		return "PvP locked for %dm %02ds" % [mins, rem % 60]
+	pvp_flagged = false
+	return ""
+
+## Called on respawn after a PvP death. Drops PvP flag → SAFE mode for
+## PVP_SAFE_MODE_SEC. When the grace elapses the player is left in PvP OFF
+## (per the user's spec — "wait out the safe mode you go back to PVP off").
+func begin_pvp_safe_mode() -> void:
+	pvp_flagged = false
+	pvp_locked_until = 0.0
+	pvp_safe_until = Time.get_unix_time_from_system() + PVP_SAFE_MODE_SEC
+
 ## Deduct `dmg` from the current boat's hull. When HP hits 0 the boat
 ## sinks — Player.gd handles the actual dock transition on its next
 ## _process tick since it polls current_boat_hp for the HP-bar draw.
@@ -145,16 +383,32 @@ func apply_boat_damage(dmg: int) -> void:
 	Events.chat_message.emit("[Boat] Hull takes %d damage (%d/%d)."
 			% [dmg, current_boat_hp, current_boat_max_hp])
 
-const BOOT_SPEED_BONUS: Dictionary = {
-	"leather_boots": 0.10,
-	"iron_boots":    0.20,
-	"mithril_boots": 0.30,
-	"dragon_boots":  0.40,
+# Boot move-speed bonus scales with tier: 8% base, +8% per tier step. Derived
+# from the boot id's tier prefix so every current + future boot tier is
+# covered without a hand-maintained per-id dict. Gold sits at the iron step
+# (it's a jewelry/utility material, not a combat tier).
+const _BOOT_SPEED_STEP: Dictionary = {
+	"leather": 1, "copper": 2, "iron": 3, "gold": 3,
+	"mithril": 4, "adamant": 5, "runite": 6, "dragon": 7,
 }
+const _BOOT_SPEED_PER_STEP := 0.08
+
+## Fractional move-speed bonus for a boot id ("" or non-boot → 0.0).
+## e.g. leather_boots → 0.08, iron_boots → 0.24, runite_boots → 0.48.
+func boot_speed_bonus(boot_id: String) -> float:
+	if boot_id == "" or not boot_id.ends_with("boots"):
+		return 0.0
+	var tier := boot_id.get_slice("_", 0)
+	var step := int(_BOOT_SPEED_STEP.get(tier, 1))
+	return _BOOT_SPEED_PER_STEP * float(step)
+
+## True when the item id is any boot (for UI gating that used to check the
+## old BOOT_SPEED_BONUS dict membership).
+func is_boots(item_id: String) -> bool:
+	return item_id.ends_with("boots")
 
 func get_move_speed(base: float) -> float:
-	var bonus := BOOT_SPEED_BONUS.get(equipped_boots, 0.0) as float
-	return base * (1.0 + bonus)
+	return base * (1.0 + boot_speed_bonus(equipped_boots))
 
 func equip_boots(item_id: String) -> void:
 	equipped_boots = item_id
@@ -176,20 +430,39 @@ func take_damage(amount: int) -> void:
 		_on_player_death()
 
 func heal(amount: int) -> void:
+	var before := current_hp
 	current_hp = mini(get_max_hp(), current_hp + amount)
 	Events.player_hp_changed.emit(current_hp, get_max_hp())
+	# Report the REAL gain (post-cap) so the HUD floats an accurate "+N" and
+	# never shows "+0" from an overheal.
+	var gained := current_hp - before
+	if gained > 0:
+		Events.player_healed.emit(gained)
 
 ## Eat one of a cooked food item, healing its FOOD_HEAL value. Returns false if
 ## not edible or already at full HP.
+## Metadata of the first inventory entry with `id` (e.g. a fish's "wnorm" /
+## "weight" / "trophy"), or `default` if none carries it.
+func item_meta(id: String, key: String, default: Variant = null) -> Variant:
+	for item: Dictionary in inventory:
+		if str(item.get("id", "")) == id:
+			return item.get(key, default)
+	return default
+
 func eat_food(item_id: String) -> bool:
 	if not FOOD_HEAL.has(item_id):
 		return false
 	if current_hp >= get_max_hp():
 		Events.chat_message.emit("You're already at full health.")
 		return false
+	# Weight-scaled healing (1.6.3): a meal cooked from a bigger catch heals more.
+	# Read the wnorm of the entry we're about to eat BEFORE removing it.
+	var wnorm := float(item_meta(item_id, "wnorm", 0.0))
 	if not remove_item_qty(item_id, 1):
 		return false
 	var amount := FOOD_HEAL[item_id] as int
+	if wnorm > 0.0:
+		amount = int(round(float(amount) * (1.0 + wnorm)))
 	heal(amount)
 	Events.chat_message.emit("You eat the %s. (+%d HP)" % [item_id.replace("_", " ").capitalize(), amount])
 	return true
@@ -241,6 +514,7 @@ func xp_for_level(level: int) -> int:
 func get_skill_level(skill: String) -> int:
 	if _xp_table.is_empty():
 		_build_xp_table()
+	skill = _canonical_skill(skill)
 	var xp := player_skill_xp.get(skill, 0) as int
 	var lv := 1
 	while lv < 99 and xp >= _xp_table[lv + 1]:
@@ -248,9 +522,46 @@ func get_skill_level(skill: String) -> int:
 	return lv
 
 func get_skill_xp(skill: String) -> int:
-	return player_skill_xp.get(skill, 0)
+	return player_skill_xp.get(_canonical_skill(skill), 0)
+
+## Level for a raw XP value on the shared curve. Public so read-only views (the
+## spectator HUD) can derive ANOTHER player's skill levels from their skill_xp
+## without disturbing the local player's own state.
+func level_for_xp(xp: int) -> int:
+	if _xp_table.is_empty():
+		_build_xp_table()
+	var lv := 1
+	while lv < 99 and xp >= _xp_table[lv + 1]:
+		lv += 1
+	return lv
+
+## Overall "character level" — a COMBAT-WEIGHTED score, not a raw sum/average.
+## The five combat skills pull CL_COMBAT_WEIGHT× harder than gathering/artisan
+## skills, and the whole thing is normalized so an all-99 account lands on
+## CL_TARGET_MAX (~150) instead of the ugly 1485 sum. Fresh account ≈ 1.
+## The server mirrors this EXACTLY (server.py _character_level) so a player's
+## nameplate level matches the Character Level in their own skills tab.
+const CL_COMBAT_SKILLS: Array = ["melee", "ranged", "magic", "defense", "vitality"]
+const CL_COMBAT_WEIGHT: int = 3
+const CL_OTHER_WEIGHT: int = 1
+const CL_TARGET_MAX: int = 150   # character level when every skill is 99
+
+func get_character_level() -> int:
+	var skills := player_skill_xp.keys()
+	if skills.is_empty():
+		return 1
+	var weighted := 0
+	var max_weighted := 0
+	for s: String in skills:
+		var w := CL_COMBAT_WEIGHT if CL_COMBAT_SKILLS.has(s) else CL_OTHER_WEIGHT
+		weighted += get_skill_level(s) * w
+		max_weighted += 99 * w
+	if max_weighted == 0:
+		return 1
+	return maxi(1, int(round(float(weighted) / float(max_weighted) * float(CL_TARGET_MAX))))
 
 func add_xp(skill: String, amount: int) -> void:
+	skill = _canonical_skill(skill)
 	if not player_skill_xp.has(skill):
 		return
 	# Apply PlayerMods multiplier so backstory perks / pet auras / future
@@ -271,6 +582,7 @@ func add_xp(skill: String, amount: int) -> void:
 		Events.level_up.emit(skill, lv_after)
 
 func get_level_progress(skill: String) -> float:
+	skill = _canonical_skill(skill)
 	var xp := player_skill_xp.get(skill, 0) as int
 	var lv := get_skill_level(skill)
 	if lv >= 99:
@@ -280,6 +592,7 @@ func get_level_progress(skill: String) -> float:
 	return clampf(float(xp - cur) / float(maxi(1, nxt - cur)), 0.0, 1.0)
 
 func get_xp_to_next_level(skill: String) -> int:
+	skill = _canonical_skill(skill)
 	var xp := player_skill_xp.get(skill, 0) as int
 	var lv := get_skill_level(skill)
 	if lv >= 99:
@@ -292,7 +605,9 @@ func has_tool_for_skill(skill: String) -> bool:
 	match skill:
 		"woodcutting": keyword = "axe"
 		"mining":      keyword = "pickaxe"
-		"fishing":     keyword = "fishing_pole"
+		# Fishing no longer requires a pole — fishing spots are usable
+		# bare-handed. (Poles may return later purely as a catch-rate
+		# bonus, not a hard gate.)
 		_: return true
 	for item: Dictionary in inventory:
 		if (item["id"] as String).contains(keyword):
@@ -307,26 +622,113 @@ func tool_name_for_skill(skill: String) -> String:
 	return ""
 
 # ── Combat stats ─────────────────────────────────────────────────────────────
+## Style-aware attack power. Universal `atk` bonus applies to every style
+## (weapon damage baseline); style-specific bonuses stack on top:
+##   melee  → +str (mace + shield strength)
+##   ranged → +ratk (bow ranged bonus)
+##   magic  → +matk (staff magic bonus)
 func get_attack_power(style: String) -> int:
 	var eq := get_equipment_bonus("atk")
 	match style:
-		"melee":  return maxi(1, floori(get_skill_level("melee")  / 3.0) + 5 + eq)
-		"ranged": return maxi(1, floori(get_skill_level("ranged") / 3.0) + 4 + eq)
-		"magic":  return maxi(1, floori(get_skill_level("magic")  / 3.0) + 3 + eq)
+		"melee":
+			return maxi(1, floori(get_skill_level("melee")  / 3.0) + 5 + eq
+				+ get_equipment_bonus("str"))
+		"ranged":
+			return maxi(1, floori(get_skill_level("ranged") / 3.0) + 4 + eq
+				+ get_equipment_bonus("ratk"))
+		"magic":
+			return maxi(1, floori(get_skill_level("magic")  / 3.0) + 3 + eq
+				+ get_equipment_bonus("matk"))
 	return 1
 
 func get_defense_power() -> int:
 	return maxi(0, floori(get_skill_level("defense") / 4.0)) + get_equipment_bonus("def")
 
+# ── Combat depth (Phase 4) ──────────────────────────────────────────────────
+const CRIT_BASE_CHANCE := 0.05
+const CRIT_MULT := 1.5
+const BLOCK_MULT := 0.5       # a block halves the incoming hit
+const BLOCK_CHANCE_CAP := 0.75
+
+## Attacker crit chance — 5% base + equipped `crit` stat (in %). Rolled on
+## outgoing hits; a crit multiplies damage by CRIT_MULT.
+func get_crit_chance() -> float:
+	return clampf(CRIT_BASE_CHANCE + float(get_equipment_bonus("crit")) / 100.0, 0.0, 0.95)
+
+## Defender block chance — from shields/gear `block` (in %), capped. On a block
+## the incoming hit is halved.
+func get_block_chance() -> float:
+	return clampf(float(get_equipment_bonus("block")) / 100.0, 0.0, BLOCK_CHANCE_CAP)
+
+## Style-aware defense (Phase 4 split): baseline def (all styles) + the matching
+## def_<style> specialization. Magic bypasses shield/plate specialization, so an
+## armored player still takes more from spells unless they carry magic-resist.
+func get_defense_vs(style: String) -> int:
+	var base := get_defense_power()
+	if style == "melee" or style == "ranged" or style == "magic":
+		base += maxi(0, get_equipment_bonus("def_" + style))
+	return base
+
+## Apply the defender's mitigation to an incoming hit (Phase 4): split defense
+## then a block roll. Returns [final_damage, blocked]. `raw` is the pre-defense
+## amount; `style` is the attacker's style.
+func mitigate_incoming(raw: int, style: String) -> Array:
+	var after_def := maxi(1, raw - get_defense_vs(style))
+	var blocked := randf() < get_block_chance()
+	if blocked:
+		after_def = maxi(1, int(ceil(float(after_def) * BLOCK_MULT)))
+	return [after_def, blocked]
+
+## Roll a crit on outgoing damage (Phase 4). Returns [final_damage, was_crit].
+func roll_crit(damage: int) -> Array:
+	if randf() < get_crit_chance():
+		return [maxi(1, int(round(float(damage) * CRIT_MULT))), true]
+	return [damage, false]
+
+## Product of every equipped piece's `atk_spd` — multiplies the base swing
+## interval. Bow (0.85) + light gear can drop below 1.0 for a faster combat
+## cadence; battleaxe (1.15) slows it. Combat tick paths in HUD multiply
+## their fixed 2.4-second base by this value.
+func get_attack_speed_mult() -> float:
+	return GearDB.stat_speed_mult(equipment)
+
 # ── Equipment ──────────────────────────────────────────────────────────────────
 func get_equipment_bonus(stat: String) -> int:
 	return GearDB.stat_total(equipment, stat)
+
+## Gate an equip attempt by the item's level requirement. Returns "" on OK
+## or a user-facing reason string. Consumers should chat the reason and
+## bail before calling equip_item so the inventory isn't mutated.
+func equip_gate(item_id: String) -> String:
+	# Admins bypass every gear gate — they need to wield anything for
+	# testing/building. (Full admin: owner or admin rank.)
+	if is_admin():
+		return ""
+	var d := GearDB.def_for(item_id)
+	if d.is_empty():
+		return ""
+	var min_lv: int = int(d.get("min_lv", 1))
+	if min_lv <= 1:
+		return ""
+	var req_skill: String = str(d.get("req_skill", ""))
+	if req_skill == "":
+		return ""
+	var have: int = get_skill_level(req_skill)
+	if have < min_lv:
+		return "Requires %s Lv %d (you are %d)." % [
+			req_skill.capitalize(), min_lv, have]
+	return ""
 
 func equip_item(inv_index: int) -> void:
 	if inv_index < 0 or inv_index >= inventory.size():
 		return
 	var item_id := inventory[inv_index]["id"] as String
 	if not GearDB.is_equippable(item_id):
+		return
+	# Level gate — refuse before removing anything from inventory.
+	var gate := equip_gate(item_id)
+	if gate != "":
+		Events.chat_message.emit(gate)
 		return
 	var slot := GearDB.target_slot(item_id, equipment)
 	if slot == "":
@@ -358,6 +760,66 @@ func unequip_slot(slot: String) -> void:
 		equipped_boots = ""
 	_after_equipment_change()
 
+## Set the server-owned PvP-Token balance + notify listeners (HUD counter,
+## upgrade UI). Server is authoritative — this is only ever called from a
+## server message (pvp_tokens_set / kill credit / login), never to self-grant.
+func set_pvp_tokens(n: int) -> void:
+	pvp_tokens = maxi(0, n)
+	Events.pvp_tokens_changed.emit(pvp_tokens)
+
+## Apply a server-approved token upgrade (Phase 1d). The server already
+## deducted tokens + minted the new item id; here we just swap the piece in
+## place (equipped slot or inventory) and sync the balance. `slot` is "" when
+## the upgraded piece was in the backpack rather than worn.
+func apply_token_upgrade(slot: String, old_id: String, new_id: String, new_balance: int) -> void:
+	set_pvp_tokens(new_balance)
+	var new_name := str(GearDB.def_for(new_id).get("name", new_id))
+	# Equipped piece — swap the slot value and recompute stats.
+	if slot != "" and str(equipment.get(slot, "")) == old_id:
+		equipment[slot] = new_id
+		if slot == "boots":
+			equipped_boots = new_id
+		_after_equipment_change()
+		Events.chat_message.emit("Upgraded %s." % new_name)
+		return
+	# Otherwise find it in the backpack (gear is qty 1, so first match is it).
+	for i in range(inventory.size()):
+		if str(inventory[i].get("id", "")) == old_id:
+			inventory[i]["id"] = new_id
+			inventory[i]["name"] = new_name
+			Events.inventory_changed.emit()
+			Events.chat_message.emit("Upgraded %s." % new_name)
+			return
+	# Piece wasn't found where the client expected (moved/banked mid-request).
+	# Balance still synced above; surface a soft note so the player re-checks.
+	Events.chat_message.emit("Upgrade applied — item not found in its slot; check your gear.")
+
+## Strict gate enforcement — called on login after equipment loads (Phase 1
+## rescale). Walks every equipped slot; anything the player no longer meets
+## the level requirement for is moved back to inventory. Admins bypass
+## (equip_gate returns "" for them, so nothing is stripped). Forces the
+## unequip even if inventory is at the soft cap — enforcement can't be
+## blocked by a full bag.
+func enforce_equip_gates() -> void:
+	var strip: Array[String] = []
+	for slot: String in equipment.keys():
+		var iid := str(equipment[slot])
+		if iid != "" and equip_gate(iid) != "":
+			strip.append(slot)
+	for slot: String in strip:
+		var iid := str(equipment[slot])
+		var d := GearDB.def_for(iid)
+		add_item(iid, str(d.get("name", iid)), 1, _swap_color_for(iid))
+		equipment.erase(slot)
+		if slot == "boots":
+			equipped_boots = ""
+		Events.chat_message.emit(
+			"Unequipped %s — you no longer meet its level requirement." %
+			str(d.get("name", iid)))
+	if not strip.is_empty():
+		_after_equipment_change()
+		Events.equipment_changed.emit()
+
 ## Picks the inventory tint to use when an equipped item returns to the bag.
 ## Gear is gray (matching the long-standing UI convention); bait/lures keep
 ## their real Fishing-table color so the inventory entry stays recognizable
@@ -379,12 +841,38 @@ func _after_equipment_change() -> void:
 	current_hp = mini(current_hp, get_max_hp())
 	Events.equipment_changed.emit()
 	Events.inventory_changed.emit()
+	_broadcast_appearance()   # tell the server → other players re-render our gear live
 
-## Single source of truth for admin gating. Combines hardcoded owner check
-## (NetworkManager.my_admin_rank == "owner") with DB-promoted admins (rank
-## "admin"). Any non-empty rank bypasses every level/material check.
+## Push our appearance + equipment to the server so it broadcasts player_appearance
+## to everyone else (they re-render our weapon/armor). No-ops if not logged in.
+## Rides combat_style/active_rune along like set_combat_style so they aren't lost.
+func _broadcast_appearance() -> void:
+	var to_send := appearance.duplicate()
+	to_send["combat_style"] = combat_style
+	to_send["active_rune"]  = active_rune
+	NetworkManager.send_set_appearance(to_send, equipment)
+
+## ── Admin / capability gates ─────────────────────────────────────────────
+## Three ranks live server-side: owner, admin, mapper. Client splits them
+## into two capability tiers:
+##   • is_full_admin() — owner + admin only. Gates economy tools (gold /
+##     items), account admin, /wipemonsters, and the visibility of
+##     dangerous AdminPanel tabs. Bypasses level/material checks.
+##   • can_edit_map() — includes mapper on top. Gates the map-building
+##     surface (tile paint / entity placement / zone editor).
+## `is_admin()` remains as a compatibility shim returning is_full_admin(),
+## so pre-existing call sites keep their conservative behavior; new gates
+## on map building should use can_edit_map().
+func is_full_admin() -> bool:
+	var r: String = NetworkManager.my_admin_rank
+	return r == "owner" or r == "admin"
+
+func can_edit_map() -> bool:
+	var r: String = NetworkManager.my_admin_rank
+	return r == "owner" or r == "admin" or r == "mapper"
+
 func is_admin() -> bool:
-	return NetworkManager.my_admin_rank != ""
+	return is_full_admin()
 
 ## Persist the combat-style toggle and the active rune. Called from the
 ## HUD's persistent style strip and rune sub-row. The save round-trips
@@ -414,19 +902,49 @@ func set_combat_style(style: String, rune_id: String = "") -> void:
 
 const INV_CAP := 28
 # Only ammo / consumable-type items stack into one slot. Everything else (logs,
-# ores, bars, fish, food, armour, weapons, tools) takes one slot per item.
+# ores, fish, food, armour, weapons, tools) takes one slot per item. Metal BARS
+# are the exception (playtest ask) — they stack so mid-tier builds like boats
+# (8 iron bars) don't devour the whole bag. Ores + logs deliberately stay
+# one-per-slot.
 const STACKABLE: Dictionary = {
 	"arrows": true, "feather": true, "herbs": true, "stick": true,
 	"stone": true, "magic_dust": true, "rune_essence": true,
 }
 
 const CROPS: Dictionary = {
-	"barley": true, "cabbage": true, "onion": true, "wheat": true, "tomato": true,
+	"wheat": true, "carrot": true, "barley": true, "cabbage": true, "rye": true,
+	"corn": true, "potato": true, "cotton": true, "pepper": true, "sugarcane": true,
+	"hops": true, "tomato": true, "moonwheat": true, "blueberry": true,
+	"lingonberry": true, "strawberry": true, "peach": true, "apple": true,
+	"watermelon": true, "grape": true,
 }
+
+## Grant a farm harvest (crop yield + Farming XP + practice bump), single-sourced
+## so the 2D and 3D worlds award it identically. Crop colour comes from the roster.
+func grant_farm_harvest(item_id: String, item_name: String, qty: int, xp: int, seed_id: String) -> void:
+	var col := Color(0.90, 0.78, 0.35)
+	if seed_id != "":
+		var sd := Farming.seed_def(seed_id)
+		if not sd.is_empty():
+			col = Farming.color_of(sd)
+	add_item(item_id, item_name, maxi(1, qty), col)
+	if xp > 0:
+		add_xp("farming", xp)
+	if seed_id != "":
+		bump_recipe_count(seed_id)
+
+## Re-grant a seed the plant popup removed optimistically, when the server
+## rejects the plant. No-op if the seed id isn't a known crop seed.
+func refund_farm_seed(seed_id: String) -> void:
+	if seed_id == "":
+		return
+	var sd := Farming.seed_def(seed_id)
+	if not sd.is_empty():
+		add_item(seed_id, str(sd.get("seed_name", seed_id)), 1, Farming.color_of(sd))
 
 func is_stackable(id: String) -> bool:
 	return STACKABLE.has(id) or id.ends_with("_rune") \
-		or id.ends_with("_seed") or CROPS.has(id)
+		or id.ends_with("_seed") or id.ends_with("_bar") or CROPS.has(id)
 
 # ── Inventory ─────────────────────────────────────────────────────────────────
 func get_item_qty(id: String) -> int:
@@ -458,7 +976,10 @@ func remove_item_qty(id: String, qty: int) -> bool:
 	Events.inventory_changed.emit()
 	return true
 
-func add_item(id: String, item_name: String, qty: int, color: Color) -> void:
+func add_item(id: String, item_name: String, qty: int, color: Color, extra: Dictionary = {}) -> void:
+	# `extra` carries per-item metadata (e.g. a fish's {weight, trophy}) onto the
+	# inventory entry. Only meaningful for non-stackable items — a stacked item
+	# can't hold a per-unit weight.
 	var added := 0
 	if is_stackable(id):
 		for item in inventory:
@@ -474,7 +995,9 @@ func add_item(id: String, item_name: String, qty: int, color: Color) -> void:
 		for _n in range(qty):
 			if free_slots() <= 0:
 				break
-			inventory.append({"id": id, "name": item_name, "qty": 1, "color": color})
+			var entry := {"id": id, "name": item_name, "qty": 1, "color": color}
+			entry.merge(extra)
+			inventory.append(entry)
 			added += 1
 	if added <= 0:
 		Events.chat_message.emit("Your inventory is full.")
@@ -607,6 +1130,74 @@ func _bank_merge(item: Dictionary) -> void:
 	bank_inventory.append(item)
 
 ## Move every inventory item into the bank in one action.
+# ── Autoplay: equip upgrades + deposit surplus ────────────────────────────────
+## Rough power score of a gear item (higher = better), for deciding upgrades.
+func _autoplay_gear_score(item_id: String) -> float:
+	var d := GearDB.def_for(item_id)
+	if d.is_empty():
+		return -1.0
+	return float(d.get("def", 0)) + float(d.get("atk", d.get("attack", 0))) \
+		+ float(d.get("hp", 0)) * 0.5 + float(d.get("min_lv", 1)) * 0.15
+
+## Would equipping this item be an upgrade (empty slot or higher score)? Used by
+## the AI to decide which gear is worth crafting.
+func autoplay_is_gear_upgrade(item_id: String) -> bool:
+	if not GearDB.is_equippable(item_id) or equip_gate(item_id) != "":
+		return false
+	var slot := GearDB.target_slot(item_id, equipment)
+	if slot == "":
+		return false
+	var cur := str(equipment.get(slot, ""))
+	return cur == "" or _autoplay_gear_score(item_id) > _autoplay_gear_score(cur)
+
+## Equip every carried gear/tool that is an UPGRADE over what's worn (or fills an
+## empty slot). Wielding a crafted axe/weapon shows real progression on camera.
+## Returns true if it equipped anything. Only ever a straight upgrade — never a
+## downgrade — so it can't loop.
+func autoplay_equip_upgrades() -> bool:
+	var did := false
+	var guard := 0
+	while guard < 40:
+		guard += 1
+		var target := -1
+		for i in range(inventory.size()):
+			var iid := str(inventory[i]["id"])
+			if not GearDB.is_equippable(iid) or equip_gate(iid) != "":
+				continue
+			var slot := GearDB.target_slot(iid, equipment)
+			if slot == "":
+				continue
+			var cur := str(equipment.get(slot, ""))
+			if cur == "" or _autoplay_gear_score(iid) > _autoplay_gear_score(cur):
+				target = i
+				break
+		if target < 0:
+			break
+		equip_item(target)   # swaps the worse piece back into the bag
+		did = true
+	return did
+
+## Deposit everything EXCEPT the tools we need to keep gathering (axe/pickaxe) and
+## a little cooked food to eat in the next fight.
+func autoplay_deposit_surplus() -> void:
+	var food_kept := 0
+	var guard := 0
+	while guard < 80:
+		guard += 1
+		var idx := -1
+		for i in range(inventory.size()):
+			var iid := str(inventory[i]["id"])
+			if iid.contains("axe") or iid.contains("pickaxe"):
+				continue   # keep tools so the bot can keep working
+			if FOOD_HEAL.has(iid) and food_kept < 4:
+				food_kept += 1
+				continue   # keep a few meals for combat
+			idx = i
+			break
+		if idx < 0:
+			break
+		deposit_item(idx)
+
 func deposit_all() -> void:
 	if inventory.is_empty():
 		return
@@ -637,6 +1228,19 @@ func populate_from_server_data(data: Dictionary) -> void:
 	for skill: String in player_skill_xp.keys():
 		if srv_xp.has(skill):
 			player_skill_xp[skill] = int(srv_xp[skill])
+	# Foraging → Farming merge (Phase 1): fold any legacy foraging XP the save
+	# still carries into farming. "foraging" is no longer a saved key, so once
+	# the next save writes, this migrates exactly once (no double-count).
+	if srv_xp.has("foraging"):
+		player_skill_xp["farming"] = int(player_skill_xp.get("farming", 0)) \
+			+ int(srv_xp["foraging"])
+
+	# Practice-makes-perfect counters — per-recipe attempt totals feeding
+	# the cook/smith/farm success formula. Empty {} for fresh accounts.
+	recipe_success_counts.clear()
+	var rc: Dictionary = data.get("recipe_counts", {}) if data.get("recipe_counts") is Dictionary else {}
+	for k: String in rc.keys():
+		recipe_success_counts[k] = int(rc[k])
 
 	# Inventory
 	inventory.clear()
@@ -654,6 +1258,10 @@ func populate_from_server_data(data: Dictionary) -> void:
 
 	# Gold
 	gold = int(data.get("gold", 0))
+	# PvP Tokens (server-owned currency, Phase 1d)
+	pvp_tokens = int(data.get("pvp_tokens", 0))
+	# Banked gold reserve (Phase 3 #3)
+	bank_gold = int(data.get("bank_gold", 0))
 
 	# Appearance + equipped loadout. Read the raw appearance dict BEFORE
 	# Appearance.sanitize discards non-cosmetic keys — combat_style and
@@ -668,6 +1276,10 @@ func populate_from_server_data(data: Dictionary) -> void:
 	equipment = (eq as Dictionary) if eq is Dictionary else {}
 	equipped_boots = str(equipment.get("boots", equipped_boots))
 	Events.equipment_changed.emit()
+	# Phase 1 rescale — strict enforcement: strip any equipped gear the
+	# player no longer qualifies for under the new level bands. Runs after
+	# skills + equipment + admin rank are all loaded. Admins are exempt.
+	enforce_equip_gates()
 
 	# Server-pushed quest state — full snapshot in the login burst per the
 	# "client never assumes" rule. Empty payload on a fresh account is fine
@@ -698,6 +1310,61 @@ func populate_from_server_data(data: Dictionary) -> void:
 	var sx := float(data.get("x", RESPAWN_POS.x))
 	var sy := float(data.get("y", RESPAWN_POS.y))
 	Events.player_respawned.emit(Vector2(sx, sy))
+
+## Move an entire bank stack into the inventory in one go. Splits across
+## empty slots if the item isn't stackable and there's more than one unit.
+## Silently no-ops when the bank slot is empty. Non-stackables that can't
+## all fit deposit as many as they can and leave the remainder behind.
+func withdraw_all_of(bank_index: int) -> void:
+	if bank_index < 0 or bank_index >= bank_inventory.size():
+		return
+	var item: Dictionary = bank_inventory[bank_index]
+	var iid := str(item["id"])
+	if is_stackable(iid):
+		if free_slots() <= 0:
+			# Even a stack needs a target slot when the inventory has none.
+			for inv in inventory:
+				if inv["id"] == iid:
+					inv["qty"] = (inv["qty"] as int) + (item["qty"] as int)
+					bank_inventory.remove_at(bank_index)
+					Events.inventory_changed.emit()
+					Events.bank_changed.emit()
+					return
+			Events.chat_message.emit("Inventory full — make room first.")
+			return
+		for inv in inventory:
+			if inv["id"] == iid:
+				inv["qty"] = (inv["qty"] as int) + (item["qty"] as int)
+				bank_inventory.remove_at(bank_index)
+				Events.inventory_changed.emit()
+				Events.bank_changed.emit()
+				return
+		inventory.append(item.duplicate())
+		bank_inventory.remove_at(bank_index)
+	else:
+		while (item["qty"] as int) > 0 and free_slots() > 0:
+			var one := item.duplicate()
+			one["qty"] = 1
+			inventory.append(one)
+			item["qty"] = (item["qty"] as int) - 1
+		if (item["qty"] as int) <= 0:
+			bank_inventory.remove_at(bank_index)
+	Events.inventory_changed.emit()
+	Events.bank_changed.emit()
+
+## Permanently delete a stack from the inventory. No refund, no bank move.
+## Bank-side counterpart lives at `discard_bank_item`.
+func discard_item(inv_index: int) -> void:
+	if inv_index < 0 or inv_index >= inventory.size():
+		return
+	inventory.remove_at(inv_index)
+	Events.inventory_changed.emit()
+
+func discard_bank_item(bank_index: int) -> void:
+	if bank_index < 0 or bank_index >= bank_inventory.size():
+		return
+	bank_inventory.remove_at(bank_index)
+	Events.bank_changed.emit()
 
 func withdraw_item(bank_index: int) -> void:
 	if bank_index >= bank_inventory.size():

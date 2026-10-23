@@ -9,7 +9,7 @@ const UITheme = preload("res://scripts/ui/UITheme.gd")
 # preload const needed (would shadow the class_name symbol).
 
 const _ICONS: Dictionary = {
-	"woodcutting": "🪓", "mining": "⛏", "fishing": "🎣", "foraging": "🌿",
+	"woodcutting": "🪓", "mining": "⛏", "fishing": "🎣", "jewelcrafting": "💍",
 	"smithing": "🔨", "cooking": "🍖", "crafting": "💎", "construction": "🏗",
 	"farming": "🌱",
 	"melee": "⚔", "ranged": "🏹", "magic": "✨", "defense": "🛡",
@@ -17,7 +17,7 @@ const _ICONS: Dictionary = {
 }
 const _SHORT: Dictionary = {
 	"woodcutting": "Woodcut.", "mining": "Mining", "fishing": "Fishing",
-	"foraging": "Forage", "smithing": "Smithing", "cooking": "Cooking",
+	"jewelcrafting": "Jewelry", "smithing": "Smithing", "cooking": "Cooking",
 	"crafting": "Crafting", "construction": "Constr.", "farming": "Farming",
 	"melee": "Melee", "ranged": "Ranged", "magic": "Magic",
 	"defense": "Defense", "vitality": "Vitality", "soul": "Soul",
@@ -127,7 +127,11 @@ func _refresh() -> void:
 		(row["bar"]  as ProgressBar).value = int(GameManager.get_level_progress(skill) * 1000)
 		(row["cell"] as PanelContainer).tooltip_text = _skill_tooltip(skill)
 	if _total_lbl != null:
-		_total_lbl.text = "Total Level:  %d / %d" % [_total_level(), GameManager.player_skill_xp.size() * 99]
+		# Combat-weighted overall level (tops out ~150). The raw sum lives on as
+		# a small, secondary readout — no more giant "/ 1485" as the headline.
+		_total_lbl.text = "Character Level:  %d / %d      (skill total %d)" % [
+			GameManager.get_character_level(), GameManager.CL_TARGET_MAX,
+			_total_level()]
 
 func _total_level() -> int:
 	var t := 0

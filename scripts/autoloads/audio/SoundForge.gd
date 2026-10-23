@@ -343,18 +343,23 @@ static func gen_fishing_catch() -> AudioStreamWAV:
 
 ## Grass: soft rustle — lowpassed noise burst, very short.
 static func gen_footstep_grass() -> AudioStreamWAV:
-	var dur: float = 0.12
+	# A soft "swish" through grass, not a hollow tap: a gentle noise brush with a
+	# rounded swell (no sharp attack), band-limited to the airy "shh" of grass —
+	# low thud removed, harsh top rolled off — and kept quiet/passive.
+	var dur: float = 0.19
 	var n: int = _n(dur)
 	var buf: PackedFloat32Array = _buf(n)
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 81
 	for i: int in range(n):
 		var tn: float = float(i) / float(n)
-		var env: float = exp(-15.0 * tn) * (1.0 - tn)
+		# Rounded hump: soft fade-in, smooth fade-out (a brush, not a click).
+		var env: float = pow(sin(PI * min(1.0, tn * 1.12)), 1.3)
 		buf[i] = rng.randf_range(-1.0, 1.0) * env
-	_lowpass(buf, 1600.0)
-	_normalize(buf, 0.7)
-	_envelope_edges(buf, 16)
+	_highpass(buf, 850.0)     # cut the "tap" thud so it reads as a brush
+	_lowpass(buf, 5200.0)     # keep the airy grass "shh", tame the harsh top
+	_normalize(buf, 0.28)     # QUIET — a faint brush, not a loud swish
+	_envelope_edges(buf, 24)
 	return _wav(buf)
 
 ## Stone: hard tap — narrow click with mid-range body.
@@ -885,21 +890,33 @@ static func _paint_brass_notes(buf: PackedFloat32Array, pattern: Array,
 # noise burst. Returns a small float buffer the caller adds in at the
 # right offsets — cheaper than re-generating per beat.
 static func _war_drum_buf(strength: float = 1.0) -> PackedFloat32Array:
-	var dur: float = 0.18
+	# Punchy war drum that's AUDIBLE ON ANY SPEAKER. The old one was a 35-90Hz
+	# sub-thump lowpassed at 700Hz — inaudible on laptop/monitor speakers. Now:
+	# low body (weight) + a mid "knock" (150-260Hz, the part small speakers CAN
+	# play) + a bright attack click so it cuts through the music.
+	var dur: float = 0.22
 	var n: int = _n(dur)
 	var buf: PackedFloat32Array = _buf(n)
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 901
 	var phase: float = 0.0
+	var phase2: float = 0.0
 	for i: int in range(n):
 		var tn: float = float(i) / float(n)
-		var freq: float = 90.0 * exp(-6.0 * tn) + 35.0
-		phase += TAU * freq / float(SR)
-		var env: float = exp(-7.0 * tn)
-		var body: float = sin(phase) * 0.8
-		var crack: float = rng.randf_range(-1.0, 1.0) * 0.35
-		buf[i] = (body + crack) * env * strength
-	_lowpass(buf, 700.0)
+		var env: float = exp(-6.0 * tn)
+		# Low body — pitch-swept thump (the weight on real speakers).
+		var f_low: float = 115.0 * exp(-7.0 * tn) + 55.0
+		phase += TAU * f_low / float(SR)
+		var body: float = sin(phase) * 0.72 * env
+		# Mid knock — higher, quicker; makes it read as a DRUM on any speaker.
+		var f_mid: float = 270.0 * exp(-13.0 * tn) + 150.0
+		phase2 += TAU * f_mid / float(SR)
+		var knock: float = sin(phase2) * 0.55 * exp(-15.0 * tn)
+		# Bright attack transient so the hit cuts through the mix.
+		var click: float = rng.randf_range(-1.0, 1.0) * 0.6 * exp(-46.0 * tn)
+		buf[i] = (body + knock + click) * strength
+	_lowpass(buf, 3400.0)   # keep the knock + click, tame the harsh top
+	_normalize(buf, 0.92)
 	return buf
 
 # Paint a sequence of plucked-tone notes (fundamental + 2nd + 3rd harmonic
@@ -1162,7 +1179,7 @@ static func _paint_tagelharpa(buf: PackedFloat32Array, start_i: int,
 			env = float(note_n - i) / float(rel_n)
 		else:
 			env = 1.0
-		var trem: float = 1.0 + 0.06 * sin(TAU * 5.0 * t)
+		var trem: float = 1.0 + 0.015 * sin(TAU * 4.0 * t)   # gentle, not a "wobble"
 		var s: float = sin(TAU * freq * t) * 0.55 \
 			+ sin(TAU * freq * 2.0 * t) * 0.30 \
 			+ sin(TAU * freq * 3.0 * t) * 0.20 \
@@ -1197,6 +1214,80 @@ static func _paint_throat_hum(buf: PackedFloat32Array, start_i: int,
 		var swell: float = 0.70 + 0.30 * sin(TAU * 0.3 * t)
 		var tremor: float = 1.0 + 0.04 * sin(TAU * 6.5 * t)
 		buf[idx] += s * env * swell * tremor * gain
+
+# Choir "aah" pad — the battle-hymn VOICES (Valhalla-calling bass singers).
+# Several slightly-detuned voices give chorus width; each is built from
+# vowel-formant-weighted harmonics with per-voice human vibrato + a slow breath
+# swell. Sits low for that deep war-choir weight. Heavier than the other
+# painters (voices×harmonics), but drones are generated once at startup.
+static func _paint_choir(buf: PackedFloat32Array, start_i: int,
+		freq: float, note_n: int, gain: float, rng_seed: int = 0) -> void:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = rng_seed if rng_seed != 0 else int(freq * 31.0)
+	var atk_n: int = int(0.45 * float(SR))   # slow choral swell in
+	var rel_n: int = int(0.60 * float(SR))
+	var n_max: int = buf.size()
+	# Vowel "aah" formant emphasis across harmonics 1..6 (mid boost = open vowel).
+	var formant: Array = [1.00, 0.55, 0.70, 0.45, 0.26, 0.15]
+	const VOICES := 3
+	var detune: Array = []
+	var phase: Array = []
+	var vrate: Array = []
+	for v: int in range(VOICES):
+		detune.append(1.0 + rng.randf_range(-0.004, 0.004))
+		phase.append(rng.randf_range(0.0, TAU))
+		vrate.append(4.4 + rng.randf_range(-0.6, 0.9))   # per-voice vibrato Hz
+	var inv: float = gain / float(VOICES * 2)
+	for i: int in range(note_n):
+		var idx: int = start_i + i
+		if idx >= n_max:
+			break
+		var t: float = float(i) / float(SR)
+		var env: float
+		if i < atk_n:
+			env = float(i) / float(atk_n)
+		elif i > note_n - rel_n:
+			env = float(note_n - i) / float(rel_n)
+		else:
+			env = 1.0
+		var swell: float = 0.75 + 0.25 * sin(TAU * 0.16 * t)
+		var s: float = 0.0
+		for v: int in range(VOICES):
+			var vf: float = freq * float(detune[v])
+			var vib: float = 1.0 + 0.008 * sin(TAU * float(vrate[v]) * t + float(phase[v]))
+			for h: int in range(formant.size()):
+				s += sin(TAU * vf * float(h + 1) * vib * t + float(phase[v])) * float(formant[h])
+		buf[idx] += s * inv * env * swell
+
+# Bass vocal "oh" — a GROUNDED low male voice (NOT the wavery choir/ghost). Warm
+# low harmonics, a closed dark vowel, and only a subtle steady vibrato (no slow
+# ghostly swell). The adventurous low voice under the open-world music.
+static func _paint_bass_vox(buf: PackedFloat32Array, start_i: int,
+		freq: float, note_n: int, gain: float, rng_seed: int = 0) -> void:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = rng_seed if rng_seed != 0 else int(freq * 29.0)
+	var atk_n: int = int(0.10 * float(SR))
+	var rel_n: int = int(0.22 * float(SR))
+	var n_max: int = buf.size()
+	# "oh"/"ooh" — strong fundamental, warm low harmonics, quick dark rolloff.
+	var harm: Array = [1.00, 0.62, 0.34, 0.17, 0.08]
+	for i: int in range(note_n):
+		var idx: int = start_i + i
+		if idx >= n_max:
+			break
+		var t: float = float(i) / float(SR)
+		var env: float
+		if i < atk_n:
+			env = float(i) / float(atk_n)
+		elif i > note_n - rel_n:
+			env = float(note_n - i) / float(rel_n)
+		else:
+			env = 1.0
+		# NO vibrato — a dead-steady low "Hmmm" (the wobble read as "womwomwom").
+		var s: float = 0.0
+		for h: int in range(harm.size()):
+			s += sin(TAU * freq * float(h + 1) * t) * float(harm[h])
+		buf[idx] += s * env * gain
 
 # Bone flute — pure sine fundamental + soft 2nd harmonic, breath noise
 # floor, 50ms attack, gentle vibrato.
@@ -1264,11 +1355,14 @@ static func _paint_horn_call(buf: PackedFloat32Array, start_i: int,
 			env = float(note_n - i) / float(rel_n)
 		else:
 			env = 1.0
-		var s: float = sin(TAU * freq * t) * 0.42 \
-			+ sin(TAU * freq * 2.0 * t) * 0.25 \
-			+ sin(TAU * freq * 3.0 * t) * 0.15 \
-			+ sin(TAU * freq * 4.0 * t) * 0.08
-		buf[idx] += s * env * gain
+		# Deep war-horn / foghorn: sub-octave weight, dominant fundamental,
+		# few upper harmonics + a slow "heave" swell so it reads as a horn blast.
+		var swell: float = 0.85 + 0.15 * sin(TAU * 0.6 * t)
+		var s: float = sin(TAU * freq * 0.5 * t) * 0.22 \
+			+ sin(TAU * freq * t) * 0.55 \
+			+ sin(TAU * freq * 2.0 * t) * 0.20 \
+			+ sin(TAU * freq * 3.0 * t) * 0.08
+		buf[idx] += s * env * swell * gain
 
 # Wooden clack — short percussive strike, mid-range wood body.
 static func _paint_wooden_clack(buf: PackedFloat32Array, start_i: int,
@@ -1330,8 +1424,53 @@ static func render_drone(notes: Array, dur: float) -> AudioStreamWAV:
 		match instrument:
 			"throat_hum":
 				_paint_throat_hum(buf, 0, f, n, gain)
+			"choir":
+				_paint_choir(buf, 0, f, n, gain, midi * 23)
+			"bass_vox":
+				_paint_bass_vox(buf, 0, f, n, gain, midi * 29)
 			_:
 				_paint_tagelharpa(buf, 0, f, n, gain, midi * 17)
+	_highpass(buf, 25.0)
+	_normalize(buf, 0.55)
+	return _wav(buf, true)
+
+
+# Render a looping CHORD PROGRESSION — the "verses" of the open-world music.
+# `bars` = [{"chord": [midi,...], "beats": float}, ...]. Each bar sustains its
+# chord for its beats, played in sequence, then the whole thing loops. Every
+# chord note gets a bowed tagelharpa voice + a bass_vox an octave below the
+# lowest note (the grounded low voice). The loop length is exactly the
+# progression length so the seam lines up.
+static func render_progression(bars: Array, bpm: float,
+		tag_gain: float = 0.12, vox_gain: float = 0.26) -> AudioStreamWAV:
+	var beat: float = 60.0 / bpm
+	var total_beats: float = 0.0
+	for b: Variant in bars:
+		total_beats += float((b as Dictionary).get("beats", 4.0))
+	var dur: float = total_beats * beat
+	var n: int = _n(dur)
+	var buf: PackedFloat32Array = _buf(n)
+	var cursor_beats: float = 0.0
+	for b: Variant in bars:
+		var bar: Dictionary = b as Dictionary
+		var chord: Array = bar.get("chord", []) as Array
+		var beats: float = float(bar.get("beats", 4.0))
+		var start_i: int = int(cursor_beats * beat * float(SR))
+		var span_n: int = int(beats * beat * float(SR))
+		if start_i < n:
+			span_n = mini(span_n, n - start_i)
+			var lowest: int = 999
+			for mv: Variant in chord:
+				lowest = mini(lowest, int(mv))
+			for mv2: Variant in chord:
+				var midi: int = int(mv2)
+				_paint_tagelharpa(buf, start_i, _midi_hz(midi), span_n, tag_gain, midi * 17)
+			if lowest < 999:
+				# Grounded low voice on the chord root, ~an octave down but kept
+				# out of sub-bass mud so it reads as a VOICE, not rumble.
+				var vox_midi: int = maxi(36, lowest - 12)
+				_paint_bass_vox(buf, start_i, _midi_hz(vox_midi), span_n, vox_gain, vox_midi * 29)
+		cursor_beats += beats
 	_highpass(buf, 25.0)
 	_normalize(buf, 0.55)
 	return _wav(buf, true)

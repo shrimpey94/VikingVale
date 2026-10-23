@@ -57,6 +57,10 @@ Desktop.ini
 .env
 .env.*
 credentials.json
+# Discord release-webhook URL (read by release.bat). NEVER commit — anyone with
+# it can post as your server. Set the VIKINGVALE_DISCORD_WEBHOOK env var instead,
+# or drop the URL in this local file.
+.discord_webhook
 
 # ── Android signing keystores (NEVER commit; losing or leaking them is a
 # permanent disaster — release keystores can't be regenerated, and a leaked
@@ -64,3 +68,13 @@ credentials.json
 *.keystore
 *.jks
 build/*.keystore
+
+# Private: public repo
+game_server.db*
+ADMIN_EDITOR_AUDIT.md
+CONTENT_AUDIT.md
+QUEST_QA.md
+LORE_BIBLE.md
+MAIN_QUEST_OUTLINE.md
+POST_170_PLAN.md
+VO_SCRIPT.md

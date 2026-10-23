@@ -110,6 +110,10 @@ func _ready() -> void:
 	_generate_ui_sounds()
 	_generate_ambience_sounds()
 	_generate_music_sounds()
+	# `monster_hurt` has no procedural default — it exists only if the owner dropped
+	# res://assets/audio/monster_hurt.(ogg|wav). register_sound picks up that override
+	# (and no-ops silently if the file isn't there).
+	register_sound("monster_hurt", null)
 	# Hook the signal bus so feature code doesn't need to know about audio.
 	_wire_signal_bus()
 
@@ -132,7 +136,10 @@ func _poll_biome_for_music_and_ambience() -> void:
 		_ground_node = get_tree().get_first_node_in_group("ground")
 	if _player_node == null or _ground_node == null:
 		return
-	var biome: String = _ground_node.call("biome_at_world", _player_node.global_position) as String
+	# While inside an interior, sample the biome at the building's exterior
+	# anchor so ambience stays local (interiors sit in a far-off y band).
+	var _bpos: Vector2 = GameManager.overworld_pos(_player_node.global_position)
+	var biome: String = _ground_node.call("biome_at_world", _bpos) as String
 	var amb := _ambience_id_for_biome(biome)
 	if amb != "":
 		play_ambience(amb)
@@ -231,12 +238,42 @@ func _load_volumes() -> void:
 			_volumes[bus_name] = int(cfg.get_value(_CONFIG_SECTION, bus_name, 80))
 
 # ── Sound registration ───────────────────────────────────────────────────────
+## Where hand-authored sound files live. Drop a file named after a catalog id
+## (e.g. res://assets/audio/sword_swing.ogg) and it OVERRIDES the procedural
+## sound for that id — no code change needed. .ogg preferred, .wav also works.
+const SOUND_OVERRIDE_DIR := "res://assets/audio"
+
 ## Called by the procedural-audio pass to register a generated stream against
 ## a known catalog ID. Safe to call after _ready (e.g. to swap a placeholder).
+## If a hand-authored override file exists for `id`, it wins over `stream`.
 func register_sound(id: String, stream: AudioStream) -> void:
-	if id.is_empty() or stream == null:
+	if id.is_empty():
+		return
+	var override := _load_sound_override(id)
+	if override != null:
+		stream = override
+	if stream == null:
 		return
 	_streams[id] = stream
+
+## Load a custom sound file for `id` if one has been added, else null. Ambience
+## and music ids are set to LOOP so a dropped bed cycles seamlessly.
+func _load_sound_override(id: String) -> AudioStream:
+	for ext: String in [".ogg", ".wav"]:
+		var path := "%s/%s%s" % [SOUND_OVERRIDE_DIR, id, ext]
+		if not ResourceLoader.exists(path):
+			continue
+		var s := load(path) as AudioStream
+		if s == null:
+			continue
+		if id in AMBIENCE_IDS or id in MUSIC_IDS:
+			if s is AudioStreamOggVorbis:
+				(s as AudioStreamOggVorbis).loop = true
+			elif s is AudioStreamWAV:
+				(s as AudioStreamWAV).loop_mode = AudioStreamWAV.LOOP_FORWARD
+		print("[audio] using custom sound for '%s' (%s)" % [id, path])
+		return s
+	return null
 
 func has_sound(id: String) -> bool:
 	return _streams.has(id)
@@ -288,16 +325,26 @@ func play_footstep(biome: String) -> void:
 	p.play()
 
 func _footstep_id_for_biome(biome: String) -> String:
-	match biome:
-		"snow", "plains", "oak_forest", "pine_forest", "swamp":
-			return "footstep_grass"
-		"mountain", "cliff", "rocky":
-			return "footstep_stone"
-		"town", "road":
-			return "footstep_wood"
-		"coast", "ocean":
-			return "footstep_dirt"
-	return "footstep_dirt"
+	# KEYWORD-based so the 90+ biomes all route to a sensible footstep family
+	# automatically (the old exact-match list covered only 5 biomes, so almost
+	# everything fell through to the dirt "tap"). Order matters: hard surfaces
+	# first, then soft — GRASS (the soft swish) is the default because the world
+	# is mostly green.
+	var b := biome
+	if "floor" in b or "bridge" in b or "longhouse" in b or "dock" in b \
+			or b == "town" or b == "road" or "wood" in b:
+		return "footstep_wood"
+	if "mountain" in b or "cliff" in b or "rock" in b or "stone" in b \
+			or "basalt" in b or "obsidian" in b or "ruin" in b or "rubble" in b \
+			or "broken_wall" in b or "scree" in b:
+		return "footstep_stone"
+	if "sand" in b or "dune" in b or "coast" in b or "ocean" in b \
+			or "beach" in b or "dirt" in b or "ash" in b or "lava" in b \
+			or "tilled" in b or "scorched" in b or "cracked" in b \
+			or "driftwood" in b or "geothermal" in b or "wet_sand" in b:
+		return "footstep_dirt"
+	# Grass / forest / snow / swamp / farms / hills / meadow / everything soft.
+	return "footstep_grass"
 
 ## Music — crossfades between two banked players when the track changes.
 ## fade_seconds 0 = instant cut.
@@ -386,6 +433,16 @@ func _wire_signal_bus() -> void:
 	Events.attack_swung.connect(_on_attack_swung)
 	Events.attack_landed.connect(_on_attack_landed)
 	Events.monster_attack_landed.connect(_on_monster_attack_landed)
+	Events.mob_hit.connect(_on_mob_hit_sound)
+
+## A monster took damage (server-authoritative, monster-only). Play the owner's
+## monster-hurt grunt if one was dropped in. No-ops on a miss or a 0 hit, and
+## play_sfx already no-ops if no monster_hurt sound is registered.
+func _on_mob_hit_sound(_id: String, _x: float, _y: float, amount: int,
+		_by: String, _hp: int, _mx: int, _crit: bool, missed: bool) -> void:
+	if missed or amount <= 0:
+		return
+	play_sfx("monster_hurt", 0.3)
 
 func _on_level_up(_skill: String, _new_level: int) -> void:
 	play_ui("level_up")
