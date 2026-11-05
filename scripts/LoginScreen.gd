@@ -18,7 +18,15 @@ const RS_GREEN  := Color(0.35, 0.88, 0.40)
 # Shown only if version.txt can't be read — keep it at the current release so a
 # missing file degrades gracefully instead of showing something ancient.
 const VERSION_FALLBACK := "v1.4.2"
-const DEFAULT_SERVER := "147.185.221.211:21498"
+## Cloudflare Tunnel (TLS) — the primary route since 1.7.1.
+const DEFAULT_SERVER := "wss://play.busterrdust.com"
+## The old Playit tunnel. Tried automatically, once, when the default can't be
+## reached (only when the player is on the default — a custom address never
+## silently redirects). Never saved as the player's address.
+const FALLBACK_SERVER := "147.185.221.211:21498"
+## A dead route can leave the socket CONNECTING for ~20 s before it closes;
+## give up sooner so the fallback (or the error) shows promptly.
+const CONNECT_TIMEOUT := 8.0
 # Preloaded (not via class_name) so a stale editor parse can't fail to resolve
 # the changelog data — same defensive pattern used elsewhere in the codebase.
 const _ChangelogData := preload("res://scripts/Changelog.gd")
@@ -120,6 +128,11 @@ var _addr_lbl:   Label    = null
 var _server_row: Control  = null
 var _nm: Node = null
 var _connected: bool = false
+## Address the in-flight attempt targets, whether the Playit fallback was used
+## for this attempt, and a counter that invalidates stale timeout timers.
+var _active_addr: String = ""
+var _fallback_tried: bool = false
+var _connect_seq: int = 0
 var _pending_char_creation: bool = false
 ## Auto-login: armed in _ready when saved credentials should be used; fires once
 ## the socket connects. `_was_auto_attempt` marks that the CURRENT in-flight login
@@ -300,7 +313,7 @@ func _build_ui() -> void:
 	vbox.add_child(_server_row)
 	_url_field = LineEdit.new()
 	_url_field.text = _load_saved_server_address()
-	_url_field.placeholder_text = "host:port"
+	_url_field.placeholder_text = "wss://host or host:port"
 	_url_field.add_theme_stylebox_override("normal", _rs(RS_BTN_N, RS_BORDER, 1))
 	_url_field.add_theme_color_override("font_color", RS_TEXT)
 	_url_field.add_theme_font_size_override("font_size", 11)
@@ -493,21 +506,49 @@ func _make_field(placeholder: String, secret: bool) -> LineEdit:
 	return f
 
 # ── Connection ───────────────────────────────────────────────────────────────
-func _server_url() -> String:
-	var raw := _url_field.text.strip_edges() if _url_field != null else DEFAULT_SERVER
-	if raw.is_empty():
-		raw = DEFAULT_SERVER
-	if not raw.begins_with("ws://") and not raw.begins_with("wss://"):
-		return "ws://" + raw
-	return raw
+func _server_url(addr: String) -> String:
+	if not addr.begins_with("ws://") and not addr.begins_with("wss://"):
+		return "ws://" + addr
+	return addr
 
-func _attempt_connect() -> void:
-	var addr := _url_field.text.strip_edges() if _url_field != null else DEFAULT_SERVER
+## Connect to the typed address, or to `addr` when given (the fallback path).
+## A fresh, player-initiated attempt re-arms the one-shot Playit fallback.
+func _attempt_connect(addr: String = "") -> void:
+	if addr.is_empty():
+		addr = _url_field.text.strip_edges() if _url_field != null else DEFAULT_SERVER
+		if addr.is_empty():
+			addr = DEFAULT_SERVER
+		_fallback_tried = false
+	_active_addr = addr
 	if _addr_lbl != null:
 		_addr_lbl.text = addr
 	_status("Connecting to server…", RS_DIM)
+	if _nm == null:
+		return
+	_nm.connect_to_server(_server_url(addr))
+	_connect_seq += 1
+	var seq := _connect_seq
+	get_tree().create_timer(CONNECT_TIMEOUT).timeout.connect(func() -> void:
+		if seq == _connect_seq and not _connected:
+			_on_connect_timeout())
+
+func _on_connect_timeout() -> void:
+	if _try_fallback():
+		return
 	if _nm != null:
-		_nm.connect_to_server(_server_url())
+		_nm.go_offline()   # silent close — no disconnected signal
+	_status("Cannot reach server. Check the address and retry.", RS_RED)
+
+## Switch once to the Playit route when the default (Cloudflare) can't be
+## reached. Returns true when a fallback attempt was started.
+func _try_fallback() -> bool:
+	if _fallback_tried or _active_addr != DEFAULT_SERVER:
+		return false
+	_fallback_tried = true
+	if _nm != null:
+		_nm.go_offline()
+	_attempt_connect(FALLBACK_SERVER)
+	return true
 
 # ── Server address persistence ─────────────────────────────────────────────
 ## Loads the last successfully-used server address from
@@ -520,7 +561,9 @@ func _load_saved_server_address() -> String:
 	if cfg.load(SERVER_ADDRESS_CFG) != OK:
 		return DEFAULT_SERVER
 	var addr := str(cfg.get_value("server", "address", DEFAULT_SERVER)).strip_edges()
-	if addr.is_empty():
+	# A saved Playit address predates the Cloudflare default — move those players
+	# onto it (Playit stays reachable as the automatic fallback).
+	if addr.is_empty() or addr.trim_prefix("ws://") == FALLBACK_SERVER:
 		return DEFAULT_SERVER
 	return addr
 
@@ -531,7 +574,7 @@ func _save_server_address() -> void:
 	if _url_field == null:
 		return
 	var addr := _url_field.text.strip_edges()
-	if addr.is_empty() or addr == DEFAULT_SERVER:
+	if addr.is_empty() or addr == DEFAULT_SERVER or addr.trim_prefix("ws://") == FALLBACK_SERVER:
 		return
 	var cfg := ConfigFile.new()
 	cfg.set_value("server", "address", addr)
@@ -626,6 +669,8 @@ func _on_server_connected() -> void:
 
 func _on_server_disconnected() -> void:
 	_set_connected(false)
+	if _try_fallback():
+		return
 	_status("Cannot reach server. Check the address and retry.", RS_RED)
 
 func _on_login_ok(player_data: Dictionary) -> void:

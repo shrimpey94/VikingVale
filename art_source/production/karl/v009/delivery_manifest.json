@@ -1,0 +1,52 @@
+{
+  "asset_id": "npc.karl",
+  "candidate": "v009",
+  "branch": "art/karl-skeletal-v003",
+  "status": "EXPORTED",
+  "visual_approval": "PENDING",
+  "runtime_integration": "NOT PERFORMED",
+  "modified_existing_files": [
+    "ASSET_REPLACEMENT_PLAN.md"
+  ],
+  "created_file_index": "art_source/production/karl/v009/CREATED_FILES.txt",
+  "excluded_generated_paths": [
+    ".godot cache",
+    "art_source/validation (ignored review sandbox with junctions)"
+  ],
+  "sha256": {
+    "art_source/blender/characters/karl/v009/authoring.py": "d5f7060b255a0022103cde61dcb440a91e4dedd8029e2e6e5bef4c54f177bca6",
+    "art_source/blender/characters/karl/v009/karl.blend": "da587e6f9d16df7360d283d62f7331986994ba8b103e3ea8c6a18680fd42d9b5",
+    "art_source/blender/characters/karl/v009/karl_sprite_studio_readable.blend": "ccc68d4a0dfa4052ac1bf3fbc2fbe638ba537a7e1c7d756feed3b90ed2f7f691",
+    "art_source/blender/characters/karl/v009/sprite_authoring_readable.py": "59b2fcc89551d686e4d9f916895cf2546c13a484ecf9e491e973d48992b6a102",
+    "assets/authored/characters/karl/v009/karl.glb": "737a1cb7dc64e8ae51a98fe6e0e6d988b6b2d68b2495690c7cf185ae6760b3ad",
+    "assets/authored/characters/karl/v009/karl.glb.import": "9f3f7b3a213c31bb96faed8cf0b98e1b6712f466b1cf2160aea6e9a7f261e372",
+    "assets/authored/characters/karl/v009/karl.manifest.json": "fab408cb39367f2c46901d28a1d340b2c0736310b6b655dbc2756e57ba38cd42",
+    "assets/authored/characters/karl/v009/karl.sprites.json": "1f616980b1b84a26b8b688f83869f9171238e1606a40aec17261cf536f52c087",
+    "assets/authored/characters/karl/v009/karl_arms_crossed_readable.png": "56b97305b5f888f3b790ac1c44d7dad63fb964b658d1e7a62b041eb20e1950a2",
+    "assets/authored/characters/karl/v009/karl_arms_crossed_readable.png.import": "2f19ff6ff1bf3c71e6caa54a89e0a8ef5a9dacd8b470d7865687302339f26f06",
+    "assets/authored/characters/karl/v009/karl_basecolor.png": "16a0a8658a45bb803f646d7fb0ef14c3db979139179d2f14531a6c0130239046",
+    "assets/authored/characters/karl/v009/karl_basecolor.png.import": "4cfd1ab1a8faa617da32b7affc1b224baa3f082bdcf6666ba3914d59e129e657",
+    "assets/authored/characters/karl/v009/karl_death_readable.png": "67f6c78f0703a0c521b17c6728320e824145a03fdf081d77e88a5c2d87dc0c34",
+    "assets/authored/characters/karl/v009/karl_death_readable.png.import": "b536ec73fe43ead0b6e6915c3339871eba23f908c05588a96645c5e4fc492e90",
+    "assets/authored/characters/karl/v009/karl_hit_readable.png": "b23ae83fe4001955084de8589b09782c14f4997ad66089b784c4ba0f00d438d4",
+    "assets/authored/characters/karl/v009/karl_hit_readable.png.import": "822f960bf9a619d1918484350c18878be83853de879bf7fe7435e18e0cf981b0",
+    "assets/authored/characters/karl/v009/karl_idle_readable.png": "03ef127c7197030c2c2509f3c99317fb103618a3794b86970c43299565b0b453",
+    "assets/authored/characters/karl/v009/karl_idle_readable.png.import": "5db6c431eee9128213d9c5eb3d0555a7b5be1d72b29f415b505109a04bacf4d7",
+    "assets/authored/characters/karl/v009/karl_karl_basecolor.png": "16a0a8658a45bb803f646d7fb0ef14c3db979139179d2f14531a6c0130239046",
+    "assets/authored/characters/karl/v009/karl_karl_basecolor.png.import": "c6b738e4ad016d73e8e79d224256cad2dad8b90243bc3cc48ad0e1560c217f9d",
+    "assets/authored/characters/karl/v009/karl_karl_normal.png": "0f97fae829fcdf68fd32088655f0aa96ca45ade44e50adaee5cacdcbf04e4305",
+    "assets/authored/characters/karl/v009/karl_karl_normal.png.import": "b81b0386ff723f03711d560dba1926472ec350d30a58d082cf81a83bf45f99d4",
+    "assets/authored/characters/karl/v009/karl_karl_orm.png": "9f2b004a00bd2ded1ea73b6ee3cdf38e761f56b82abae5ee4f8c8039f9dcfcc5",
+    "assets/authored/characters/karl/v009/karl_karl_orm.png.import": "2589f23efe5289ebf5a95618b7c9d008cb9a969e5eabf9b6fef67655e1a2718e",
+    "assets/authored/characters/karl/v009/karl_look_left_readable.png": "5fa2f4ffb61333513bbe5dac56494b2add5c8df0a20efe13d2aaf4e08e23c6d8",
+    "assets/authored/characters/karl/v009/karl_look_left_readable.png.import": "33abfb948781897073252b2598e4dca971c2b26a85a743250a8c1c1bed199641",
+    "assets/authored/characters/karl/v009/karl_look_right_readable.png": "d65ed815a75db22f82e981049616b2dd428f51ca20cc911f5a73af9cb41c2486",
+    "assets/authored/characters/karl/v009/karl_look_right_readable.png.import": "8e64247f43f08334cbfd6319d56a27301ea00d9ee5afe33f662ea6cef77acd69",
+    "assets/authored/characters/karl/v009/karl_normal.png": "0f97fae829fcdf68fd32088655f0aa96ca45ade44e50adaee5cacdcbf04e4305",
+    "assets/authored/characters/karl/v009/karl_normal.png.import": "d8ec6701b66de028cf7d37a4a558b08f4519c650df8b1585857281ee36ea3737",
+    "assets/authored/characters/karl/v009/karl_orm.png": "9f2b004a00bd2ded1ea73b6ee3cdf38e761f56b82abae5ee4f8c8039f9dcfcc5",
+    "assets/authored/characters/karl/v009/karl_orm.png.import": "43b49c6b5c9a1d35632d15fb71df1a8572cf47e03c3c46ea747ed9c46604647f",
+    "assets/authored/characters/karl/v009/karl_walk_readable.png": "f0ed3e916090d39a981df74f1e72ec61f729c45a37e9311842780f5b3ae2d196",
+    "assets/authored/characters/karl/v009/karl_walk_readable.png.import": "51e8e1dec051c6c48d63fcfb43093eaf3589858368bf2ba815b0c109ac0dc5ea"
+  }
+}

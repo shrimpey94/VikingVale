@@ -1,5 +1,7 @@
 extends Area2D
 
+const VillageArt = preload("res://scripts/art/VillagePrototypeArt.gd")
+
 @export var npc_type:      String = "worker"  # "worker" | "quest" | "shopkeeper" | ...
 @export var npc_name_str:  String = "Villager"
 @export var quest_text:    String = ""
@@ -325,6 +327,9 @@ func _draw_region_head(hs: float, _hr: float) -> void:
 func _draw() -> void:
 	if not is_alive:
 		return
+	if npc_type == "worker" and npc_name_str == "Karl" and VillageArt.draw_asset(self, "karl"):
+		_draw_combat_overlays()
+		return
 	var chars := _characteristics()
 	var body_c: Color
 	match npc_type:
@@ -351,7 +356,7 @@ func _draw() -> void:
 	var sway  := sin(_time * 4.5) * 0.8  if is_moving else 0.0
 
 	# Ground shadow (stays fixed, no bob)
-	draw_circle(Vector2(2.0, 15.0), 7.0, Color(0.02, 0.02, 0.04, 0.25))
+	_draw_ground_shadow()
 
 	draw_set_transform(Vector2(sway, bob), 0.0, Vector2.ONE)
 
@@ -533,6 +538,14 @@ func _draw() -> void:
 	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 
 	# ── Combat overlays (Phase 5b) ──
+	_draw_combat_overlays()
+
+## Soft ground shadow under the feet (no bob). Shared by the procedural drawing
+## and authored art (KarlArt) so every villager stays grounded the same way.
+func _draw_ground_shadow() -> void:
+	draw_circle(Vector2(2.0, 15.0), 7.0, Color(0.02, 0.02, 0.04, 0.25))
+
+func _draw_combat_overlays() -> void:
 	# Red wash on a landed hit, and an HP bar that only appears once the NPC
 	# has actually been wounded (an untouched villager shows nothing).
 	if _hit_flash > 0.0:

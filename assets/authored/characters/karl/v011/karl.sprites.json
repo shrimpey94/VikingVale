@@ -1,0 +1,286 @@
+{
+  "asset_id": "npc.karl",
+  "version": "v011",
+  "cell_size": [
+    84,
+    168
+  ],
+  "directions": [
+    "front",
+    "left",
+    "back",
+    "right"
+  ],
+  "fps": 12,
+  "clips": {
+    "idle": {
+      "file": "karl_idle_crisp.png",
+      "frames_per_direction": 24,
+      "duration": 2.0,
+      "loop": true,
+      "cell_size": [
+        84,
+        168
+      ],
+      "pivot": [
+        42,
+        158
+      ],
+      "draw_offset": [
+        -42,
+        -102
+      ],
+      "display_scale": 0.25,
+      "direction_rows": {
+        "front": 0,
+        "left": 1,
+        "back": 2,
+        "right": 3
+      },
+      "source_crop_top_left": [
+        86,
+        50
+      ]
+    },
+    "walk": {
+      "file": "karl_walk_crisp.png",
+      "frames_per_direction": 12,
+      "duration": 1.0,
+      "loop": true,
+      "cell_size": [
+        94,
+        171
+      ],
+      "pivot": [
+        47,
+        156
+      ],
+      "draw_offset": [
+        -47,
+        -100
+      ],
+      "display_scale": 0.25,
+      "direction_rows": {
+        "front": 0,
+        "left": 1,
+        "back": 2,
+        "right": 3
+      },
+      "source_crop_top_left": [
+        81,
+        52
+      ]
+    },
+    "look_left": {
+      "file": "karl_look_left_crisp.png",
+      "frames_per_direction": 15,
+      "duration": 1.2,
+      "loop": false,
+      "cell_size": [
+        84,
+        168
+      ],
+      "pivot": [
+        42,
+        158
+      ],
+      "draw_offset": [
+        -42,
+        -102
+      ],
+      "display_scale": 0.25,
+      "direction_rows": {
+        "front": 0,
+        "left": 1,
+        "back": 2,
+        "right": 3
+      },
+      "source_crop_top_left": [
+        86,
+        50
+      ]
+    },
+    "look_right": {
+      "file": "karl_look_right_crisp.png",
+      "frames_per_direction": 15,
+      "duration": 1.2,
+      "loop": false,
+      "cell_size": [
+        84,
+        168
+      ],
+      "pivot": [
+        42,
+        158
+      ],
+      "draw_offset": [
+        -42,
+        -102
+      ],
+      "display_scale": 0.25,
+      "direction_rows": {
+        "front": 0,
+        "left": 1,
+        "back": 2,
+        "right": 3
+      },
+      "source_crop_top_left": [
+        86,
+        50
+      ]
+    },
+    "arms_crossed": {
+      "file": "karl_arms_crossed_crisp.png",
+      "frames_per_direction": 20,
+      "duration": 1.6,
+      "loop": false,
+      "cell_size": [
+        96,
+        168
+      ],
+      "pivot": [
+        48,
+        158
+      ],
+      "draw_offset": [
+        -48,
+        -102
+      ],
+      "display_scale": 0.25,
+      "direction_rows": {
+        "front": 0,
+        "left": 1,
+        "back": 2,
+        "right": 3
+      },
+      "source_crop_top_left": [
+        80,
+        50
+      ]
+    },
+    "hit": {
+      "file": "karl_hit_crisp.png",
+      "frames_per_direction": 4,
+      "duration": 0.3,
+      "loop": false,
+      "cell_size": [
+        84,
+        169
+      ],
+      "pivot": [
+        42,
+        159
+      ],
+      "draw_offset": [
+        -42,
+        -103
+      ],
+      "display_scale": 0.25,
+      "direction_rows": {
+        "front": 0,
+        "left": 1,
+        "back": 2,
+        "right": 3
+      },
+      "source_crop_top_left": [
+        86,
+        49
+      ]
+    },
+    "death": {
+      "file": "karl_death_crisp.png",
+      "frames_per_direction": 18,
+      "duration": 1.5,
+      "loop": false,
+      "cell_size": [
+        419,
+        214
+      ],
+      "pivot": [
+        210,
+        165
+      ],
+      "draw_offset": [
+        -210,
+        -109
+      ],
+      "display_scale": 0.25,
+      "direction_rows": {
+        "front": 0,
+        "left": 1,
+        "back": 2,
+        "right": 3
+      },
+      "source_crop_top_left": [
+        46,
+        171
+      ]
+    }
+  },
+  "preserve_original_2d_ground_y": 14,
+  "presentation": {
+    "rig_scale": [
+      1.08,
+      1.08,
+      0.82
+    ],
+    "head_scale": 1.8,
+    "exposure": 0.0,
+    "reason": "Compact original-2D identity; shared rig/materials, separate presentation proportions",
+    "eye_detail_scale_xz": [
+      1.2,
+      2.0
+    ],
+    "gold_cap_stripe_scale_z": 2.5,
+    "method": "4x resolution native render; no downsampling or denoising; original NPC palette with restrained facing shading",
+    "palette_source": "scripts/NPC.gd: Karl hash 2089278383, worker, kjelvik",
+    "palette": {
+      "skin": [
+        0.58,
+        0.42,
+        0.28
+      ],
+      "hair": [
+        0.55,
+        0.35,
+        0.15
+      ],
+      "tunic": [
+        0.5546117647058824,
+        0.4297719188927336,
+        0.29117117647058827
+      ],
+      "blue": [
+        0.2,
+        0.34,
+        0.62
+      ],
+      "gold": [
+        0.82,
+        0.66,
+        0.2
+      ]
+    }
+  },
+  "pivot": [
+    42,
+    158
+  ],
+  "draw_offset": [
+    -42,
+    -102
+  ],
+  "camera_azimuth_degrees": [
+    0,
+    90,
+    180,
+    270
+  ],
+  "display_scale": 0.25,
+  "packing": {
+    "method": "Same transparent-margin crop for every frame/direction within each clip",
+    "source_version": "v010",
+    "rgba8_bytes_before": 169869312,
+    "rgba8_bytes_after": 47172288
+  }
+}

@@ -1,0 +1,417 @@
+{
+  "date": "2026-10-28",
+  "counting_method": "Four finished delivery gates, equally weighted; no work-in-progress credit",
+  "stages": [
+    "EXPORTED",
+    "INTEGRATED",
+    "TESTED",
+    "VISUALLY APPROVED"
+  ],
+  "family_count": 56,
+  "finished_family_stages": 2,
+  "possible_family_stages": 224,
+  "overall_percent": 0.9,
+  "fully_finished_families": 0,
+  "families": [
+    {
+      "id": "01",
+      "name": "Stone Pickup / resource",
+      "finished_stages": [
+        "EXPORTED",
+        "INTEGRATED"
+      ],
+      "completion_percent": 50,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "02",
+      "name": "Stick Pickup / resource",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "03",
+      "name": "Oak, Pine, Cherry, Ironwood, Frost, Ancient trees",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "04",
+      "name": "Copper, Iron, Gold, Mithril, Adamant, Runite mining nodes",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "05",
+      "name": "Rune Essence node",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "06",
+      "name": "Forage herbs, mushrooms, berries, moonbloom, ancient root",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "07",
+      "name": "Fishing/salmon/lobster/shark/abyssal spots",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "08",
+      "name": "Generic houses and town buildings",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "09",
+      "name": "Large house, grand hall, clan hall, auction house",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "10",
+      "name": "Forge / smith building",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "11",
+      "name": "Bank building",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "12",
+      "name": "Fire / campfire",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "13",
+      "name": "Crafting bench, archery target, construction site",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "14",
+      "name": "Training dummy",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "15",
+      "name": "Runestone",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "16",
+      "name": "Well, market stall, armory rack",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "17",
+      "name": "Wall, fence, gate",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "18",
+      "name": "Fortified wall, watchtower, guard tower",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "19",
+      "name": "House frame, dock",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "20",
+      "name": "Workbench, smith station, bank chest",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "21",
+      "name": "Altar, portal shrine, site marker, plant bed",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "22",
+      "name": "Stronghold, banner, outpost",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "23",
+      "name": "Seal statue, world eater object types",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "24",
+      "name": "Door, exit door, dungeon entrance",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "25",
+      "name": "Interior shells: great hall, tavern, chapel, warehouse, house and shop themes",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "26",
+      "name": "Interior furniture/decor: tables, benches, banners, hearth, kegs, crates, sacks, bed/house furnishings",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "27",
+      "name": "Dungeon floor/walls and exit",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "28",
+      "name": "Player base and character preview",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "29",
+      "name": "Remote players and thralls",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "30",
+      "name": "NPC roles/regions/shopkeepers/quest givers",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "31",
+      "name": "Hair, beards, body markings, tunic/outfits",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "32",
+      "name": "Weapons and gathering tools: sword, axe/battleaxe, mace, bow, staff, pickaxe, fishing pole",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "33",
+      "name": "Armor/offhand/jewelry",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "34",
+      "name": "Rats, wolves, bears and variants",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "35",
+      "name": "Humanoid monsters/guards",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "36",
+      "name": "Dragons: Nidhogg, drake, wyvern, frost wyrm",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "37",
+      "name": "Spider, lava crawler, chicken, shark",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "38",
+      "name": "Forest spirit, magma elemental",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "39",
+      "name": "Pets: wolf pup, raven, fox, drake, boarlet",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "40",
+      "name": "Ambient wildlife/insects",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "41",
+      "name": "Boats: oak rowboat, pine canoe, cherry sailboat, ironwood longship, frost warship, ancient dragonship",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "42",
+      "name": "Caravan wagon, draft animal, wreck",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "43",
+      "name": "Farm plot and crops",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "44",
+      "name": "Item/drop families: ore, bars, logs/timber, fish, food, seeds/crops, bones/hides/organs, gems/jewelry, runes, bait/lures, supplies, quest/trade tokens",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "45",
+      "name": "Construction inventory objects: bookshelves, torches, crates, tables/chairs, campfires and wood-tier kits",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "46",
+      "name": "Gold/PvP loot piles",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "47",
+      "name": "Sea encounters",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "48",
+      "name": "Terrain: natural biomes, hills, transitions",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "49",
+      "name": "Roads, bridges, town/floor/wall/carpets",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "50",
+      "name": "Water, shore, reef, lava, wetlands",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "51",
+      "name": "Ground decoration: flowers, reeds, grass, roots, ruins, graves, rune stones, rugs, farm-land tiles",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "52",
+      "name": "Combat/gather/cast effects",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "53",
+      "name": "Fishing/farming/crafting minigame graphics",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "54",
+      "name": "HUD, minimap, panels, icons, labels, quest markers, chat",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "55",
+      "name": "Login/loading/creation/backstory/prologue",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    },
+    {
+      "id": "56",
+      "name": "Application icon and developer previews",
+      "finished_stages": [],
+      "completion_percent": 0,
+      "scope_policy": "Entire family must finish gate; partial members tracked separately"
+    }
+  ],
+  "partial_members": {
+    "oak.v002": 50,
+    "house.v002": 50,
+    "npc.karl.v011": 25
+  }
+}

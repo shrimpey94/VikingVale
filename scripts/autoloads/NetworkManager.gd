@@ -118,7 +118,7 @@ var suppress_auto_login: bool = false
 var my_admin_rank: String = ""
 
 var _ws:            WebSocketPeer = WebSocketPeer.new()
-var _server_url:    String        = "ws://147.185.221.211:21498"
+var _server_url:    String        = "wss://play.busterrdust.com"   # Cloudflare; LoginScreen falls back to Playit
 var _other_players: Dictionary    = {}   # server_id → OtherPlayer Node2D (lives in the World scene)
 ## Cached join data per player (username/appearance/pos/…), kept current by moves.
 ## OtherPlayer NODES are children of the current scene, so a 2D↔3D toggle frees them

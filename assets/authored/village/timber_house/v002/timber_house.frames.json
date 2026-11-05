@@ -1,0 +1,32 @@
+{
+  "asset": "timber_house",
+  "version": "v002",
+  "blender": "5.2.3 LTS",
+  "triangles_all_states": 12888,
+  "materials": 1,
+  "frame_size": [
+    128,
+    128
+  ],
+  "states": [
+    "default"
+  ],
+  "draw_offset": [
+    -64,
+    -75
+  ],
+  "source_forward_blender": "-Y",
+  "godot_forward": "+Z",
+  "animation_fps": 0,
+  "animation": null,
+  "camera_elevation": 35,
+  "orthographic_scale": 5.2,
+  "scale": "1 Blender unit = 1 Godot unit = 32 world pixels; preserve existing 2D art envelope separately",
+  "generator_sha256": "2573697e8d298585b07ff60f632e74292434ad4070e5d73f5418c99cfbd21969",
+  "sha256": {
+    "timber_house.blend": "a7fbff45a5031340ae52424cc1c4020ffd59a3805b880b20454303d7fd944292",
+    "timber_house.glb": "1275f6cfcb208b81e3c4d8ad8c87def918d9bfc2980eefdc893fde5c6ff93747",
+    "timber_house.png": "a33e33f51eb61140dc46ad02c6c1de458c4cbf71a3301fd3acbf26922d4062e4",
+    "timber_house_basecolor.png": "7bcb54007569a8387ab50bba629a06b36bfcf0fa5f293ffede6b9b21c5e11a64"
+  }
+}

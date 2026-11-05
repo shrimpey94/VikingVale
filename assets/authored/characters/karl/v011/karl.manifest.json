@@ -1,0 +1,83 @@
+{
+  "asset_id": "npc.karl",
+  "existing_id": "n:4",
+  "match": {
+    "npc_type": "worker",
+    "npc_name": "Karl",
+    "region": "kjelvik"
+  },
+  "version": "v011",
+  "status": "EXPORTED",
+  "visual_approval": "PENDING",
+  "runtime_integration": "NOT INTEGRATED; Claude Code handoff",
+  "source_forward": "Blender -Y / Godot +Z",
+  "world_scale": "1 unit = 32 logical pixels",
+  "feet_origin": [
+    0,
+    0,
+    0
+  ],
+  "source": "art_source/blender/characters/karl/v011/karl.blend",
+  "model": "assets/authored/characters/karl/v011/karl.glb",
+  "clips": {
+    "idle": {
+      "duration": 2.0,
+      "loop": true
+    },
+    "walk": {
+      "duration": 1.0,
+      "loop": true
+    },
+    "look_left": {
+      "duration": 1.2,
+      "loop": false
+    },
+    "look_right": {
+      "duration": 1.2,
+      "loop": false
+    },
+    "arms_crossed": {
+      "duration": 1.6,
+      "loop": false
+    },
+    "hit": {
+      "duration": 0.3,
+      "loop": false
+    },
+    "death": {
+      "duration": 1.5,
+      "loop": false
+    }
+  },
+  "sockets": [
+    "Socket.Hand.L",
+    "Socket.Hand.R",
+    "Socket.Back",
+    "Socket.Head"
+  ],
+  "rig_status": "Karl-specific benchmark; not approved as shared family",
+  "death_policy": "Do not delay server-driven hide/disable; clip is optional presentation only",
+  "attack_policy": "No attack clip: NPC attack=0, townsfolk do not fight back",
+  "triangles": 21286,
+  "bones": 46,
+  "materials": 1,
+  "textures": [
+    "karl_basecolor.png",
+    "karl_normal.png",
+    "karl_orm.png"
+  ],
+  "technical_package_checks": "45 passed / 0 failed",
+  "source_2d": "art_source/blender/characters/karl/v011/karl_sprite_studio_crisp.blend",
+  "sprite_contract": "assets/authored/characters/karl/v011/karl.sprites.json",
+  "anatomical_left": "+X",
+  "anatomical_right": "-X",
+  "pending": [
+    "Visual review of sharper 2D sheets",
+    "Claude integration with display_scale metadata",
+    "In-game acceptance and multiplayer tests",
+    "Crossed-hand/wrist contact review",
+    "Populated-scene and texture-memory validation"
+  ],
+  "changes": "Original-color, sharp 2D sheets with transparent-margin packing; 3D unchanged from v009",
+  "source_3d_lineage": "v009, SHA-256 verified unchanged"
+}

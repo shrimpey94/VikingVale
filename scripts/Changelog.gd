@@ -10,6 +10,15 @@ class_name Changelog
 
 const ENTRIES: Array = [
 	{
+		"version": "1.7.1",
+		"date": "2026-11",
+		"title": "A Sturdier Bridge",
+		"notes": [
+			"New server connection — the game now connects through a faster, secure (encrypted) route at play.busterrdust.com. Nothing to do on your end: it's automatic, and if that route is ever down the game quietly falls back to the old one.",
+			"If you'd typed in the old server address yourself, you're moved onto the new one automatically.",
+		],
+	},
+	{
 		"version": "1.7.0",
 		"date": "2026-09",
 		"title": "Fair Play — A Fresh Season",

@@ -1,0 +1,43 @@
+{
+  "asset": "karl",
+  "version": "v002",
+  "blender": "5.2.3 LTS",
+  "triangles_all_states": 3060,
+  "materials": 1,
+  "frame_size": [
+    64,
+    64
+  ],
+  "states": [
+    "idle",
+    "walk_0",
+    "walk_1",
+    "walk_2",
+    "walk_3",
+    "walk_4",
+    "walk_5",
+    "walk_6",
+    "walk_7",
+    "look_left",
+    "look_right",
+    "arms_crossed"
+  ],
+  "draw_offset": [
+    -32,
+    -38
+  ],
+  "source_forward_blender": "-Y",
+  "godot_forward": "+Z",
+  "animation_fps": 8,
+  "animation": "Scene timeline, one pose per frame",
+  "camera_elevation": 20,
+  "orthographic_scale": 2.6,
+  "scale": "1 Blender unit = 1 Godot unit = 32 world pixels; preserve existing 2D art envelope separately",
+  "generator_sha256": "a3617b52d04122ee3ff85562546d78329a5d88ab8758d5b8795783895d30e433",
+  "sha256": {
+    "karl.blend": "7b22a02b5d39697df855bea67a28c8982db248d821cdf57e8f32a51218ac2dad",
+    "karl.glb": "e024df769025f4ccfa5fa3d1d006751debf30a1710a9b4568b239fab63a765dc",
+    "karl.png": "d4544c5791c9b48d4a72ad545b82baf837f0ecd0efe7fa6a6fd95681b586f157",
+    "karl_basecolor.png": "7bcb54007569a8387ab50bba629a06b36bfcf0fa5f293ffede6b9b21c5e11a64"
+  }
+}

@@ -14,6 +14,8 @@ extends Node3D
 
 const GroundScript      := preload("res://scripts/Ground.gd")
 const Mesh3DScript      := preload("res://scripts/Mesh3D.gd")
+const VillageArt = preload("res://scripts/art/VillagePrototypeArt.gd")
+const StonePickupArt = preload("res://scripts/art/StonePickupArt.gd")
 # Real 2D LOGIC nodes (gather/combat/collision) live off-screen paired to each 3D
 # mesh visual; picking routes to them so the whole 2D interaction pipeline reuses.
 const InteractableTscn  := preload("res://scenes/Interactable.tscn")
@@ -1043,12 +1045,18 @@ func _sync_other_players() -> void:
 # from World.gd's const data; admin-placed + live entities come off the
 # world_entity_* / mob_* signals. Visual only — picking is P3b-2/3.
 
-## An Interactable type_str → the right low-poly MeshInstance3D. Resource nodes get
+## An Interactable type_str → its visual (mesh or imported scene). Resource nodes get
 ## a small per-instance size jitter so a grove/field doesn't look stamped-out.
-func _interactable_node(type_str: String, col: Color) -> MeshInstance3D:
+func _interactable_node(type_str: String, col: Color, nm: String = "", logic: Node2D = null) -> Node3D:
+	var authored := VillageArt.instantiate_visual(VillageArt.asset_for(type_str, nm), logic, col)
+	if authored != null:
+		if type_str == "tree":
+			authored.scale = Vector3.ONE * randf_range(0.86, 1.16)
+			authored.rotation.y = randf() * TAU
+		return authored
 	if _STRUCTURE_TYPES.has(type_str):
 		return _mesh_instance(_mesh.call("structure", type_str, col) as Mesh)
-	var node: MeshInstance3D
+	var node: Node3D
 	if type_str == "dungeon_entrance":   # big cave mouth, full-size, no random jitter
 		return _mesh_instance(_mesh.call("cave_mouth", col) as Mesh)
 	match type_str:
@@ -1060,7 +1068,10 @@ func _interactable_node(type_str: String, col: Color) -> MeshInstance3D:
 		"herb":  node = _mesh_instance(_mesh.call("bush", col) as Mesh)
 		"fish":  node = _mesh_instance(_mesh.call("fishing", col) as Mesh)
 		"stick": node = _mesh_instance(_mesh.call("stick", col) as Mesh)
-		"stone": node = _mesh_instance(_mesh.call("stone", col) as Mesh)
+		"stone":
+			node = StonePickupArt.instantiate_visual(col)
+			if node == null:
+				node = _mesh_instance(_mesh.call("stone", col) as Mesh)
 		_:       node = _mesh_instance(_mesh.call("nodelet", col) as Mesh)
 	node.scale = Vector3.ONE * randf_range(0.86, 1.16)
 	node.rotation.y = randf() * TAU   # vary orientation so a grove isn't stamped-out
@@ -1083,7 +1094,9 @@ func _monster_scale(mtype: String) -> float:
 	if "dragon" in mtype or "wyrm" in mtype: return 2.3
 	return 1.0
 
-func _npc_node(ntype: String, _region: String) -> Node3D:
+func _npc_node(ntype: String, _region: String, nm: String = "", logic: Node2D = null) -> Node3D:
+	var authored := VillageArt.instantiate_visual(VillageArt.asset_for(ntype, nm), logic)
+	if authored != null: return authored
 	# NPCs carry no appearance dict on the wire — seed a stable look from the type.
 	var h := hash(ntype)
 	return _make_char_node({"skin": h % 8, "hair_color": (h >> 3) % 14,
@@ -1165,7 +1178,7 @@ const _SOLID_3D: Dictionary = {
 func _spawn_interactable(id: String, type_str: String, nm: String, skill: String,
 		level: int, action: String, col: Color, px: Vector2) -> void:
 	var it := _make_interactable2d(type_str, nm, skill, level, action, col, id)
-	_pair(id, it, _interactable_node(type_str, col), px)
+	_pair(id, it, _interactable_node(type_str, col, nm, it), px)
 	_ensure_structure_collision(it, type_str)
 
 ## Give solid buildings a blocking StaticBody2D (layer 2) if the Interactable didn't
@@ -1213,7 +1226,7 @@ func _spawn_npc(id: String, ntype: String, nm: String, quest: String, wander: fl
 	n.set("region", region)
 	n.set("shop_id", shop_id)
 	n.set("entity_id", id)
-	_pair(id, n, _npc_node(ntype, region), px)
+	_pair(id, n, _npc_node(ntype, region, nm, n), px)
 	_attach_nameplate((_ent[id] as Dictionary)["v"] as Node3D, nm, Color(0.82, 0.9, 1.0))
 
 ## Ids NOT managed by the admin world_entities feed (so the bulk refresh must not

@@ -1,0 +1,17 @@
+{
+  "asset_id": "stone_pickup",
+  "version": "v001",
+  "blender_version": "5.2.3 LTS",
+  "seed": 41723,
+  "dimensions_xyz_blender": [0.55, 0.40, 0.30],
+  "texture_size": 256,
+  "sprite_size": 32,
+  "supersample": 4,
+  "sprite_pivot": [16, 16],
+  "sprite_draw_offset": [-16, -14],
+  "camera_elevation_degrees": 60,
+  "orthographic_scale": 1.0,
+  "source_dir": "art_source/blender/props/stone_pickup/v001",
+  "output_dir": "assets/authored/props/stone_pickup/v001",
+  "preview_dir": "art_source/previews/stone_pickup/v001"
+}

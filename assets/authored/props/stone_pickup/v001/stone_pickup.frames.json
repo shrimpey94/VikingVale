@@ -1,0 +1,49 @@
+{
+  "asset_id": "stone_pickup",
+  "version": "v001",
+  "blender_version": "5.2.3 LTS",
+  "seed": 41723,
+  "dimensions_xyz_blender": [
+    0.55,
+    0.4,
+    0.3
+  ],
+  "texture_size": 256,
+  "sprite_size": 32,
+  "supersample": 4,
+  "sprite_pivot": [
+    16,
+    16
+  ],
+  "sprite_draw_offset": [
+    -16,
+    -14
+  ],
+  "camera_elevation_degrees": 60,
+  "orthographic_scale": 1.0,
+  "source_dir": "art_source/blender/props/stone_pickup/v001",
+  "output_dir": "assets/authored/props/stone_pickup/v001",
+  "preview_dir": "art_source/previews/stone_pickup/v001",
+  "triangles": 360,
+  "materials": 1,
+  "blender_actual": "5.2.3 LTS",
+  "blender_build_hash": "e13b728c6880",
+  "render_engine": "CYCLES_CPU",
+  "samples": 48,
+  "color_management": "Standard / None / exposure 0 / gamma 1",
+  "godot_dimensions_xyz": [
+    0.55,
+    0.3,
+    0.4
+  ],
+  "animations": [],
+  "sha256": {
+    "blend": "497ad2c0ad9757d866a1206fdb0b2ec2bc915020f85f23f990f214489e89a4d0",
+    "glb": "d10737de28e03e871520c6554473254ba0a8edba260f146f6ba6cb4dd3eeee58",
+    "texture": "5963c3830d57ff93c11a32cfe79ede810772192919a6a23a54f1b238bb3c8560",
+    "sprite": "0db43fed2b4c61d0a97e7c9adb9ec36176b9f19a008e61ff9765ee78fd65cbc4",
+    "large": "e1477617a8add21a7b4e427b7edb92a8a4d7ff5d30169c0d02b20514d622efbf",
+    "supersampled": "9c4cbcdd71ab8a5627e705ff292bb0429042043f671992d4998ac7dbe0722a62"
+  },
+  "generator_sha256": "d622f99a19b915be7e702ded6f8b5c93b306ba88668019d095bd06a02e653a42"
+}

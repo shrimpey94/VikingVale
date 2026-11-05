@@ -8,6 +8,8 @@ extends Area2D
 @export var interactable_type_str: String = "tree"
 
 const FarmingDef = preload("res://scripts/Farming.gd")
+const VillageArt = preload("res://scripts/art/VillagePrototypeArt.gd")
+const StonePickupArt = preload("res://scripts/art/StonePickupArt.gd")
 
 enum State { IDLE, BEING_HIT, DEPLETED }
 
@@ -1155,7 +1157,7 @@ func _draw_body() -> void:
 	# the terrain shader's directional pass so sprites read as part of the
 	# same scene rather than flat decals sitting on top of shaded ground.
 	# Gated on live state: see the comment above the bracket helpers.
-	if not depleted:
+	if not depleted and not (interactable_type_str == "stone" and StonePickupArt.available()) and not VillageArt.available(VillageArt.asset_for(interactable_type_str, display_name)):
 		_draw_depth_overlay()
 
 	# (Removed) Depleted state used to draw a 40×44 dark rect overlay on top
@@ -1251,6 +1253,8 @@ func _draw_canopy_shine(center: Vector2, base: Color) -> void:
 
 # ── HP-stage draw functions ───────────────────────────────────────────────────
 func _draw_tree(ratio: float, _c: Color, _cd: Color) -> void:
+	if display_name == "Oak Tree" and VillageArt.draw_asset(self, "oak_tree"):
+		return
 	var trunk_brown  := Color(0.42, 0.26, 0.10)
 	var trunk_dark   := Color(0.28, 0.16, 0.06)
 	var tname        := display_name
@@ -2478,6 +2482,8 @@ func _draw_lit_window(cx: float, cy: float, r: float) -> void:
 	draw_line(Vector2(cx - r, cy), Vector2(cx + r, cy), Color(0.14, 0.10, 0.06), 1.0)
 
 func _draw_building(c: Color, cd: Color) -> void:
+	if display_name == "House" and VillageArt.draw_asset(self, "timber_house"):
+		return
 	# Roof tone — dark thatch, tinted slightly toward the wall colour.
 	var roof := Color(0.30, 0.20, 0.12).lerp(cd.darkened(0.2), 0.35)
 	match display_name:
@@ -2675,6 +2681,13 @@ func _draw_stick(c: Color) -> void:
 	draw_line(Vector2(2, 0), Vector2(8, 3), c.lightened(0.1), 1.5)
 
 func _draw_stone(c: Color, cd: Color) -> void:
+	var authored := StonePickupArt.texture()
+	if authored != null:
+		# Draw inside the existing shake transform and CanvasItem hover modulation.
+		# Retain custom node tint relative to the catalog's neutral stone color.
+		var tint := Color(color.r / 0.58, color.g / 0.56, color.b / 0.52, color.a)
+		draw_texture(authored, StonePickupArt.DRAW_OFFSET, tint)
+		return
 	# Rounded pebble cluster
 	draw_circle(Vector2(0, 2), 7, cd)
 	draw_circle(Vector2(0, 1), 6, c)

@@ -1,0 +1,4 @@
+[gd_scene load_steps=2 format=3]
+[ext_resource type="Script" path="res://tools/art/preview_village_prototypes.gd" id="1"]
+[node name="VillagePreview" type="Node"]
+script = ExtResource("1")

@@ -1,0 +1,36 @@
+{
+  "asset": "oak_tree",
+  "version": "v001",
+  "blender": "5.2.3 LTS",
+  "triangles_all_states": 3972,
+  "materials": 1,
+  "frame_size": [
+    96,
+    96
+  ],
+  "states": [
+    "full",
+    "three_quarters",
+    "half",
+    "bare",
+    "stump"
+  ],
+  "draw_offset": [
+    -48,
+    -49
+  ],
+  "source_forward_blender": "-Y",
+  "godot_forward": "+Z",
+  "animation_fps": 0,
+  "animation": null,
+  "camera_elevation": 45,
+  "orthographic_scale": 5.4,
+  "scale": "1 Blender unit = 1 Godot unit = 32 world pixels; preserve existing 2D art envelope separately",
+  "generator_sha256": "8e105bc2bfd9545a40274ae5c039686fb3865bcad38241323c16d0a0a2d9593e",
+  "sha256": {
+    "oak_tree.blend": "01551acb2d4dc83fa137ea9401d8d839f31f0f3987d81f811ce12cf3bd6492b9",
+    "oak_tree.glb": "3ec6c910364df9c8e069e1dd5ec6d1619d918c97a3064bfbea0a9c1b837885c5",
+    "oak_tree.png": "517e640d415d1d900db481e38b7dc22ae78d5c96abf9a2f8f1d0efcbccb6dd0d",
+    "oak_tree_basecolor.png": "7bcb54007569a8387ab50bba629a06b36bfcf0fa5f293ffede6b9b21c5e11a64"
+  }
+}
