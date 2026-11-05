@@ -12,8 +12,9 @@ const ENTRIES: Array = [
 	{
 		"version": "1.7.1",
 		"date": "2026-11",
-		"title": "A Sturdier Bridge",
+		"title": "Fresh Timber",
 		"notes": [
+			"The first new 3D-modelled art is here! Oak trees, timber houses and the loose stones you pick up off the ground have been rebuilt as real modelled art, in both 2D and 3D view. Oaks still show the damage as you chop them, right down to the stump. More of the world will get the same treatment over the coming updates.",
 			"New server connection — the game now connects through a faster, secure (encrypted) route at play.busterrdust.com. Nothing to do on your end: it's automatic, and if that route is ever down the game quietly falls back to the old one.",
 			"If you'd typed in the old server address yourself, you're moved onto the new one automatically.",
 		],

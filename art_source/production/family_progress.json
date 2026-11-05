@@ -1,5 +1,5 @@
 {
-  "date": "2026-10-28",
+  "date": "2026-11-05",
   "counting_method": "Four finished delivery gates, equally weighted; no work-in-progress credit",
   "stages": [
     "EXPORTED",
@@ -8,9 +8,9 @@
     "VISUALLY APPROVED"
   ],
   "family_count": 56,
-  "finished_family_stages": 2,
+  "finished_family_stages": 3,
   "possible_family_stages": 224,
-  "overall_percent": 0.9,
+  "overall_percent": 1.3,
   "fully_finished_families": 0,
   "families": [
     {
@@ -18,9 +18,10 @@
       "name": "Stone Pickup / resource",
       "finished_stages": [
         "EXPORTED",
-        "INTEGRATED"
+        "INTEGRATED",
+        "VISUALLY APPROVED"
       ],
-      "completion_percent": 50,
+      "completion_percent": 75,
       "scope_policy": "Entire family must finish gate; partial members tracked separately"
     },
     {
@@ -410,8 +411,8 @@
     }
   ],
   "partial_members": {
-    "oak.v002": 50,
-    "house.v002": 50,
-    "npc.karl.v011": 25
+    "oak.v002": 75,
+    "house.v002": 75,
+    "npc.karl.v011": 100
   }
 }
