@@ -16,6 +16,7 @@ const GroundScript      := preload("res://scripts/Ground.gd")
 const Mesh3DScript      := preload("res://scripts/Mesh3D.gd")
 const VillageArt = preload("res://scripts/art/VillagePrototypeArt.gd")
 const StonePickupArt = preload("res://scripts/art/StonePickupArt.gd")
+const ForestArt = preload("res://scripts/art/ForestArt.gd")
 # Real 2D LOGIC nodes (gather/combat/collision) live off-screen paired to each 3D
 # mesh visual; picking routes to them so the whole 2D interaction pipeline reuses.
 const InteractableTscn  := preload("res://scenes/Interactable.tscn")
@@ -1054,6 +1055,12 @@ func _interactable_node(type_str: String, col: Color, nm: String = "", logic: No
 			authored.scale = Vector3.ONE * randf_range(0.86, 1.16)
 			authored.rotation.y = randf() * TAU
 		return authored
+	# Family 03 trees + Stick Pickup keep the same per-instance jitter as the meshes.
+	var forest := ForestArt.instantiate_visual(ForestArt.asset_for(type_str, nm), logic, col)
+	if forest != null:
+		forest.scale = Vector3.ONE * randf_range(0.86, 1.16)
+		forest.rotation.y = randf() * TAU
+		return forest
 	if _STRUCTURE_TYPES.has(type_str):
 		return _mesh_instance(_mesh.call("structure", type_str, col) as Mesh)
 	var node: Node3D

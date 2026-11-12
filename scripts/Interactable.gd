@@ -10,6 +10,7 @@ extends Area2D
 const FarmingDef = preload("res://scripts/Farming.gd")
 const VillageArt = preload("res://scripts/art/VillagePrototypeArt.gd")
 const StonePickupArt = preload("res://scripts/art/StonePickupArt.gd")
+const ForestArt = preload("res://scripts/art/ForestArt.gd")
 
 enum State { IDLE, BEING_HIT, DEPLETED }
 
@@ -1157,7 +1158,9 @@ func _draw_body() -> void:
 	# the terrain shader's directional pass so sprites read as part of the
 	# same scene rather than flat decals sitting on top of shaded ground.
 	# Gated on live state: see the comment above the bracket helpers.
-	if not depleted and not (interactable_type_str == "stone" and StonePickupArt.available()) and not VillageArt.available(VillageArt.asset_for(interactable_type_str, display_name)):
+	if not depleted and not (interactable_type_str == "stone" and StonePickupArt.available()) \
+			and not VillageArt.available(VillageArt.asset_for(interactable_type_str, display_name)) \
+			and not ForestArt.available(ForestArt.asset_for(interactable_type_str, display_name)):
 		_draw_depth_overlay()
 
 	# (Removed) Depleted state used to draw a 40×44 dark rect overlay on top
@@ -1254,6 +1257,17 @@ func _draw_canopy_shine(center: Vector2, base: Color) -> void:
 # ── HP-stage draw functions ───────────────────────────────────────────────────
 func _draw_tree(ratio: float, _c: Color, _cd: Color) -> void:
 	if display_name == "Oak Tree" and VillageArt.draw_asset(self, "oak_tree"):
+		return
+	var forest_key := ForestArt.asset_for("tree", display_name)
+	if forest_key != "" and ForestArt.available(forest_key):
+		# Authored sheets carry the body only. Ancient's time-driven aura stays a
+		# separate overlay — rings behind the sprite, sparkles over the canopy —
+		# with the original HP gating.
+		if forest_key == "ancient_tree":
+			_draw_ancient_aura(ratio)
+		ForestArt.draw_2d(self, forest_key)
+		if forest_key == "ancient_tree":
+			_draw_ancient_sparkles(ratio)
 		return
 	var trunk_brown  := Color(0.42, 0.26, 0.10)
 	var trunk_dark   := Color(0.28, 0.16, 0.06)
@@ -1539,11 +1553,8 @@ func _draw_ancient_tree(ratio: float) -> void:
 	var canopy_dk    := Color(0.18, 0.30, 0.10)
 	var canopy_md    := Color(0.32, 0.50, 0.18)
 	var canopy_lt    := Color(0.62, 0.78, 0.32)
-	var gold         := Color(0.98, 0.82, 0.30)
-	var gold_warm    := Color(1.00, 0.90, 0.50)
-	# Pulsing aura modulates alpha + radius over a ~3s cycle.
-	var pulse := 0.85 + sin(_time_elapsed * 1.1) * 0.15
-	var pulse2 := 0.70 + sin(_time_elapsed * 1.1 + 0.8) * 0.30
+	# (The ~3s pulsing aura + sparkles live in _draw_ancient_aura /
+	# _draw_ancient_sparkles so the authored sprite can reuse them.)
 
 	# ── Massive root spread (drawn first, sits under trunk) ─────────────
 	var roots: Array[Vector2] = [
@@ -1571,14 +1582,7 @@ func _draw_ancient_tree(ratio: float) -> void:
 	draw_circle(Vector2(-2, 18), 1.1, trunk_lt.darkened(0.20))
 
 	# ── Golden glow aura (3 rings of pulsing low-alpha gold) ────────────
-	if ratio > 0.25:
-		var aura_r := 50.0
-		draw_circle(Vector2(0, -14), aura_r * pulse,
-			Color(gold.r, gold.g, gold.b, 0.06))
-		draw_circle(Vector2(0, -14), aura_r * 0.78,
-			Color(gold.r, gold.g, gold.b, 0.10 * pulse))
-		draw_circle(Vector2(0, -14), aura_r * 0.58,
-			Color(gold.r, gold.g, gold.b, 0.16 * pulse))
+	_draw_ancient_aura(ratio)
 
 	# ── Canopy — layered circles for depth, scale by ratio ──────────────
 	if ratio > 0.75:
@@ -1592,7 +1596,42 @@ func _draw_ancient_tree(ratio: float) -> void:
 		draw_circle(Vector2( 0, -20), 24, canopy_lt)
 		draw_circle(Vector2(-10, -24), 12, canopy_lt)
 		draw_circle(Vector2( 10, -24), 12, canopy_lt)
-		# Golden leaf sparkles around the canopy edge.
+	elif ratio > 0.5:
+		draw_circle(Vector2( 0,  -8), 30, canopy_dk)
+		draw_circle(Vector2(-18, -2), 14, canopy_dk)
+		draw_circle(Vector2( 18, -2), 14, canopy_dk)
+		draw_circle(Vector2( 0, -14), 24, canopy_md)
+		draw_circle(Vector2( 0, -18), 16, canopy_lt)
+	elif ratio > 0.25:
+		draw_circle(Vector2(0, -10), 22, canopy_dk)
+		draw_circle(Vector2(0, -14), 16, canopy_md)
+	else:
+		draw_circle(Vector2(0, -10), 12, canopy_dk.darkened(0.25))
+	_draw_ancient_sparkles(ratio)
+
+## Ancient Tree's pulsing gold aura — drawn behind the canopy (procedural) or
+## behind the authored sprite. Gated to a living tree like the original.
+func _draw_ancient_aura(ratio: float) -> void:
+	if ratio <= 0.25:
+		return
+	var gold  := Color(0.98, 0.82, 0.30)
+	var pulse := 0.85 + sin(_time_elapsed * 1.1) * 0.15
+	var aura_r := 50.0
+	draw_circle(Vector2(0, -14), aura_r * pulse,
+		Color(gold.r, gold.g, gold.b, 0.06))
+	draw_circle(Vector2(0, -14), aura_r * 0.78,
+		Color(gold.r, gold.g, gold.b, 0.10 * pulse))
+	draw_circle(Vector2(0, -14), aura_r * 0.58,
+		Color(gold.r, gold.g, gold.b, 0.16 * pulse))
+
+## Golden leaf sparkles (+ the central bloom at full health) over the canopy.
+## Same counts, radii and HP gates as the original canopy branches.
+func _draw_ancient_sparkles(ratio: float) -> void:
+	var gold      := Color(0.98, 0.82, 0.30)
+	var gold_warm := Color(1.00, 0.90, 0.50)
+	var pulse  := 0.85 + sin(_time_elapsed * 1.1) * 0.15
+	var pulse2 := 0.70 + sin(_time_elapsed * 1.1 + 0.8) * 0.30
+	if ratio > 0.75:
 		for li in range(10):
 			var la := float(li) * TAU / 10.0
 			var lr := 22.0 + float(li % 3) * 5.0
@@ -1602,20 +1641,10 @@ func _draw_ancient_tree(ratio: float) -> void:
 		draw_circle(Vector2(0, -18), 8.0,
 			Color(gold_warm.r, gold_warm.g, gold_warm.b, 0.45 * pulse))
 	elif ratio > 0.5:
-		draw_circle(Vector2( 0,  -8), 30, canopy_dk)
-		draw_circle(Vector2(-18, -2), 14, canopy_dk)
-		draw_circle(Vector2( 18, -2), 14, canopy_dk)
-		draw_circle(Vector2( 0, -14), 24, canopy_md)
-		draw_circle(Vector2( 0, -18), 16, canopy_lt)
 		for li in range(6):
 			var la := float(li) * TAU / 6.0
 			draw_circle(Vector2(cos(la) * 18.0, sin(la) * 12.0 - 12.0),
 				1.8, Color(gold.r, gold.g, gold.b, 0.65 * pulse2))
-	elif ratio > 0.25:
-		draw_circle(Vector2(0, -10), 22, canopy_dk)
-		draw_circle(Vector2(0, -14), 16, canopy_md)
-	else:
-		draw_circle(Vector2(0, -10), 12, canopy_dk.darkened(0.25))
 
 ## Mining rock dispatch. Each tier has a distinct silhouette so the player
 ## can read the ore type at a glance without relying purely on color:
@@ -2675,6 +2704,8 @@ func _draw_construction(ratio: float, _c: Color, _cd: Color) -> void:
 		draw_line(Vector2(-12, -8), Vector2(-6, 2), wdark.darkened(0.4), 1.5)
 
 func _draw_stick(c: Color) -> void:
+	if ForestArt.draw_2d(self, "stick_pickup"):
+		return   # collected sticks are hidden by _deplete, never drawn depleted
 	# A couple of small twigs on the ground
 	draw_line(Vector2(-8, 2), Vector2(7, -1), c, 2.0)
 	draw_line(Vector2(-4, 4), Vector2(4, -3), c.darkened(0.15), 1.5)

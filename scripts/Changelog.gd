@@ -10,6 +10,14 @@ class_name Changelog
 
 const ENTRIES: Array = [
 	{
+		"version": "1.7.2",
+		"date": "2026-11",
+		"title": "Forest Grows",
+		"notes": [
+			"Pine, Cherry, Ironwood, Frost and Ancient trees have all been rebuilt as 3D-modelled art, in both 2D and 3D view, with every tree still showing its stump when felled. Sticks on the ground got the same treatment.",
+		],
+	},
+	{
 		"version": "1.7.1",
 		"date": "2026-11",
 		"title": "Fresh Timber",
