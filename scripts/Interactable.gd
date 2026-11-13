@@ -11,6 +11,7 @@ const FarmingDef = preload("res://scripts/Farming.gd")
 const VillageArt = preload("res://scripts/art/VillagePrototypeArt.gd")
 const StonePickupArt = preload("res://scripts/art/StonePickupArt.gd")
 const ForestArt = preload("res://scripts/art/ForestArt.gd")
+const ResourceArt = preload("res://scripts/art/ResourceArt.gd")
 
 enum State { IDLE, BEING_HIT, DEPLETED }
 
@@ -1160,7 +1161,8 @@ func _draw_body() -> void:
 	# Gated on live state: see the comment above the bracket helpers.
 	if not depleted and not (interactable_type_str == "stone" and StonePickupArt.available()) \
 			and not VillageArt.available(VillageArt.asset_for(interactable_type_str, display_name)) \
-			and not ForestArt.available(ForestArt.asset_for(interactable_type_str, display_name)):
+			and not ForestArt.available(ForestArt.asset_for(interactable_type_str, display_name)) \
+			and not ResourceArt.available(ResourceArt.asset_for(interactable_type_str, display_name, required_level)):
 		_draw_depth_overlay()
 
 	# (Removed) Depleted state used to draw a 40×44 dark rect overlay on top
@@ -1659,6 +1661,10 @@ func _draw_ancient_sparkles(ratio: float) -> void:
 ## what the spawn color was set to. The cracks overlay (mining progress) is
 ## shared by all tiers and drawn after the per-tier shape.
 func _draw_rock(ratio: float, _c: Color, cd: Color) -> void:
+	# Authored ore sheets (1.7.3) carry the tier silhouette, cracks and rubble;
+	# the stain / magic halo / hover / shake around them stay as they are.
+	if ResourceArt.draw_2d(self, ResourceArt.asset_for("rock", display_name, required_level)):
+		return
 	if _state == State.DEPLETED:
 		draw_circle(Vector2(-8, 4), 5, cd)
 		draw_circle(Vector2(4, 6), 4, cd)
@@ -2215,6 +2221,10 @@ func _draw_forge(c: Color, cd: Color) -> void:
 	draw_circle(Vector2( 0, -14), fr * 0.5, Color(1.00, 0.90, 0.40, 0.75))  # bright core
 
 func _draw_herb(ratio: float, c: Color, cd: Color) -> void:
+	# Authored forage sheets (1.7.3), matched by exact name; unknown names keep
+	# the procedural draw. Ancient Root's rune pulse is composited by the adapter.
+	if ResourceArt.draw_2d(self, ResourceArt.asset_for("herb", display_name)):
+		return
 	if _state == State.DEPLETED:
 		draw_rect(Rect2(-9, -2, 18, 10), cd.darkened(0.5))
 		return

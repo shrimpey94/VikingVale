@@ -17,6 +17,7 @@ const Mesh3DScript      := preload("res://scripts/Mesh3D.gd")
 const VillageArt = preload("res://scripts/art/VillagePrototypeArt.gd")
 const StonePickupArt = preload("res://scripts/art/StonePickupArt.gd")
 const ForestArt = preload("res://scripts/art/ForestArt.gd")
+const ResourceArt = preload("res://scripts/art/ResourceArt.gd")
 # Real 2D LOGIC nodes (gather/combat/collision) live off-screen paired to each 3D
 # mesh visual; picking routes to them so the whole 2D interaction pipeline reuses.
 const InteractableTscn  := preload("res://scenes/Interactable.tscn")
@@ -1061,6 +1062,14 @@ func _interactable_node(type_str: String, col: Color, nm: String = "", logic: No
 		forest.scale = Vector3.ONE * randf_range(0.86, 1.16)
 		forest.rotation.y = randf() * TAU
 		return forest
+	# Family 04 ores + family 06 forage (1.7.3): level-ranged rock tiers like the
+	# 2D draw, name-matched herbs; same per-instance jitter as the meshes.
+	var lvl := int(logic.get("required_level")) if logic != null else -1
+	var res := ResourceArt.instantiate_visual(ResourceArt.asset_for(type_str, nm, lvl), logic, col)
+	if res != null:
+		res.scale = Vector3.ONE * randf_range(0.86, 1.16)
+		res.rotation.y = randf() * TAU
+		return res
 	if _STRUCTURE_TYPES.has(type_str):
 		return _mesh_instance(_mesh.call("structure", type_str, col) as Mesh)
 	var node: Node3D

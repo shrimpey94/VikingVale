@@ -10,6 +10,14 @@ class_name Changelog
 
 const ENTRIES: Array = [
 	{
+		"version": "1.7.3",
+		"date": "2026-11",
+		"title": "Stone and Stem",
+		"notes": [
+			"Every mining rock, from Copper to Runite, and every forage patch (herbs, mushrooms, berry bushes, moonbloom, ancient roots and wild bushes) has been rebuilt as 3D-modelled art in both 2D and 3D view. Rocks now crack as you mine and crumble to rubble when spent, plants thin out and leave bare soil, and ancient roots keep their glowing runes.",
+		],
+	},
+	{
 		"version": "1.7.2",
 		"date": "2026-11",
 		"title": "Forest Grows",

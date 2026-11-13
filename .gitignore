@@ -78,6 +78,7 @@ LORE_BIBLE.md
 MAIN_QUEST_OUTLINE.md
 POST_170_PLAN.md
 VO_SCRIPT.md
+docs/NPC_DIALOGUE_LIST.md
 
 # Art pipeline — sources, captures and planning stay local / private art repo.
 # Only the runtime exports in assets/authored/ (current versions) are public.
