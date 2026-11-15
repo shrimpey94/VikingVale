@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Restore the 3 accidentally-deleted quest-giver NPCs (Blacksmith Ulfr,
-Sea Captain Valdis, Captain Sten) by removing their `deleted` overrides from
+"""OFFLINE FALLBACK. Prefer the in-game Admin panel: World tab, "NPC roster /
+restore" (no server stop needed). Restores the 4 accidentally-deleted quest-giver
+NPCs (Castellan Halvdan, Blacksmith Ulfr, Sea Captain Valdis, Captain Sten) by removing their `deleted` overrides from
 entity_edits, so the client _NPCS seed respawns them at their canonical spots.
 
 ⚠ RUN WHILE THE SERVER IS STOPPED. A running server caches entity_edits in
@@ -12,8 +13,9 @@ Safe to run more than once (idempotent). Makes a .bak first.
 import sqlite3, shutil, os, datetime
 
 DB = os.path.join(os.path.dirname(__file__), "game_server.db")
-# n:19 = Blacksmith Ulfr, n:35 = Sea Captain Valdis, n:39 = Captain Sten
-TARGETS = ("n:19", "n:35", "n:39")
+# n:1 = Castellan Halvdan, n:19 = Blacksmith Ulfr, n:35 = Sea Captain Valdis,
+# n:39 = Captain Sten
+TARGETS = ("n:1", "n:19", "n:35", "n:39")
 
 def main() -> None:
     if not os.path.exists(DB):
@@ -24,14 +26,14 @@ def main() -> None:
     c = sqlite3.connect(DB)
     # show what's there first
     rows = c.execute(
-        "select id from entity_edits where id in (?,?,?) and x is null",
+        "select id from entity_edits where id in (?,?,?,?) and deleted=1",
         TARGETS).fetchall()
     print("delete-overrides found:", [r[0] for r in rows] or "none")
-    c.execute("delete from entity_edits where id in (?,?,?)", TARGETS)
+    c.execute("delete from entity_edits where id in (?,?,?,?)", TARGETS)
     c.commit()
     print("removed override rows:", c.total_changes)
     c.close()
-    print("Done. Start the server — Ulfr, Valdis, and Sten respawn from the seed.")
+    print("Done. Start the server — Halvdan, Ulfr, Valdis and Sten respawn from the seed.")
 
 if __name__ == "__main__":
     main()

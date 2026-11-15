@@ -23,6 +23,7 @@ const PROCEDURAL_MONSTERS := false
 const _Interactable := preload("res://scenes/Interactable.tscn")
 const _Monster      := preload("res://scripts/Monster.gd")
 const _NPC          := preload("res://scripts/NPC.gd")
+const NpcRegistry   := preload("res://scripts/data/NpcRegistry.gd")
 const _Farming      := preload("res://scripts/Farming.gd")
 const _Caravan      := preload("res://scripts/Caravan.gd")
 const _WorldThrall  := preload("res://scripts/WorldThrall.gd")
@@ -197,7 +198,7 @@ const _NPCS: Array = [
 	[Vector2(2576, 3680), "worker",     "Karl",   "", 56.0],
 	[Vector2(2784, 3664), "worker",     "Sigrid", "", 64.0],
 	[Vector2(2496, 3744), "shopkeeper", "Trader Hroar",
-		"Rope, string, provisions — if you need it, I have it.", 24.0],
+		"Timber, ore, bread and ale — if you need it, I have it.", 24.0],
 	[Vector2(2464, 3616), "banker",     "Gunhild the Treasurer",
 		"Your gold is safe with me. Deposit or withdraw — the choice is yours.", 16.0],
 	[Vector2(2848, 3680), "tutor",      "Valgerd the Craftswoman",
@@ -207,7 +208,7 @@ const _NPCS: Array = [
 	[Vector2(2720, 3808), "quest",      "Torsten the Wanderer",
 		"The Ironwood to the east holds great treasure — and greater danger.", 48.0],
 	[Vector2(2624, 3808), "shopkeeper", "Merchant Dalla",
-		"Potions, tools, and curiosities from every corner of the realm.", 20.0],
+		"Teas, hot food, good tools — and the odd curiosity from every corner of the realm.", 20.0],
 	[Vector2(2560, 3616), "worker",     "Hakon the Farmer", "", 80.0],
 	# ── Frostheim ────────────────────────────────────────────────────────────────
 	[Vector2(1312, 880),  "quest",      "Hunter Ragnhild",
@@ -228,7 +229,7 @@ const _NPCS: Array = [
 	[Vector2(3680, 4944), "banker",     "Armgard the Treasurer",
 		"The keep's vault is yours to use. What do you need?", 16.0],
 	[Vector2(3456, 4960), "shopkeeper", "Trader Thorvald",
-		"Deep forest supplies — lanterns, rope, antidotes. You'll need them.", 24.0],
+		"Deep forest supplies — hot food, arrows, a keen axe. You'll need them.", 24.0],
 	[Vector2(3584, 4960), "tutor",      "Runa the Herbalist",
 		"The ironwood holds rare plants. Pick mushrooms and moonbloom.", 32.0],
 	# ── Eastmark Post ────────────────────────────────────────────────────────────
@@ -239,7 +240,7 @@ const _NPCS: Array = [
 	[Vector2(5952, 5984), "banker",     "Outpost Treasurer Hrodgar",
 		"We keep a small vault here for travellers passing through the ashlands.", 16.0],
 	[Vector2(5856, 5888), "shopkeeper", "Wandering Merchant Freyja",
-		"Fire resistance potions are my specialty.", 20.0],
+		"Food that keeps you standing in the ash, and metal the west can't get.", 20.0],
 	# ── Bjorn's Landing ──────────────────────────────────────────────────────────
 	[Vector2(7840, 4400), "quest",      "Merchant Eydis",
 		"Bring me rare fish from the eastern waters and I will reward you generously.", 32.0],
@@ -279,7 +280,14 @@ const _NPCS: Array = [
 	[Vector2(2400, 3808), "quest", "Old Brynjar",
 		"My forge sits cold, warrior. Bring me copper ore and I'll see it lit again.", 20.0],
 	[Vector2(1216, 800), "shopkeeper", "Brynhildr the Apothecary",
-		"Tinctures, salves and cures for the northern cold. Herbs keep my stock full.", 20.0, "apothecary"],
+		"Tinctures, salves and cures for the northern cold. Herbs keep my stock full.", 20.0],
+	# ── Named replacements for the "Banker" / "Quest Giver" placeholders (1.7.4).
+	# Oddny works the Kjelvik square counter (talking opens the bank, like every
+	# banker); Eyvind guards the last Ironwood Tree and gives q_ironwood_roots.
+	[Vector2(2624, 3600), "banker", "Oddny the Ledger-Keeper",
+		"Gunhild keeps the vault; I keep the count. Deposit or withdraw — and don't lean on my ledger.", 16.0],
+	[Vector2(3525, 5038), "quest", "Tree-Warden Eyvind",
+		"The Tree has stood four hundred winters. The things crawling at its roots want it to fall. I don't.", 28.0],
 ]
 
 ## Níðhöggr boss spawns — static positions in helheim
@@ -421,6 +429,7 @@ func _ready() -> void:
 	# Admin edits (delete/move) to pre-existing entities
 	Events.entity_edits_received.connect(_on_entity_edits_received)
 	Events.entity_edit_applied.connect(_on_entity_edit_applied)
+	Events.entity_restored.connect(_on_entity_restored)
 	# The admin toolbox is created on login (world.tscn loads before login, so
 	# my_username is still empty here). Handles re-login too via the signal.
 	NetworkManager.login_ok.connect(_on_login_spawn_admin)
@@ -1315,13 +1324,25 @@ func _editable_name(n: Node) -> String:
 		return (mt as String).capitalize()
 	return str(n.get_meta("edit_id"))
 
+## Screen px of an editable entity (admin hover highlight), or (-1,-1) if gone.
+func admin_entity_screen_pos(id: String) -> Vector2:
+	var n := _find_editable_node(id)
+	if n == null:
+		return Vector2(-1, -1)
+	return get_viewport().get_canvas_transform() * n.global_position
+
+func admin_entity_name(id: String) -> String:
+	var n := _find_editable_node(id)
+	return _editable_name(n) if n != null else id
+
 ## Live world-px position of an admin entity's node (source of truth for Undo of
 ## a Move), or ZERO if the node is gone.
 func admin_entity_pos(id: String) -> Vector2:
 	var n: Variant = _admin_registry.get(id)
 	if n != null and is_instance_valid(n as Node):
 		return (n as Node2D).global_position
-	return Vector2.ZERO
+	var en := _find_editable_node(id)   # seeded NPCs / bosses / town props
+	return en.global_position if en != null else Vector2.ZERO
 
 ## Admin minimap teleport — jump the player to a world-px position. Overworld
 ## only; inside an interior we pop out first (the map shows the overworld).
@@ -1404,6 +1425,8 @@ func _apply_entity_data(node: Node, data: Dictionary) -> void:
 		node.set("wander_radius", float(data["wander_radius"]))
 	if data.has("shop_id"):
 		node.set("shop_id", str(data["shop_id"]))
+	if data.has("npc_type") and node.get("npc_type") != null:
+		node.set("npc_type", str(data["npc_type"]))
 	if data.has("level") and node.has_method("scale_to_level"):
 		node.call("scale_to_level", int(data["level"]))
 	if node.has_method("queue_redraw"):
@@ -2302,28 +2325,43 @@ func _spawn_town_row(parent: Node, d: Array, edit_id: String) -> void:
 	parent.add_child(node)
 
 func _spawn_npcs() -> void:
-	var c := $Interactables
 	for i in range(_NPCS.size()):
-		var d: Array = _NPCS[i]
-		var n := Area2D.new()
-		n.set_script(_NPC)
-		n.position      = d[0]
-		n.npc_type      = d[1]
-		n.npc_name_str  = d[2]
-		n.quest_text    = d[3]
-		n.wander_radius = d[4]
-		# Optional 6th column = shop_id, so a SEEDED shopkeeper can actually trade
-		# (right-click → Trade / left-click) without needing an admin edit. Older
-		# 5-column rows default to no shop.
-		if d.size() > 5:
-			n.shop_id   = str(d[5])
-		# Regional wardrobe (Phase 5c) — derived from where the NPC stands.
-		n.region        = _region_for_pos(d[0] as Vector2)
-		if not _register_editable(n, "n:%d" % i):
-			n.queue_free()
-			continue
-		c.add_child(n)
-		_apply_entity_data(n, _edits_data.get("n:%d" % i, {}) as Dictionary)
+		_spawn_seed_npc(i)
+
+## Build seeded NPC row `i` as "n:<i>" (skipped if deleted). Shared by the boot
+## spawn and the admin restore, so a restored NPC is identical to a fresh boot.
+func _spawn_seed_npc(i: int) -> void:
+	var d: Array = _NPCS[i]
+	var n := Area2D.new()
+	n.set_script(_NPC)
+	n.position      = d[0]
+	n.npc_type      = d[1]
+	n.npc_name_str  = d[2]
+	n.quest_text    = d[3]
+	n.wander_radius = d[4]
+	# A SEEDED shopkeeper's shop lives in NpcRegistry (shared with the server), so
+	# it can trade (right-click → Trade / left-click) without an admin edit.
+	n.shop_id       = NpcRegistry.shop_of(str(d[2]))
+	# Regional wardrobe (Phase 5c) — derived from where the NPC stands.
+	n.region        = _region_for_pos(d[0] as Vector2)
+	if not _register_editable(n, "n:%d" % i):
+		n.queue_free()
+		return
+	$Interactables.add_child(n)
+	_apply_entity_data(n, _edits_data.get("n:%d" % i, {}) as Dictionary)
+
+## Admin restored a deleted pre-existing entity — forget its edit state. Seeded
+## NPCs respawn right away; streamed ones (r:/t:…) return when their chunk reloads.
+func _on_entity_restored(entity_id: String) -> void:
+	_deleted_ids.erase(entity_id)
+	_moved.erase(entity_id)
+	_edits_data.erase(entity_id)
+	_promoted_ids.erase(entity_id)
+	if not entity_id.begins_with("n:"):
+		return
+	var i := int(entity_id.substr(2))
+	if i >= 0 and i < _NPCS.size() and _find_editable_node(entity_id) == null:
+		_spawn_seed_npc(i)
 
 ## Which town an NPC stands in, for the regional wardrobe (Phase 5c). Mirrors
 ## the _SAFE_ZONES order; Kjelvik is checked first so the castle-quarter NPCs

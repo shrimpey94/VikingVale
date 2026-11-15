@@ -295,6 +295,8 @@ extends Node
 ## Admin DATA override for a pre-existing entity (n:/b:/…) — name/dialogue/level.
 ## Worlds apply it to the live node + cache it for re-spawn.
 @warning_ignore("unused_signal") signal entity_data_edited(entity_id: String, data: Dictionary)
+## A deleted seeded NPC (n:<index>) was restored to its seed defaults.
+@warning_ignore("unused_signal") signal entity_restored(entity_id: String)
 @warning_ignore("unused_signal") signal minimap_refresh()
 
 ## Admin item-management (panel + chat commands). Replies routed back from
@@ -304,10 +306,18 @@ extends Node
 ## Echo of a successful admin_place — the AdminPanel Undo stack listens so it can
 ## reverse a placement (the client only learns the new a: id from this reply).
 @warning_ignore("unused_signal") signal admin_entity_placed(id: String, kind: String, subtype: String, x: float, y: float)
+## Echo of a successful admin_delete / admin_undelete (sent only to the admin who
+## did it) — the Undo stack records the reverse op on these, not on the request.
+@warning_ignore("unused_signal") signal admin_entity_deleted(id: String, label: String)
+@warning_ignore("unused_signal") signal admin_entity_undeleted(id: String, label: String)
+## Reply to admin_audit_list: recent activity rows + still-deleted rows.
+@warning_ignore("unused_signal") signal admin_audit_received(recent: Array, deleted: Array)
 ## Admin Accounts tab — each entry is a Dictionary with keys: username,
 ## email, email_verified, last_login_at, last_login_ip, locked_until,
 ## failed_login_count, created_at. See _handle_admin_list_accounts.
 @warning_ignore("unused_signal") signal admin_account_list_received(accounts: Array)
+## Admin item picker feed — [{id, name, color}] of every item the server knows.
+@warning_ignore("unused_signal") signal admin_item_catalog_received(items: Array)
 ## Touch-input adapter — fires at the halfway point of a long-press so a
 ## future UI overlay can show a ring-fill / progress hint. The actual
 ## right-click synthesis happens in TouchInput.gd at LONG_PRESS_SECONDS.

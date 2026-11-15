@@ -9,6 +9,9 @@ extends RefCounted
 ## kind == "monster"  → data: {monster_type, level}
 ## kind == "npc"      → data: {npc_type, npc_name, quest_text, wander_radius}
 
+const NpcRoster = preload("res://scripts/admin/NpcRoster.gd")
+const ShopCat   = preload("res://scripts/ShopCatalog.gd")
+
 static func _res(type_str: String, name: String, skill: String, level: int,
 		action: String, c: Color) -> Dictionary:
 	return {
@@ -59,7 +62,8 @@ static func _door(interior_id: String, label: String) -> Dictionary:
 		},
 	}
 
-static func entries() -> Array:
+## `roster` = NpcRoster.build(...) result; NPC templates are derived from it.
+static func entries(roster: Dictionary = {}) -> Array:
 	return [
 		# ── Trees ───────────────────────────────────────────────────────────────
 		_res("tree", "Oak Tree",     "woodcutting",  1, "Chop", Color(0.18, 0.55, 0.15)),
@@ -156,41 +160,67 @@ static func entries() -> Array:
 		_mon("wyvern",           "Venom Wyvern",      58),
 		# Water — water-only pathing, semi-transparent, targets boats.
 		_mon("shark",            "Shark",             30),
-		# ── NPCs ────────────────────────────────────────────────────────────────
-		_npc("worker",     "Villager"),
-		_npc("shopkeeper", "Merchant"),      # generic — no shop_id, opens no shop
-		_npc("banker",     "Banker"),
-		_npc("quest",      "Quest Giver"),
-		_npc("tutor",      "Tutor"),
-		_npc("trainer",    "Trainer"),
-		# ── Named quest-givers ────────────────────────────────────────────────
-		# Placeable with the EXACT giver_npc name so they link to their quests
-		# (NPC.gd offers quests by name for any npc_type). Re-placing one restores
-		# its quests; edit its greeting via Inspect/Edit → Dialogue. Ulfr/Sigrid/
-		# Brynhildr double as shops below (their labels now match the quest names).
-		_npc("quest", "Elder Bjarne"),
-		_npc("quest", "Castellan Halvdan"),
-		_npc("quest", "Hunter Ragnhild"),
-		_npc("quest", "Torsten the Wanderer"),
-		_npc("quest", "Scout Halfdan"),
-		_npc("quest", "Old Brynjar"),
-		_npc("quest", "Merchant Eydis"),
-		_npc("quest", "Ironwood Hermit Skade"),
-		_npc("quest", "Sea Captain Valdis"),
-		_npc("quest", "Captain Sten"),
-		# ── Shopkeepers (Phase 4) — each binds a ShopCatalog template ─────────
-		_shopkeeper("general_store", "Bjorn the Trader"),
-		_shopkeeper("weapons_smith", "Blacksmith Ulfr"),
-		_shopkeeper("fishmonger",    "Sigrid the Fishmonger"),
-		_shopkeeper("apothecary",    "Brynhildr the Apothecary"),
-		_shopkeeper("magic_vendor",  "Eirik the Rune-Master"),
 		# ── Doors (Phase 6) — each leads to an interior defined in Phase 8.
 		_door("kjelvik_general_store",     "General Store Door"),
 		_door("frostheim_smith",           "Frostheim Smith Door"),
 		_door("bjorns_fishmonger",         "Fishmonger Door"),
 		_door("eastmark_apothecary",       "Apothecary Door"),
 		_door("ironwood_magic_vendor",     "Magic Vendor Door"),
+	] + npc_entries(roster)
+
+## Preferred keeper name per ShopCatalog shop (the names these shops shipped with).
+const SHOP_KEEPERS: Dictionary = {
+	"general_store": "Bjorn the Trader",
+	"weapons_smith": "Blacksmith Ulfr",
+	"fishmonger":    "Sigrid the Fishmonger",
+	"apothecary":    "Brynhildr the Apothecary",
+	"magic_vendor":  "Eirik the Rune-Master",
+}
+
+## NPC templates for the Place tab, DERIVED from live data (NpcRoster.build) so
+## they can't go stale. Seeded NPCs are never offered here — a deleted seed is
+## brought back with Restore in the NPC roster instead (home spot, original name,
+## quests intact), which avoids duplicate quest givers. Contents:
+##   • generic types (Villager, Banker, …)
+##   • one shopkeeper per ShopCatalog shop; a quest-bound keeper name that is
+##     already seeded/placed falls back to "<Shop name> Keeper"
+##   • every quest NPC that is neither seeded nor placed (exact quest name)
+## An empty roster (no world yet) falls back to the seed names alone.
+static func npc_entries(roster: Dictionary = {}) -> Array:
+	var out: Array = [
+		_npc("worker",     "Villager"),
+		_npc("shopkeeper", "Merchant"),      # generic — no shop_id, opens no shop
+		_npc("banker",     "Banker"),
+		_npc("quest",      "Quest Giver"),   # custom dialogue only — no quests bind to it
+		_npc("tutor",      "Tutor"),
+		_npc("trainer",    "Trainer"),
 	]
+	var taken: Dictionary = roster.get("taken_names", {}) as Dictionary
+	if taken.is_empty():
+		for d_v: Variant in NpcRoster.seed_rows():
+			taken[str((d_v as Array)[2])] = true
+	var quest_names: Dictionary = NpcRoster.quest_npcs()
+	var keeper_by_name: Dictionary = {}
+	for sid_v: Variant in ShopCat.SHOPS.keys():
+		var sid := str(sid_v)
+		var keeper := str(SHOP_KEEPERS.get(sid, ""))
+		keeper_by_name[keeper] = sid
+		if keeper == "" or (quest_names.has(keeper) and taken.has(keeper)):
+			keeper = "%s Keeper" % str((ShopCat.SHOPS[sid] as Dictionary).get("name", sid))
+		out.append(_shopkeeper(sid, keeper))
+	var missing: Array = roster.get("missing_quest_names", []) as Array
+	if roster.is_empty():
+		for q_v: Variant in quest_names.keys():
+			if not taken.has(str(q_v)):
+				missing.append(str(q_v))
+	for m_v: Variant in missing:
+		var nm := str(m_v)
+		if keeper_by_name.has(nm) and quest_names.has(nm) and not taken.has(nm):
+			continue   # the shop template above already carries this exact name
+		var e := _npc("quest", nm)
+		e["id"] = "npc_missing_" + nm.to_lower().replace(" ", "_")
+		out.append(e)
+	return out
 
 static func monster_types() -> Array:
 	var out: Array = []

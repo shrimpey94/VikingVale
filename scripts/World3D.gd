@@ -23,6 +23,7 @@ const ResourceArt = preload("res://scripts/art/ResourceArt.gd")
 const InteractableTscn  := preload("res://scenes/Interactable.tscn")
 const MonsterScript      := preload("res://scripts/Monster.gd")
 const NPCScript          := preload("res://scripts/NPC.gd")
+const NpcRegistry        := preload("res://scripts/data/NpcRegistry.gd")
 const CaravanScript      := preload("res://scripts/Caravan.gd")
 const LootDropScript     := preload("res://scripts/LootDrop.gd")
 const WorldThrallScript  := preload("res://scripts/WorldThrall.gd")
@@ -195,6 +196,7 @@ func _ready() -> void:
 	# Admin edits (move/delete) to PRE-EXISTING entities (towns/NPCs/bosses) come
 	# through the entity-edit feed, not world_entity_moved.
 	Events.entity_edit_applied.connect(_on_entity_edit_applied3d)
+	Events.entity_restored.connect(_on_entity_restored3d)
 	Events.entity_edits_received.connect(_on_entity_edits3d)
 	Events.entity_data_edited.connect(_on_entity_data_edited3d)
 	# Shared monster combat state (routed to the paired 2D Monster nodes).
@@ -1280,17 +1282,38 @@ func _build_static_entities() -> void:
 		_static_structure(towns[i] as Array, "t:%d" % i)
 	for i in range(castle.size()):
 		_static_structure(castle[i] as Array, "kc:%d" % i)
+	_seed_npcs3d = npcs
 	for i in range(npcs.size()):
-		var d: Array = npcs[i]
-		var nid := "n:%d" % i
-		_spawn_npc(nid, str(d[1]), str(d[2]), str(d[3]), float(d[4]),
-			_region_for_pos(d[0] as Vector2), "", d[0] as Vector2)
-		_apply_entity_data3d(_node_of(nid), _edits_data3d.get(nid, {}) as Dictionary)
+		_spawn_seed_npc3d(i)
 	for i in range(bosses.size()):
 		var b: Array = bosses[i]
 		var bid := "b:%d" % i
 		_spawn_monster(bid, str(b[1]), 0, b[0] as Vector2, false)   # bosses: no AI join
 		_apply_entity_data3d(_node_of(bid), _edits_data3d.get(bid, {}) as Dictionary)
+
+## World._NPCS rows, kept so an admin restore can respawn a single seed NPC.
+var _seed_npcs3d: Array = []
+
+## Seeded NPC row `i` as "n:<i>". Its shop comes from NpcRegistry (same as
+## World._spawn_seed_npc) so seeded shopkeepers can trade in 3D too.
+func _spawn_seed_npc3d(i: int) -> void:
+	var d: Array = _seed_npcs3d[i]
+	var nid := "n:%d" % i
+	var shop := NpcRegistry.shop_of(str(d[2]))
+	_spawn_npc(nid, str(d[1]), str(d[2]), str(d[3]), float(d[4]),
+		_region_for_pos(d[0] as Vector2), shop, d[0] as Vector2)
+	_apply_entity_data3d(_node_of(nid), _edits_data3d.get(nid, {}) as Dictionary)
+
+## Admin restored a deleted seeded NPC — respawn it at its seed defaults.
+func _on_entity_restored3d(entity_id: String) -> void:
+	if not entity_id.begins_with("n:"):
+		return
+	var i := int(entity_id.substr(2))
+	if i < 0 or i >= _seed_npcs3d.size():
+		return
+	_edits_data3d.erase(entity_id)
+	if _node_of(entity_id) == null:
+		_spawn_seed_npc3d(i)
 
 func _static_structure(row: Array, id: String) -> void:   # [pos,type,name,skill,lvl,action,color]
 	_spawn_interactable(id, str(row[1]), str(row[2]), str(row[3]),
@@ -1622,6 +1645,10 @@ func _apply_entity_data3d(node: Node, data: Dictionary) -> void:
 		node.set("wander_radius", float(data["wander_radius"]))
 	if data.has("shop_id"):
 		node.set("shop_id", str(data["shop_id"]))
+	# Type drives quest marker / shop / bank behaviour on the logic node; the 3D
+	# body mesh keeps its spawn look until the next relog/2D↔3D switch.
+	if data.has("npc_type") and node.get("npc_type") != null:
+		node.set("npc_type", str(data["npc_type"]))
 	if data.has("level") and node.has_method("scale_to_level"):
 		node.call("scale_to_level", int(data["level"]))
 
@@ -2383,6 +2410,22 @@ func _editable_name3d(n: Node) -> String:
 	if mt is String and not (mt as String).is_empty():
 		return (mt as String).capitalize()
 	return str(n.name)
+
+## Screen px of an entity's visual (admin hover highlight), or (-1,-1) if hidden.
+func admin_entity_screen_pos(id: String) -> Vector2:
+	if not _ent.has(id) or _cam == null:
+		return Vector2(-1, -1)
+	var v: Variant = (_ent[id] as Dictionary)["v"]
+	if not is_instance_valid(v):
+		return Vector2(-1, -1)
+	var p: Vector3 = (v as Node3D).global_position
+	if _cam.is_position_behind(p):
+		return Vector2(-1, -1)
+	return _cam.unproject_position(p)
+
+func admin_entity_name(id: String) -> String:
+	var n := _node_of(id)
+	return _editable_name3d(n) if n != null else id
 
 ## Live world-px position of an admin entity's logic node (for Undo of a Move).
 func admin_entity_pos(id: String) -> Vector2:

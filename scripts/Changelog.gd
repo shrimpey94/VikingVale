@@ -10,6 +10,22 @@ class_name Changelog
 
 const ENTRIES: Array = [
 	{
+		"version": "1.7.4",
+		"date": "2026-11",
+		"title": "Town Folk Return",
+		"notes": [
+			"Fourteen townsfolk are back where they belong, including Castellan Halvdan, Blacksmith Ulfr, Sea Captain Valdis and Captain Sten. Their quests can be picked up again.",
+			"Seven new shops: Garrison Armoury, Hroar's Provisions and Dalla's Curiosities in Kjelvik; Bera's Furs & Brews in Frostheim; Thorvald's Forest Supplies in Ironwood Keep; Freyja's Wagon at Eastmark Post; and Knud's Catch in Bjorn's Landing. Brynhildr's shop is now the Frostheim Apothecary.",
+			"Meet Oddny the Ledger-Keeper, Kjelvik's new banker, and Tree-Warden Eyvind, who guards the last Ironwood Tree and has a new quest: Rot at the Roots.",
+			"Bankers now open your bank when you talk to them, and every banker has “Use Bank” on right-click.",
+			"Shops open properly in 3D view, and the prices shown match what you pay.",
+			"Eirik the Rune-Master now runs his rune shop in Ironwood only; the duplicate in Bjorn's Landing is gone.",
+			"The Wall-Keeper shows up as soon as you log in.",
+			"Fixed “Cannot reach server” when the game is slow to start.",
+			"Items returned to you by staff no longer vanish at your next save.",
+		],
+	},
+	{
 		"version": "1.7.3",
 		"date": "2026-11",
 		"title": "Stone and Stem",

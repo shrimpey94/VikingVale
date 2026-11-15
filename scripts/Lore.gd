@@ -5,6 +5,8 @@ extends RefCounted
 ## already encoded in Ground.gd; do not invent new towns or rename existing
 ## ones from here. Adding lore = adding fields, not changing names.
 
+const NpcRegistry = preload("res://scripts/data/NpcRegistry.gd")
+
 ## ── World backstory ─────────────────────────────────────────────────────────
 const BACKSTORY: String = """The Allfather's peace ruled Vinland for a thousand winters.
 
@@ -77,16 +79,6 @@ static func town(town_id: String) -> Dictionary:
 
 ## Reverse lookup: which town does this NPC live in? Used by the NPC
 ## dialogue's "About this town" button so each NPC pulls the right entry.
-## Returns town_id or "" if the NPC isn't a known Jarl.
+## Reads NpcRegistry — the same table the server uses for quest reputation.
 static func town_of_npc(npc_name: String) -> String:
-	for tid: String in TOWNS.keys():
-		if str(TOWNS[tid].get("jarl", "")) == npc_name:
-			return tid
-	# Fallbacks for the known quest-giver NPCs that live in each town.
-	match npc_name:
-		"Sigrid the Fishmonger", "Merchant Eydis":              return "bjorn"
-		"Trader Hroar", "Old Brynjar":                          return "kjelvik"
-		"Brynhildr the Apothecary", "Gunnar Coldhand":          return "frostheim"
-		"Torsten the Wanderer", "Runa the Herbalist":           return "ironwood"
-		"Captain Sten":                                          return "eastmark"
-	return ""
+	return NpcRegistry.town_of(npc_name)

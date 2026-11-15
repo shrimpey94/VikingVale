@@ -178,6 +178,8 @@ func _on_hover_enter() -> void:
 		var label := "[Talk]  %s" % npc_name_str if npc_type != "quest" else "[!]  %s" % npc_name_str
 		if npc_type == "shopkeeper" and shop_id != "":
 			label = "[Trade]  %s" % npc_name_str   # right-click also offers Trade
+		elif npc_type == "banker":
+			label = "[Bank]  %s" % npc_name_str
 		nodes[0].show_hover(label)
 
 func _on_hover_exit() -> void:
@@ -189,6 +191,14 @@ func _on_hover_exit() -> void:
 		nodes[0].hide_hover()
 
 const QuestData = preload("res://scripts/QuestData.gd")
+
+## The id the server knows this NPC by, for shop_open. 2D tags nodes with an
+## "edit_id" meta; the 3D world only sets `entity_id` (without this fallback no
+## shop could open in 3D — the server refused the empty id).
+func shop_npc_id() -> String:
+	if has_meta("edit_id"):
+		return str(get_meta("edit_id"))
+	return entity_id
 
 func _on_player_interacted(node: Node) -> void:
 	if node != self or not is_alive:
@@ -213,10 +223,11 @@ func _on_player_interacted(node: Node) -> void:
 		return
 	# No quest interaction — fall back to shop / dialogue paths.
 	if npc_type == "shopkeeper" and shop_id != "":
-		var eid := ""
-		if has_meta("edit_id"):
-			eid = str(get_meta("edit_id"))
-		Events.open_shop.emit(eid, shop_id)
+		Events.open_shop.emit(shop_npc_id(), shop_id)
+		return
+	# Every banker opens the bank on talk — the counter, not just the vault chest.
+	if npc_type == "banker":
+		Events.open_bank.emit()
 		return
 	if npc_type == "quest" and quest_text != "":
 		# Legacy quest-type NPC dialogue — preserved for any admin-placed NPC

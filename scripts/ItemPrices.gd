@@ -232,17 +232,30 @@ const PRICES: Dictionary = {
 	"serpent_lure":4_000,
 	"kraken_bait": 5_000,
 
-	# ── Farming (seeds + crops) ───────────────────────────────────────────────
-	"barley_seed":   10,
-	"cabbage_seed":  25,
-	"onion_seed":    45,
-	"wheat_seed":    80,
-	"tomato_seed": 150,
-	"barley":         5,
-	"cabbage":       15,
-	"onion":         30,
-	"wheat":         50,
-	"tomato":        90,
+	# ── Farming (seeds + crops) — values match the server price table, which is
+	# what shops actually charge/pay (the shop UI shows these). ────────────────
+	"wheat_seed":        8, "carrot_seed":       8, "barley_seed":      12,
+	"cabbage_seed":     12, "rye_seed":         16, "corn_seed":        22,
+	"potato_seed":      30, "cotton_seed":      45, "pepper_seed":      60,
+	"sugarcane_seed":   80, "hops_seed":       100, "tomato_seed":     130,
+	"moonwheat_seed":  170, "blueberry_seed":  210, "lingonberry_seed": 240,
+	"strawberry_seed": 280, "peach_seed":      340, "apple_seed":      430,
+	"watermelon_seed": 550, "grape_seed":      800,
+	"wheat":    12, "carrot":   12, "barley":     16, "cabbage":    18, "rye":   22,
+	"corn":     30, "potato":   40, "cotton":     55, "pepper":     75,
+	"sugarcane": 95, "hops":   120, "tomato":    150, "moonwheat": 200,
+	"blueberry": 240, "lingonberry": 270, "strawberry": 320, "peach": 400,
+	"apple":   500, "watermelon": 650, "grape":  950,
+	"onion_seed":   45,   # client-only legacy crop (not in the server table)
+	"onion":        30,
+
+	# ── Farming crop dishes (1.6.2) — server values ───────────────────────────
+	"barley_porridge":  18, "steamed_cabbage":  20, "dark_bread":      24,
+	"roasted_corn":     26, "boiled_potato":    30, "garden_salad":    60,
+	"sweet_loaf":       55, "farmers_stew":     95, "ale":             60,
+	"stuffed_pepper":   80, "melon_slice":     130, "apple_pie":      180,
+	"berry_fruit_bowl":200, "peach_cobbler":   260, "fine_wine":      420,
+	"wheat_bread":      20, "carrot_stew":      55, "moonwheat_loaf": 180,
 
 	# ── Tools that don't fit {tier}_{piece} ───────────────────────────────────
 	"wooden_axe":          5,

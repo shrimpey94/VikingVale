@@ -11,6 +11,7 @@ extends CanvasLayer
 ## Gold/spawn commands are typed in chat (/gold, /spawn) and handled by the HUD.
 
 const Catalog = preload("res://scripts/AdminCatalog.gd")
+const NpcRoster = preload("res://scripts/admin/NpcRoster.gd")
 const UITheme = preload("res://scripts/ui/UITheme.gd")
 const Boats   = preload("res://scripts/Boat.gd")
 const ShopCat = preload("res://scripts/ShopCatalog.gd")
@@ -290,6 +291,11 @@ var _items_id_edit:    LineEdit        = null
 var _items_qty_spin:   SpinBox         = null
 var _items_boat_opt:   OptionButton    = null
 var _items_inv_text:   RichTextLabel   = null
+## Searchable item picker (Items tab) — fed by the server's admin_item_catalog.
+var _items_search:     LineEdit        = null
+var _items_list:       ItemList        = null
+var _items_catalog:    Array           = []    # [{id, name, color}] sorted by name
+var _items_by_id:      Dictionary      = {}    # id → catalog entry
 
 # Move-mode drag state
 var _drag_id:  String  = ""
@@ -309,7 +315,16 @@ var _undoing: bool = false
 ## Count of admin_placed echoes to ignore when pushing a place→delete undo entry
 ## (an undo-delete triggers a place whose echo must NOT become a new undo step).
 var _suppress_placed_undo: int = 0
+## Same idea for admin_deleted echoes produced by undoing a placement.
+var _suppress_deleted_undo: int = 0
 var _undo_btn: Button = null
+## Hover target for DELETE / MOVE / ROTATE / INSPECT: ring + name tag so you see
+## exactly what a click will hit before it hits.
+var _hover_id: String = ""
+var _hover_ring: Panel = null
+var _hover_lbl: Label = null
+## Open "Recently deleted / log" popup (rebuilt on each server reply).
+var _audit_dim: Control = null
 ## World-px of the entity when a Move drag started (source for the move undo).
 var _drag_old_pos: Vector2 = Vector2.ZERO
 
@@ -337,8 +352,13 @@ func _ready() -> void:
 	# Server replies for the items tab — populate the player dropdown and the
 	# inventory-view RichTextLabel when the server responds to our requests.
 	Events.admin_player_list_received.connect(_on_admin_player_list_received)
+	Events.admin_item_catalog_received.connect(_on_item_catalog_received)
 	Events.admin_inventory_view_received.connect(_on_admin_inventory_view_received)
 	Events.admin_entity_placed.connect(_on_admin_entity_placed)
+	Events.entity_restored.connect(_on_npc_restored)
+	Events.admin_entity_deleted.connect(_on_admin_entity_deleted)
+	Events.admin_entity_undeleted.connect(_on_admin_entity_undeleted)
+	Events.admin_audit_received.connect(_on_admin_audit_received)
 
 # ── UI construction ────────────────────────────────────────────────────────────
 func _build_overlay() -> void:
@@ -459,6 +479,13 @@ func _build_world_section() -> VBoxContainer:
 	vb.add_child(row2)
 	row2.add_child(_mode_button("Inspect / Edit", Mode.INSPECT))
 	row2.add_child(_mode_button("Off",    Mode.OFF))
+	var keys_lbl := Label.new()
+	keys_lbl.text = "Keys: 1 Place · 2 Move · 3 Rotate · 4 Inspect · 5 Delete · 0 Off · Ctrl+Z Undo"
+	keys_lbl.add_theme_color_override("font_color", UITheme.DIM)
+	keys_lbl.add_theme_font_size_override("font_size", 10)
+	keys_lbl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	keys_lbl.custom_minimum_size = Vector2(240, 0)
+	vb.add_child(keys_lbl)
 
 	# Undo — reverses the last place/delete/move/rotate/edit (Ctrl+Z too).
 	_undo_btn = Button.new()
@@ -509,14 +536,7 @@ func _build_world_section() -> VBoxContainer:
 	tab_wrap.add_child(tab_row_b)
 	# Compute per-tab counts once so tab labels can show "(N)" without
 	# rebuilding the dropdown each time.
-	var counts: Dictionary = {}
-	for tab_name: String in _ENTITY_TAB_NAMES:
-		counts[tab_name] = 0
-	counts["All"] = _entries.size()
-	for entry_v: Variant in _entries:
-		var cat: String = _entity_category_for(entry_v as Dictionary)
-		if counts.has(cat):
-			counts[cat] = int(counts[cat]) + 1
+	var counts: Dictionary = _entity_tab_counts()
 	# Split tabs across two rows so the panel stays narrow (5 per row).
 	for i: int in range(_ENTITY_TAB_NAMES.size()):
 		var tab: String = _ENTITY_TAB_NAMES[i]
@@ -531,12 +551,33 @@ func _build_world_section() -> VBoxContainer:
 			for other_v in _entity_tab_btns.keys():
 				var other: String = other_v
 				(_entity_tab_btns[other] as Button).button_pressed = (other == tab)
-			_populate_entity_dropdown())
+			# Re-derive the NPC templates from live data on every tab switch.
+			_refresh_catalog())
 		if i < 5:
 			tab_row_a.add_child(b)
 		else:
 			tab_row_b.add_child(b)
 		_entity_tab_btns[tab] = b
+	# NPC roster — every seeded / admin-placed / server NPC rebuilt from live
+	# data each time it opens; deleted seeds can be restored from here.
+	var roster_btn := Button.new()
+	roster_btn.text = "👥  NPC roster / restore"
+	roster_btn.tooltip_text = "List every NPC (seeded, admin-placed, server), flag stale or broken ones, and restore deleted seeded NPCs."
+	roster_btn.add_theme_stylebox_override("normal", UITheme.sb(UITheme.BTN_N, UITheme.BORDER, 1))
+	roster_btn.add_theme_stylebox_override("hover",  UITheme.sb(UITheme.BTN_H, UITheme.GOLD, 1))
+	roster_btn.add_theme_color_override("font_color", UITheme.TEXT)
+	roster_btn.pressed.connect(_open_npc_roster)
+	tab_wrap.add_child(roster_btn)
+	# Audit log — who placed / deleted / moved / edited what, and every delete
+	# that can still be brought back (server-stored, so it survives restarts).
+	var log_btn := Button.new()
+	log_btn.text = "🗑  Recently deleted / log"
+	log_btn.tooltip_text = "Restore anything deleted (same id, data and spot) and see who changed what, when."
+	log_btn.add_theme_stylebox_override("normal", UITheme.sb(UITheme.BTN_N, UITheme.BORDER, 1))
+	log_btn.add_theme_stylebox_override("hover",  UITheme.sb(UITheme.BTN_H, UITheme.GOLD, 1))
+	log_btn.add_theme_color_override("font_color", UITheme.TEXT)
+	log_btn.pressed.connect(_open_audit_log)
+	tab_wrap.add_child(log_btn)
 	_type_opt = OptionButton.new()
 	_populate_entity_dropdown()
 	vb.add_child(_type_opt)
@@ -586,7 +627,9 @@ func _build_world_section() -> VBoxContainer:
 		+ "Ground.biome_at_world and upload it. Server uses it to block "
 		+ "monster movement into water/coast tiles. Run once whenever "
 		+ "biome generation changes. Owner-only.")
-	bake_btn.pressed.connect(_on_bake_terrain)
+	bake_btn.pressed.connect(func() -> void: _confirm_bake("Bake terrain bitmap",
+		"Re-bake the 300×300 passability bitmap from the current biome generation and "
+		+ "replace the server's copy?\nMonster movement uses it immediately.", _on_bake_terrain))
 	vb.add_child(bake_btn)
 
 	# v1.7 B2a — bake the node→drop map so the server grants gather loot itself.
@@ -599,7 +642,10 @@ func _build_world_section() -> VBoxContainer:
 		+ "and every craft recipe, then upload them. The server then grants gather loot, rolls kill "
 		+ "loot, and crafts items authoritatively (anti-cheat). Re-run whenever drops/loot/recipes "
 		+ "change. Owner-only.")
-	bake_nodes_btn.pressed.connect(_on_bake_nodes)
+	bake_nodes_btn.pressed.connect(func() -> void: _confirm_bake("Bake nodes, loot, recipes, fish",
+		"Snapshot node drops, monster + sea loot, craft recipes and fish from THIS client and "
+		+ "replace the server's tables?\nThe server grants gathering, kill loot, crafting and "
+		+ "catches from them right away — only bake from an up-to-date client.", _on_bake_nodes))
 	vb.add_child(bake_nodes_btn)
 
 	var hint := Label.new()
@@ -1347,10 +1393,23 @@ func _build_items_section() -> VBoxContainer:
 	refresh_btn.pressed.connect(_on_refresh_players)
 	player_row.add_child(refresh_btn)
 
-	# ── Give item by id + qty ──
+	# ── Give item: search the server's real item list, pick one ──
 	vb.add_child(_section_label("Give item"))
+	_items_search = LineEdit.new()
+	_items_search.placeholder_text = "search items (name or id)…"
+	_items_search.clear_button_enabled = true
+	_items_search.text_changed.connect(func(_t: String) -> void: _refresh_item_list())
+	vb.add_child(_items_search)
+	_items_list = ItemList.new()
+	_items_list.custom_minimum_size = Vector2(240, 120)
+	_items_list.add_theme_font_size_override("font_size", 11)
+	_items_list.item_selected.connect(func(i: int) -> void:
+		_items_id_edit.text = str(_items_list.get_item_metadata(i)))
+	vb.add_child(_items_list)
 	_items_id_edit = LineEdit.new()
-	_items_id_edit.placeholder_text = "item_id (e.g. oak_log)"
+	_items_id_edit.placeholder_text = "item_id — pick above (Take also accepts any id)"
+	_items_id_edit.tooltip_text = ("Give only accepts ids the server knows (it checks too). "
+		+ "Take accepts any id, so junk items can still be removed.")
 	vb.add_child(_items_id_edit)
 
 	var give_row := HBoxContainer.new()
@@ -1673,39 +1732,44 @@ func _build_account_row(a: Dictionary) -> PanelContainer:
 	reset_btn.pressed.connect(func() -> void:
 		NetworkManager.send_admin_reset_password(username))
 	btn_row.add_child(reset_btn)
+	# Every action below makes the server re-send the account list as soon as
+	# it's done (it carries the current search), so rows update on the reply.
 	var unlock_btn := _account_action_btn("Unlock")
 	unlock_btn.pressed.connect(func() -> void:
-		NetworkManager.send_admin_unlock_account(username)
-		# Refresh after a short delay so the lock badge updates.
-		get_tree().create_timer(0.3).timeout.connect(func() -> void:
-			NetworkManager.send_admin_list_accounts(_accounts_search.text)))
+		NetworkManager.send_admin_unlock_account(username))
 	btn_row.add_child(unlock_btn)
 	var verify_btn := _account_action_btn("Verify ✓")
 	verify_btn.pressed.connect(func() -> void:
-		NetworkManager.send_admin_verify_email(username)
-		get_tree().create_timer(0.3).timeout.connect(func() -> void:
-			NetworkManager.send_admin_list_accounts(_accounts_search.text)))
+		NetworkManager.send_admin_verify_email(username))
 	btn_row.add_child(verify_btn)
 
-	# Mapper rank management — owner-only (server enforces). Button label
-	# swaps to Revoke when the account already has mapper rank, and the
-	# row hides both buttons entirely for owner + admin (mapper is a
-	# down-grade path, not lateral).
+	# Rank management — owner-only (server enforces), on its own row:
+	#   player → Grant Mapper / Promote to Admin
+	#   mapper → Revoke Mapper / Promote to Admin
+	#   admin  → Demote to Player
 	var rank_now := str(a.get("admin_rank", ""))
-	if rank_now == "":
-		var grant_btn := _account_action_btn("Grant Mapper")
-		grant_btn.pressed.connect(func() -> void:
-			NetworkManager.send_admin_grant_mapper(username)
-			get_tree().create_timer(0.3).timeout.connect(func() -> void:
-				NetworkManager.send_admin_list_accounts(_accounts_search.text)))
-		btn_row.add_child(grant_btn)
-	elif rank_now == "mapper":
-		var revoke_btn := _account_action_btn("Revoke Mapper")
-		revoke_btn.pressed.connect(func() -> void:
-			NetworkManager.send_admin_revoke_mapper(username)
-			get_tree().create_timer(0.3).timeout.connect(func() -> void:
-				NetworkManager.send_admin_list_accounts(_accounts_search.text)))
-		btn_row.add_child(revoke_btn)
+	if NetworkManager.my_admin_rank == "owner" and rank_now != "owner":
+		var rank_row := HBoxContainer.new()
+		rank_row.add_theme_constant_override("separation", 4)
+		inner.add_child(rank_row)
+		if rank_now == "":
+			var grant_btn := _account_action_btn("Grant Mapper")
+			grant_btn.pressed.connect(func() -> void:
+				NetworkManager.send_admin_grant_mapper(username))
+			rank_row.add_child(grant_btn)
+		elif rank_now == "mapper":
+			var revoke_btn := _account_action_btn("Revoke Mapper")
+			revoke_btn.pressed.connect(func() -> void:
+				NetworkManager.send_admin_revoke_mapper(username))
+			rank_row.add_child(revoke_btn)
+		if rank_now == "admin":
+			var demote_btn := _account_action_btn("Demote to Player")
+			demote_btn.pressed.connect(func() -> void: _confirm_rank_change(username, ""))
+			rank_row.add_child(demote_btn)
+		else:
+			var promote_btn := _account_action_btn("Promote to Admin")
+			promote_btn.pressed.connect(func() -> void: _confirm_rank_change(username, "admin"))
+			rank_row.add_child(promote_btn)
 
 	# Delete — OWNER ONLY (server also enforces _is_owner), never for the owner
 	# account itself. Destructive, so it goes through a type-the-name confirm.
@@ -1728,13 +1792,31 @@ func _confirm_delete_account(username: String) -> void:
 		+ "This cannot be undone.") % username
 	dlg.ok_button_text = "Delete Permanently"
 	dlg.confirmed.connect(func() -> void:
-		NetworkManager.send_admin_delete_account(username)
-		# Re-fetch the list shortly after so the row disappears on success.
-		get_tree().create_timer(0.4).timeout.connect(func() -> void:
-			NetworkManager.send_admin_list_accounts(_accounts_search.text))
+		NetworkManager.send_admin_delete_account(username)   # server re-sends the list
 		dlg.queue_free())
 	dlg.canceled.connect(dlg.queue_free)
 	# Free the dialog if it's closed with the [X] too, so it doesn't leak.
+	dlg.close_requested.connect(dlg.queue_free)
+	add_child(dlg)
+	dlg.popup_centered(Vector2i(380, 150))
+
+## Promote to admin / demote to player (owner only). Admin is full power over
+## the economy, items and accounts, so it always asks first.
+func _confirm_rank_change(username: String, rank: String) -> void:
+	var dlg := ConfirmationDialog.new()
+	if rank == "admin":
+		dlg.title = "Promote to Admin"
+		dlg.dialog_text = ("Make \"%s\" a full ADMIN?\n"
+			+ "Admins can give items and gold, edit the world and manage accounts.") % username
+		dlg.ok_button_text = "Promote"
+	else:
+		dlg.title = "Demote to Player"
+		dlg.dialog_text = "Remove all admin/mapper rank from \"%s\"?" % username
+		dlg.ok_button_text = "Demote"
+	dlg.confirmed.connect(func() -> void:
+		NetworkManager.send_admin_set_rank(username, rank)   # server re-sends the list
+		dlg.queue_free())
+	dlg.canceled.connect(dlg.queue_free)
 	dlg.close_requested.connect(dlg.queue_free)
 	add_child(dlg)
 	dlg.popup_centered(Vector2i(380, 150))
@@ -1805,6 +1887,37 @@ func _on_admin_inventory_view_received(target: String, online: bool, inventory: 
 					str(d.get("id", "?"))])
 	_items_inv_text.text = "\n".join(lines)
 
+## Server catalog arrived — keep it and redraw the (filtered) picker.
+func _on_item_catalog_received(items: Array) -> void:
+	_items_catalog = items
+	_items_by_id.clear()
+	for e_v: Variant in items:
+		_items_by_id[str((e_v as Dictionary).get("id", ""))] = e_v
+	_refresh_item_list()
+
+## Filter the catalog by the search box (name or id, case-insensitive).
+func _refresh_item_list() -> void:
+	if _items_list == null:
+		return
+	_items_list.clear()
+	if _items_catalog.is_empty():
+		_items_list.add_item("(loading the server's item list…)")
+		_items_list.set_item_disabled(0, true)
+		NetworkManager.send_admin_item_catalog()
+		return
+	var q := _items_search.text.strip_edges().to_lower() if _items_search != null else ""
+	for e_v: Variant in _items_catalog:
+		var e: Dictionary = e_v
+		var iid := str(e.get("id", ""))
+		var nm := str(e.get("name", iid))
+		if q != "" and not nm.to_lower().contains(q) and not iid.contains(q):
+			continue
+		var i := _items_list.add_item("%s   (%s)" % [nm, iid])
+		_items_list.set_item_metadata(i, iid)
+		var c: Variant = e.get("color")
+		if c is Array and (c as Array).size() >= 3:
+			_items_list.set_item_custom_fg_color(i, Color(float(c[0]), float(c[1]), float(c[2])).lightened(0.25))
+
 func _on_give_item() -> void:
 	var target := _selected_target()
 	var iid := _items_id_edit.text.strip_edges() if _items_id_edit != null else ""
@@ -1812,8 +1925,14 @@ func _on_give_item() -> void:
 	if target == "" or iid == "" or qty <= 0:
 		Events.chat_message.emit("[Admin] Need player + item id + qty.")
 		return
-	NetworkManager.send_admin_give_item(target, iid,
-		iid.replace("_", " ").capitalize(), qty, Color(0.7, 0.7, 0.7, 1.0))
+	# Client-side pre-check (the server enforces the same rule).
+	var e: Dictionary = _items_by_id.get(iid.get_slice("~u", 0), {})
+	if not _items_by_id.is_empty() and e.is_empty():
+		Events.chat_message.emit("[Admin] Unknown item id '%s' — pick it from the list." % iid)
+		return
+	var c: Variant = e.get("color", [0.7, 0.7, 0.7, 1.0])
+	NetworkManager.send_admin_give_item(target, iid, str(e.get("name", iid)), qty,
+		Color(float(c[0]), float(c[1]), float(c[2])) if c is Array else Color(0.7, 0.7, 0.7))
 
 func _on_take_item() -> void:
 	var target := _selected_target()
@@ -1899,6 +2018,20 @@ func _on_bake_nodes() -> void:
 			NetworkManager.send_admin_upload_sea_loot(sea_map)
 			Events.chat_message.emit("[Bake] Uploaded sea loot for %d monsters." % sea_map.size())
 
+## Bakes overwrite server-authoritative tables, so each asks first.
+func _confirm_bake(title: String, text: String, action: Callable) -> void:
+	var dlg := ConfirmationDialog.new()
+	dlg.title = title
+	dlg.dialog_text = text
+	dlg.ok_button_text = "Bake"
+	dlg.confirmed.connect(func() -> void:
+		action.call()
+		dlg.queue_free())
+	dlg.canceled.connect(dlg.queue_free)
+	dlg.close_requested.connect(dlg.queue_free)
+	add_child(dlg)
+	dlg.popup_centered(Vector2i(440, 170))
+
 func _on_bake_terrain() -> void:
 	var ground := get_tree().get_first_node_in_group("ground")
 	if ground == null:
@@ -1931,6 +2064,8 @@ func _set_mode(mode: int) -> void:
 	_overlay.mouse_filter = (Control.MOUSE_FILTER_IGNORE if mode == Mode.OFF
 							 else Control.MOUSE_FILTER_STOP)
 	_update_mode_label()
+	_hover_id = ""
+	_update_hover(_last_mouse_world)
 	_update_brush_preview()
 	# Tell World to show/hide the red impassable overlay — only visible
 	# while the admin is in PASSABILITY edit mode.
@@ -1963,6 +2098,10 @@ func _toggle_panel() -> void:
 	var show_now := not _panel.visible
 	_panel.visible   = show_now
 	_overlay.visible = show_now
+	if show_now:
+		_refresh_catalog()   # NPC templates follow the live world every open
+		if _items_catalog.is_empty():
+			_refresh_item_list()   # asks the server for its item list
 	if not show_now:
 		_set_mode(Mode.OFF)
 		if _brush_preview != null and is_instance_valid(_brush_preview):
@@ -1979,6 +2118,24 @@ func _input(event: InputEvent) -> void:
 		elif k.keycode == KEY_Z and k.ctrl_pressed and _panel != null and _panel.visible:
 			_do_undo()
 			get_viewport().set_input_as_handled()
+		elif _panel != null and _panel.visible and not k.ctrl_pressed and not k.alt_pressed \
+				and not _text_has_focus() and MODE_KEYS.has(k.keycode):
+			_set_mode(int(MODE_KEYS[k.keycode]))
+			get_viewport().set_input_as_handled()
+
+## Editor shortcuts while the panel is open. Number keys only — the game already
+## uses WASD / E / Q / R / F / H / K / Space / Esc, so letters would clash with
+## walking around while editing.
+const MODE_KEYS: Dictionary = {
+	KEY_1: Mode.PLACE, KEY_2: Mode.MOVE, KEY_3: Mode.ROTATE,
+	KEY_4: Mode.INSPECT, KEY_5: Mode.DELETE, KEY_0: Mode.OFF,
+}
+
+## True while a text box has keyboard focus (chat, search, a property field) —
+## typing digits there must never switch modes.
+func _text_has_focus() -> bool:
+	var f := get_viewport().gui_get_focus_owner()
+	return f is LineEdit or f is TextEdit or f is SpinBox
 
 func _screen_to_world(screen_pos: Vector2) -> Vector2:
 	# 3D client (World3D) converts the screen click to a world px via a ground ray;
@@ -2016,10 +2173,11 @@ func _on_overlay_input(event: InputEvent) -> void:
 					if _drag_id != "" and (_world() as Object).has_method("admin_entity_pos"):
 						_drag_old_pos = (_world() as Object).call("admin_entity_pos", _drag_id)
 				elif _drag_id != "":
-					if _drag_id.begins_with("a:"):
+					if _drag_old_pos != Vector2.ZERO:   # unknown origin → no bogus undo to (0,0)
 						_push_undo({"op": "move", "id": _drag_id,
 							"x": _drag_old_pos.x, "y": _drag_old_pos.y})
-					NetworkManager.send_admin_move(_drag_id, _drag_pos.x, _drag_pos.y)
+					NetworkManager.send_admin_move(_drag_id, _drag_pos.x, _drag_pos.y,
+						_entity_name(_drag_id))
 					_drag_id = ""
 			Mode.ROTATE:
 				# Click an entity to rotate it a step; server persists + syncs it.
@@ -2030,9 +2188,8 @@ func _on_overlay_input(event: InputEvent) -> void:
 						var cur := 0.0
 						if (_world() as Object).has_method("admin_entity_rot"):
 							cur = float((_world() as Object).call("admin_entity_rot", rid))
-						if rid.begins_with("a:"):
-							_push_undo({"op": "rotate", "id": rid, "rot": cur})
-						NetworkManager.send_admin_rotate(rid, cur + step)
+						_push_undo({"op": "rotate", "id": rid, "rot": cur})
+						NetworkManager.send_admin_rotate(rid, cur + step, _entity_name(rid))
 			Mode.TILE, Mode.TINT, Mode.PASSABILITY:
 				_painting = mb.pressed
 				if mb.pressed:
@@ -2079,6 +2236,7 @@ func _on_overlay_input(event: InputEvent) -> void:
 			_paint_at(wpos)
 		elif _mode in [Mode.SCULPT_RAISE, Mode.SCULPT_LOWER] and _painting:
 			_sculpt_at(wpos, _mode == Mode.SCULPT_RAISE)
+		_update_hover(wpos)
 		_update_brush_preview()
 
 ## Sculpt terrain height at a world px (3D client only; inert in 2D).
@@ -2210,17 +2368,63 @@ func _delete_at(wpos: Vector2) -> void:
 	var id := str((_world() as Object).call("admin_entity_at", wpos, 44.0))
 	if id == "":
 		return
-	# Capture the entity so the delete is undoable (a: entities only — we can
-	# re-place them from their cached data; procedural deletes aren't reversible).
-	if id.begins_with("a:") and (_world() as Object).has_method("admin_entity_info"):
-		var info: Dictionary = (_world() as Object).call("admin_entity_info", id)
-		if not info.is_empty():
-			_push_undo({"op": "place",
-				"kind": str(info.get("kind", "")),
-				"subtype": str(info.get("subtype", "")),
-				"x": float(info.get("x", 0.0)), "y": float(info.get("y", 0.0)),
-				"data": (info.get("data", {}) as Dictionary).duplicate(true)})
-	NetworkManager.send_admin_delete(id)
+	var nm := _entity_name(id)
+	var info: Dictionary = {}
+	if (_world() as Object).has_method("admin_entity_info"):
+		var v: Variant = (_world() as Object).call("admin_entity_info", id)
+		if v is Dictionary:
+			info = v
+	var is_npc := id.begins_with("n:") or str(info.get("kind", "")) == "npc"
+	if not is_npc:
+		NetworkManager.send_admin_delete(id, nm)   # undo recorded on the server echo
+		return
+	if NetworkManager.my_admin_rank == "mapper" and id.begins_with("n:"):
+		Events.chat_message.emit("[Admin] Mappers can't delete town NPCs or quest givers (%s). Ask an admin." % nm)
+		return
+	# NPCs always get a confirm that spells out what breaks while they're gone.
+	var lines: Array = ["Delete %s  (%s)?" % [nm, id]]
+	var q: Dictionary = NpcRoster.quest_npcs().get(nm, {})
+	if int(q.get("quests", 0)) > 0 or bool(q.get("talk", false)):
+		lines.append("⚠ QUEST GIVER — %d quest(s)%s stop working until it's back." % [
+			int(q.get("quests", 0)), " + talk steps" if bool(q.get("talk", false)) else ""])
+	var data: Dictionary = info.get("data", {}) as Dictionary if info.get("data") is Dictionary else {}
+	if str(data.get("shop_id", "")) != "":
+		lines.append("⚠ Shopkeeper — the '%s' shop closes." % str(data["shop_id"]))
+	if id.begins_with("n:"):
+		lines.append("Seeded town NPC.")
+	lines.append("\nUndo: Ctrl+Z, or Admin → Recently deleted.")
+	var dlg := ConfirmationDialog.new()
+	dlg.title = "Delete NPC"
+	dlg.dialog_text = "\n".join(lines)
+	dlg.ok_button_text = "Delete %s" % nm
+	dlg.confirmed.connect(func() -> void:
+		NetworkManager.send_admin_delete(id, nm)
+		dlg.queue_free())
+	dlg.canceled.connect(func() -> void: dlg.queue_free())
+	add_child(dlg)
+	dlg.popup_centered()
+
+## Display name of an entity under the editor (NPC name, display name, type).
+func _entity_name(id: String) -> String:
+	var w := _world() as Object
+	if w != null and w.has_method("admin_entity_name"):
+		return str(w.call("admin_entity_name", id))
+	return id
+
+## Server confirmed OUR delete — record its undo (an exact undelete). Echoes
+## caused by undoing a placement are skipped.
+func _on_admin_entity_deleted(id: String, _label: String) -> void:
+	if _suppress_deleted_undo > 0:
+		_suppress_deleted_undo -= 1
+		return
+	_push_undo({"op": "undelete", "id": id})
+
+func _on_admin_entity_undeleted(id: String, label: String) -> void:
+	Events.top_toast.emit("Restored %s" % (label if label != "" else id))
+	if _panel != null and _panel.visible:
+		_refresh_catalog()
+	if _audit_dim != null and is_instance_valid(_audit_dim):
+		NetworkManager.send_admin_audit_list()
 
 # ── Undo stack ───────────────────────────────────────────────────────────────
 ## Record a reverse-op unless we're mid-undo. `entry.op` is the operation that
@@ -2253,7 +2457,10 @@ func _do_undo() -> void:
 	_undoing = true
 	match str(entry.get("op", "")):
 		"delete":
-			NetworkManager.send_admin_delete(str(entry["id"]))
+			_suppress_deleted_undo += 1   # its echo must not become a new undo step
+			NetworkManager.send_admin_delete(str(entry["id"]), _entity_name(str(entry["id"])))
+		"undelete":
+			NetworkManager.send_admin_undelete(str(entry["id"]))
 		"place":
 			# Re-placing produces an admin_placed echo we must not re-record.
 			_suppress_placed_undo += 1
@@ -2325,6 +2532,370 @@ func _refresh_tile_undo_btn() -> void:
 	var n := _tile_undo_stack.size()
 	_tile_undo_btn.text = "↶ Undo paint (%d)" % n
 	_tile_undo_btn.disabled = n == 0
+
+# ── NPC roster (rebuilt from live data on every open) ───────────────────────
+## The roster's popup root while open (so a restore echo can refill it).
+var _roster_dim: Control = null
+var _roster_filter: String = ""
+## Restores this client asked for and is awaiting the server echo (id → true).
+var _pending_restores: Dictionary = {}
+
+func _npc_roster() -> Dictionary:
+	return NpcRoster.build(NpcRoster.seed_rows(),
+		NetworkManager.entity_edits_cache, NetworkManager.world_entities_cache)
+
+## Per-tab entry counts for the Place-Entity tab labels.
+func _entity_tab_counts() -> Dictionary:
+	var counts: Dictionary = {}
+	for tab_name: String in _ENTITY_TAB_NAMES:
+		counts[tab_name] = 0
+	counts["All"] = _entries.size()
+	for entry_v: Variant in _entries:
+		var cat: String = _entity_category_for(entry_v as Dictionary)
+		if counts.has(cat):
+			counts[cat] = int(counts[cat]) + 1
+	return counts
+
+## Re-derive the catalog (NPC templates come from the live roster), then refresh
+## the tab counts + dropdown. Called on panel open, tab switch and restore.
+func _refresh_catalog() -> void:
+	_entries = Catalog.entries(_npc_roster())
+	var counts := _entity_tab_counts()
+	for tab_v: Variant in _entity_tab_btns.keys():
+		var tab := str(tab_v)
+		(_entity_tab_btns[tab] as Button).text = "%s (%d)" % [tab, int(counts.get(tab, 0))]
+	_populate_entity_dropdown()
+
+func _on_npc_restored(entity_id: String) -> void:
+	# Name + quest count straight from the seed table / QuestData.
+	var nm := entity_id
+	var seeds := NpcRoster.seed_rows()
+	var i := int(entity_id.substr(2))
+	if i >= 0 and i < seeds.size():
+		nm = str((seeds[i] as Array)[2])
+	var q: Dictionary = NpcRoster.quest_npcs().get(nm, {})
+	var nq := int(q.get("quests", 0))
+	var quest_note := (" — %d quest%s available again" % [nq, "" if nq == 1 else "s"]) if nq > 0 else ""
+	if _pending_restores.has(entity_id):
+		_pending_restores.erase(entity_id)
+		_push_undo({"op": "delete", "id": entity_id})   # Ctrl+Z re-deletes it
+		Events.chat_message.emit("[Admin] ✔ Restored %s (%s) at its home spot%s. Ctrl+Z to undo." % [
+			nm, entity_id, quest_note])
+		Events.top_toast.emit("Restored %s%s" % [nm, quest_note])
+	else:
+		Events.chat_message.emit("[Admin] %s (%s) was restored by another admin%s." % [nm, entity_id, quest_note])
+	if _panel != null and _panel.visible:
+		_refresh_catalog()
+	if _roster_dim != null and is_instance_valid(_roster_dim):
+		_roster_dim.queue_free()
+		_open_npc_roster()
+
+func _open_npc_roster() -> void:
+	if _roster_dim != null and is_instance_valid(_roster_dim):
+		_roster_dim.queue_free()
+	var dim := ColorRect.new()
+	dim.color = Color(0, 0, 0, 0.45)
+	dim.set_anchors_preset(Control.PRESET_FULL_RECT)
+	dim.mouse_filter = Control.MOUSE_FILTER_STOP
+	add_child(dim)
+	_roster_dim = dim
+
+	var panel := PanelContainer.new()
+	panel.add_theme_stylebox_override("panel", UITheme.sb(UITheme.BG, UITheme.GOLD, 2))
+	panel.custom_minimum_size = Vector2(460, 0)
+	dim.add_child(panel)
+	var vb := VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 6)
+	panel.add_child(vb)
+
+	var roster := _npc_roster()
+	var title := Label.new()
+	title.text = "👥  NPC Roster"
+	title.add_theme_color_override("font_color", UITheme.GOLD)
+	vb.add_child(title)
+	var summary := Label.new()
+	summary.add_theme_font_size_override("font_size", 10)
+	summary.add_theme_color_override("font_color", UITheme.DIM)
+	var n_seed := 0
+	var n_admin := 0
+	var n_server := 0
+	for r_v: Variant in roster["rows"]:
+		match str((r_v as Dictionary)["source"]):
+			"seed": n_seed += 1
+			"admin": n_admin += 1
+			_: n_server += 1
+	summary.text = "%d seeded (%d deleted) · %d admin-placed · %d server · %d problem(s)" % [
+		n_seed, (roster["deleted"] as Array).size(), n_admin, n_server,
+		(roster["problems"] as Array).size()]
+	vb.add_child(summary)
+
+	var search := LineEdit.new()
+	search.placeholder_text = "filter by name or id…"
+	search.text = _roster_filter
+	search.add_theme_font_size_override("font_size", 12)
+	vb.add_child(search)
+
+	var scroll := ScrollContainer.new()
+	scroll.custom_minimum_size = Vector2(440, 400)
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	vb.add_child(scroll)
+	var list_root := VBoxContainer.new()
+	list_root.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	list_root.add_theme_constant_override("separation", 2)
+	scroll.add_child(list_root)
+	search.text_changed.connect(func(t: String) -> void:
+		_roster_filter = t
+		_fill_roster(list_root, roster, t, dim))
+	_fill_roster(list_root, roster, _roster_filter, dim)
+
+	var close_btn := Button.new()
+	close_btn.text = "Close"
+	close_btn.pressed.connect(func() -> void:
+		dim.queue_free()
+		_roster_dim = null)
+	vb.add_child(close_btn)
+	# Centre on the finished minimum size (fits a 1280x720 window).
+	panel.set_anchors_and_offsets_preset(Control.PRESET_CENTER, Control.PRESET_MODE_MINSIZE)
+
+func _fill_roster(list_root: VBoxContainer, roster: Dictionary, filter: String, dim: Control) -> void:
+	for c: Node in list_root.get_children():
+		c.queue_free()
+	var needle := filter.strip_edges().to_lower()
+	var hit := func(name_s: String, id_s: String) -> bool:
+		return needle == "" or name_s.to_lower().contains(needle) or id_s.to_lower().contains(needle)
+
+	var deleted: Array = roster["deleted"]
+	list_root.add_child(_roster_header("Deleted seeded NPCs (%d) — Restore brings them back at home with their quests" % deleted.size()))
+	for r_v: Variant in deleted:
+		var r: Dictionary = r_v
+		if not hit.call(str(r["name"]), str(r["id"])):
+			continue
+		var q := int(r["quests"])
+		var sub := "%s · %s · home (%d, %d)%s" % [r["id"], r["type"], int((r["home"] as Vector2).x),
+			int((r["home"] as Vector2).y), (" · %d quest(s)" % q) if q > 0 else ""]
+		list_root.add_child(_roster_row(str(r["name"]), sub, Color(0.95, 0.55, 0.40), r, true, dim))
+
+	var problems: Array = roster["problems"]
+	list_root.add_child(_roster_header("Problems (%d)" % problems.size()))
+	for p_v: Variant in problems:
+		var p: Dictionary = p_v
+		if not hit.call(str(p["name"]), str(p["id"])):
+			continue
+		var col := Color(0.95, 0.45, 0.35) if p["severity"] == "high" else \
+			(Color(0.95, 0.70, 0.30) if p["severity"] == "medium" else UITheme.DIM)
+		var pr := {"id": p["id"], "pos": p["pos"], "status": "", "source": ""}
+		list_root.add_child(_roster_row(str(p["name"]), "⚠ " + str(p["issue"]), col, pr, false, dim))
+
+	var live: Array = (roster["rows"] as Array).filter(func(x: Variant) -> bool:
+		return str((x as Dictionary)["status"]) != "deleted")
+	list_root.add_child(_roster_header("Live NPCs (%d)" % live.size()))
+	for r_v: Variant in live:
+		var r: Dictionary = r_v
+		if not hit.call(str(r["name"]), str(r["id"])):
+			continue
+		var tag := str(r["source"])
+		if r["status"] == "moved":
+			tag += ", moved"
+		if str(r["shop_id"]) != "":
+			tag += ", shop " + str(r["shop_id"])
+		if int(r["quests"]) > 0:
+			tag += ", %d quest(s)" % int(r["quests"])
+		var col := UITheme.GOLD if r["source"] == "admin" else \
+			(UITheme.DIM if r["source"] == "server" else UITheme.TEXT)
+		list_root.add_child(_roster_row(str(r["name"]), "%s · %s · %s" % [r["id"], r["type"], tag],
+			col, r, false, dim))
+
+func _roster_header(text: String) -> Label:
+	var l := Label.new()
+	l.text = text
+	l.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	l.add_theme_font_size_override("font_size", 11)
+	l.add_theme_color_override("font_color", UITheme.GOLD)
+	return l
+
+## One roster line: name + detail, then Restore (deleted seeds) or Go/Edit.
+func _roster_row(nm: String, detail: String, col: Color, r: Dictionary,
+		restorable: bool, dim: Control) -> VBoxContainer:
+	var box := VBoxContainer.new()
+	box.add_theme_constant_override("separation", 0)
+	var top := HBoxContainer.new()
+	top.add_theme_constant_override("separation", 4)
+	box.add_child(top)
+	var nl := Label.new()
+	nl.text = nm
+	nl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	nl.add_theme_font_size_override("font_size", 11)
+	nl.add_theme_color_override("font_color", col)
+	top.add_child(nl)
+	var id := str(r.get("id", ""))
+	var pos: Variant = r.get("home") if restorable else r.get("pos")
+	if restorable:
+		var rb := Button.new()
+		rb.text = "Restore"
+		rb.tooltip_text = "Bring %s back at its home spot with its original name, dialogue and quests. Ctrl+Z undoes it." % id
+		rb.add_theme_font_size_override("font_size", 10)
+		rb.pressed.connect(func() -> void:
+			rb.text = "Restoring…"
+			rb.disabled = true
+			_pending_restores[id] = true
+			NetworkManager.send_admin_restore_entity(id, nm)
+			# No server echo (refused / offline) → re-arm the button and say so.
+			# Weak ref: the roster popup (and this button) may be gone by then.
+			var rb_ref: WeakRef = weakref(rb)
+			get_tree().create_timer(5.0).timeout.connect(func() -> void:
+				if _pending_restores.has(id):
+					_pending_restores.erase(id)
+					Events.chat_message.emit("[Admin] No reply restoring %s — check the server chat/console." % id)
+					var b := rb_ref.get_ref() as Button
+					if b != null:
+						b.text = "Restore"
+						b.disabled = false))
+		top.add_child(rb)
+	if pos is Vector2:
+		var go := Button.new()
+		go.text = "Go"
+		go.tooltip_text = "Teleport there."
+		go.add_theme_font_size_override("font_size", 10)
+		go.pressed.connect(func() -> void:
+			var w := _world() as Object
+			if w.has_method("admin_teleport"):
+				w.call("admin_teleport", pos)
+			dim.queue_free()
+			_roster_dim = null)
+		top.add_child(go)
+	if not restorable and id != "" and str(r.get("source", "")) != "server" \
+			and str(r.get("status", "")) != "deleted":
+		var ed := Button.new()
+		ed.text = "Edit"
+		ed.add_theme_font_size_override("font_size", 10)
+		ed.pressed.connect(func() -> void:
+			var w := _world() as Object
+			if w.has_method("admin_entity_info"):
+				var info: Dictionary = w.call("admin_entity_info", id)
+				if info.is_empty():
+					Events.chat_message.emit("[Admin] %s isn't loaded — Go there first." % id)
+					return
+				dim.queue_free()
+				_roster_dim = null
+				_open_entity_editor(id, info))
+		top.add_child(ed)
+	var dl := Label.new()
+	dl.text = detail
+	dl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	dl.add_theme_font_size_override("font_size", 9)
+	dl.add_theme_color_override("font_color", UITheme.DIM)
+	box.add_child(dl)
+	return box
+
+# ── Recently deleted / audit log ─────────────────────────────────────────────
+## Ask the server for the log; the popup is (re)built when the reply lands.
+func _open_audit_log() -> void:
+	if _audit_dim != null and is_instance_valid(_audit_dim):
+		_audit_dim.queue_free()
+	var dim := ColorRect.new()
+	dim.color = Color(0, 0, 0, 0.45)
+	dim.set_anchors_preset(Control.PRESET_FULL_RECT)
+	dim.mouse_filter = Control.MOUSE_FILTER_STOP
+	add_child(dim)
+	_audit_dim = dim
+	var l := Label.new()
+	l.text = "Loading the admin log…"
+	l.add_theme_color_override("font_color", UITheme.GOLD)
+	dim.add_child(l)
+	l.set_anchors_and_offsets_preset(Control.PRESET_CENTER, Control.PRESET_MODE_MINSIZE)
+	NetworkManager.send_admin_audit_list()
+
+func _on_admin_audit_received(recent: Array, deleted: Array) -> void:
+	if _audit_dim == null or not is_instance_valid(_audit_dim):
+		return
+	var dim := _audit_dim
+	for c: Node in dim.get_children():
+		c.queue_free()
+	var panel := PanelContainer.new()
+	panel.add_theme_stylebox_override("panel", UITheme.sb(UITheme.BG, UITheme.GOLD, 2))
+	panel.custom_minimum_size = Vector2(500, 0)
+	dim.add_child(panel)
+	var vb := VBoxContainer.new()
+	vb.add_theme_constant_override("separation", 6)
+	panel.add_child(vb)
+	var title := Label.new()
+	title.text = "🗑  Recently deleted  ·  Admin log"
+	title.add_theme_color_override("font_color", UITheme.GOLD)
+	vb.add_child(title)
+	var scroll := ScrollContainer.new()
+	scroll.custom_minimum_size = Vector2(480, 400)
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	vb.add_child(scroll)
+	var list_root := VBoxContainer.new()
+	list_root.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	list_root.add_theme_constant_override("separation", 2)
+	scroll.add_child(list_root)
+
+	list_root.add_child(_roster_header("Recently deleted (%d) — Restore puts it back exactly as it was" % deleted.size()))
+	for d_v: Variant in deleted:
+		list_root.add_child(_audit_deleted_row(d_v as Dictionary))
+	list_root.add_child(_roster_header("Activity (newest first)"))
+	for r_v: Variant in recent:
+		var r: Dictionary = r_v
+		var line := Label.new()
+		line.text = "%s  %s  %s  %s%s" % [_audit_time(float(r.get("ts", 0.0))), str(r.get("username", "")),
+			str(r.get("action", "")), str(r.get("label", "")),
+			("  (%s)" % str(r["entity_id"])) if str(r.get("entity_id", "")) != "" else ""]
+		var det := str(r.get("detail", ""))
+		if det != "":
+			line.text += "  — " + det
+		line.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		line.add_theme_font_size_override("font_size", 10)
+		line.add_theme_color_override("font_color",
+			Color(0.95, 0.55, 0.40) if str(r.get("action", "")) in ["delete", "wipe", "season_reset"] else UITheme.DIM)
+		list_root.add_child(line)
+
+	var close_btn := Button.new()
+	close_btn.text = "Close"
+	close_btn.pressed.connect(func() -> void:
+		dim.queue_free()
+		_audit_dim = null)
+	vb.add_child(close_btn)
+	panel.set_anchors_and_offsets_preset(Control.PRESET_CENTER, Control.PRESET_MODE_MINSIZE)
+
+func _audit_deleted_row(d: Dictionary) -> VBoxContainer:
+	var box := VBoxContainer.new()
+	box.add_theme_constant_override("separation", 0)
+	var top := HBoxContainer.new()
+	top.add_theme_constant_override("separation", 4)
+	box.add_child(top)
+	var nl := Label.new()
+	nl.text = str(d.get("label", d.get("entity_id", "?")))
+	nl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	nl.add_theme_font_size_override("font_size", 11)
+	nl.add_theme_color_override("font_color", Color(0.95, 0.55, 0.40))
+	top.add_child(nl)
+	var aid := int(d.get("id", -1))
+	var eid := str(d.get("entity_id", ""))
+	var rb := Button.new()
+	rb.text = "Restore"
+	rb.add_theme_font_size_override("font_size", 10)
+	rb.pressed.connect(func() -> void:
+		rb.text = "Restoring…"
+		rb.disabled = true
+		NetworkManager.send_admin_undelete(eid, aid))
+	top.add_child(rb)
+	var dl := Label.new()
+	var where := ""
+	if d.get("x") != null and d.get("y") != null:
+		where = " · at (%d, %d)" % [int(float(d["x"])), int(float(d["y"]))]
+	dl.text = "%s by %s · %s%s%s" % [str(d.get("action", "")), str(d.get("username", "")),
+		_audit_time(float(d.get("ts", 0.0))), (" · " + eid) if eid != "" else "", where]
+	dl.add_theme_font_size_override("font_size", 9)
+	dl.add_theme_color_override("font_color", UITheme.DIM)
+	box.add_child(dl)
+	return box
+
+## Unix seconds → local "MM-DD HH:MM".
+func _audit_time(ts: float) -> String:
+	var bias := int(Time.get_time_zone_from_system().get("bias", 0)) * 60
+	var dt := Time.get_datetime_dict_from_unix_time(int(ts) + bias)
+	return "%02d-%02d %02d:%02d" % [int(dt["month"]), int(dt["day"]), int(dt["hour"]), int(dt["minute"])]
 
 # ── Entity browser ───────────────────────────────────────────────────────────
 ## Searchable list of loaded editable entities. Each row: name → Go (teleport)
@@ -2645,6 +3216,7 @@ func _open_entity_editor(id: String, info: Dictionary) -> void:
 			fields["level"] = _add_int_row(vb, "Level", int(data.get("level", 1)), 1, 99)
 		"npc":
 			fields["npc_name"]      = _add_str_row(vb, "Name", str(data.get("npc_name", "")))
+			fields["npc_type"]      = _add_opt_row(vb, "Type", str(data.get("npc_type", subtype)), NPC_TYPES)
 			fields["quest_text"]    = _add_text_row(vb, "Dialogue", str(data.get("quest_text", "")))
 			fields["shop_id"]       = _add_str_row(vb, "Shop id", str(data.get("shop_id", "")))
 			fields["wander_radius"] = _add_float_row(vb, "Wander px",
@@ -2674,14 +3246,63 @@ func _open_entity_editor(id: String, info: Dictionary) -> void:
 		var patch := _collect_patch(fields)
 		if patch.is_empty():
 			Events.chat_message.emit("[Admin] No changes.")
-		else:
+			dim.queue_free()
+			return
+		var send := func() -> void:
 			# Reverse patch = the OLD value of each changed field, so Undo restores it.
 			var rev: Dictionary = {}
 			for k_v: Variant in patch.keys():
 				rev[str(k_v)] = (fields[str(k_v)] as Dictionary)["orig"]
 			_push_undo({"op": "edit", "id": id, "patch": rev})
 			NetworkManager.send_admin_edit_entity(id, patch)
-		dim.queue_free())
+			dim.queue_free()
+		var warns := _npc_edit_warnings(id, kind, data, subtype, patch) if kind == "npc" else []
+		if warns.is_empty():
+			send.call()
+			return
+		var dlg := ConfirmationDialog.new()
+		dlg.title = "Check this edit"
+		dlg.dialog_text = "\n\n".join(warns)
+		dlg.ok_button_text = "Apply anyway"
+		dlg.confirmed.connect(func() -> void:
+			send.call()
+			dlg.queue_free())
+		dlg.canceled.connect(func() -> void: dlg.queue_free())
+		add_child(dlg)
+		dlg.popup_centered())
+
+const NPC_TYPES: Array = ["worker", "quest", "shopkeeper", "banker", "tutor", "trainer"]
+
+## What an NPC edit would break. Quests find their giver by EXACT name, so a
+## rename can orphan quests or create a second copy of a quest giver; a "quest"
+## type with no quests shows a "!" that leads nowhere.
+func _npc_edit_warnings(id: String, _kind: String, data: Dictionary, subtype: String,
+		patch: Dictionary) -> Array:
+	var warns: Array = []
+	var qn := NpcRoster.quest_npcs()
+	var old_name := str(data.get("npc_name", ""))
+	var new_name := str(patch.get("npc_name", old_name))
+	if patch.has("npc_name"):
+		var oq: Dictionary = qn.get(old_name, {})
+		if int(oq.get("quests", 0)) > 0 or bool(oq.get("talk", false)):
+			warns.append("⚠ \"%s\" is a QUEST GIVER (%d quest(s)%s). Quests find their giver by exact name, so renaming it to \"%s\" leaves those quests with no giver." % [
+				old_name, int(oq.get("quests", 0)), " + talk steps" if bool(oq.get("talk", false)) else "", new_name])
+		var nq: Dictionary = qn.get(new_name, {})
+		if not nq.is_empty():
+			for r_v: Variant in _npc_roster()["rows"]:
+				var r: Dictionary = r_v
+				if str(r["name"]) == new_name and str(r["id"]) != id and str(r["status"]) != "deleted":
+					warns.append("⚠ \"%s\" already exists (%s). Two NPCs with a quest giver's name both hand out its quests." % [
+						new_name, str(r["id"])])
+					break
+	var new_type := str(patch.get("npc_type", data.get("npc_type", subtype)))
+	var nq2: Dictionary = qn.get(new_name, {})
+	if new_type == "quest" and int(nq2.get("quests", 0)) == 0 and not bool(nq2.get("talk", false)):
+		warns.append("⚠ Type \"quest\" shows a yellow \"!\" marker, but no quest is given by \"%s\"." % new_name)
+	var shop := str(patch.get("shop_id", data.get("shop_id", "")))
+	if patch.has("npc_type") and str(patch["npc_type"]) != "shopkeeper" and shop != "":
+		warns.append("Note: only the \"shopkeeper\" type opens a shop — the '%s' shop won't open as \"%s\"." % [shop, new_type])
+	return warns
 
 ## Reads each field control, returning only the values that CHANGED from orig.
 func _collect_patch(fields: Dictionary) -> Dictionary:
@@ -2696,6 +3317,9 @@ func _collect_patch(fields: Dictionary) -> Dictionary:
 			"float": new_val = float((ctrl as SpinBox).value)
 			"str":   new_val = (ctrl as LineEdit).text
 			"text":  new_val = (ctrl as TextEdit).text
+			"opt":
+				var ob := ctrl as OptionButton
+				new_val = ob.get_item_text(ob.selected)
 			_:       continue
 		if new_val != f["orig"]:
 			patch[key] = new_val
@@ -2732,6 +3356,23 @@ func _add_str_row(vb: VBoxContainer, label: String, value: String) -> Dictionary
 	le.add_theme_font_size_override("font_size", 11)
 	row.add_child(le)
 	return {"ctrl": le, "type": "str", "orig": value}
+
+func _add_opt_row(vb: VBoxContainer, label: String, value: String, options: Array) -> Dictionary:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 6)
+	vb.add_child(row)
+	row.add_child(_editor_label(label))
+	var ob := OptionButton.new()
+	ob.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	ob.add_theme_font_size_override("font_size", 11)
+	var opts := options.duplicate()
+	if value != "" and not opts.has(value):
+		opts.append(value)   # keep an unknown legacy type selectable as-is
+	for o: Variant in opts:
+		ob.add_item(str(o))
+	ob.select(maxi(0, opts.find(value)))
+	row.add_child(ob)
+	return {"ctrl": ob, "type": "opt", "orig": ob.get_item_text(ob.selected)}
 
 func _add_text_row(vb: VBoxContainer, label: String, value: String) -> Dictionary:
 	vb.add_child(_editor_label(label))
@@ -2798,6 +3439,52 @@ func _make_tint_slider(label_text: String) -> HSlider:
 	s.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	s.tooltip_text = label_text + "  (-100 cool / cooler  →  +100 warm / brighter)"
 	return s
+
+## Ring + name tag on the entity a click would hit (DELETE red, others gold).
+## Same pick as the click itself (admin_entity_at, 44 px), so what you see is
+## exactly what you get. Hidden in every other mode.
+func _update_hover(wpos: Vector2) -> void:
+	var picking := _mode in [Mode.DELETE, Mode.MOVE, Mode.ROTATE, Mode.INSPECT]
+	var w := _world() as Object
+	var id := ""
+	if picking and w != null and w.has_method("admin_entity_at"):
+		id = _drag_id if _drag_id != "" else str(w.call("admin_entity_at", wpos, 44.0))
+	if _hover_ring == null:
+		_hover_ring = Panel.new()
+		_hover_ring.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		_hover_ring.size = Vector2(52, 52)
+		_overlay.add_child(_hover_ring)
+		_hover_lbl = Label.new()
+		_hover_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		_hover_lbl.add_theme_font_size_override("font_size", 12)
+		_hover_lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0))
+		_hover_lbl.add_theme_constant_override("outline_size", 4)
+		_overlay.add_child(_hover_lbl)
+	var spos := Vector2(-1, -1)
+	if id != "" and w.has_method("admin_entity_screen_pos"):
+		spos = w.call("admin_entity_screen_pos", id)
+	if id == "" or spos.x < 0.0:
+		_hover_id = ""
+		_hover_ring.visible = false
+		_hover_lbl.visible = false
+		return
+	if id != _hover_id:
+		_hover_id = id
+		var col := Color(0.95, 0.30, 0.25) if _mode == Mode.DELETE else UITheme.GOLD
+		var sb := StyleBoxFlat.new()
+		sb.bg_color = Color(col.r, col.g, col.b, 0.12)
+		sb.border_color = col
+		sb.set_border_width_all(2)
+		sb.set_corner_radius_all(26)
+		_hover_ring.add_theme_stylebox_override("panel", sb)
+		var verb := {Mode.DELETE: "🗑 Delete", Mode.MOVE: "✥ Move",
+			Mode.ROTATE: "⟳ Rotate", Mode.INSPECT: "✎ Edit"}
+		_hover_lbl.text = "%s  %s  (%s)" % [str(verb.get(_mode, "")), _entity_name(id), id]
+		_hover_lbl.add_theme_color_override("font_color", col)
+	_hover_ring.position = spos - _hover_ring.size * 0.5
+	_hover_lbl.position = spos + Vector2(-_hover_lbl.size.x * 0.5, 30)
+	_hover_ring.visible = true
+	_hover_lbl.visible = true
 
 ## Build the translucent preview rect that follows the cursor. Lives on the
 ## overlay so its coordinate space matches what _on_overlay_input uses.

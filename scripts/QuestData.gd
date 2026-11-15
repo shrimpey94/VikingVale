@@ -92,6 +92,28 @@ const QUESTS: Dictionary = {
 		},
 	},
 
+	"q_ironwood_roots": {
+		"title":       "Rot at the Roots",
+		"description": "Tree-Warden Eyvind keeps the last Ironwood Tree. Spiders are webbing its roots and forest spirits gather in the dark around the keep. Slay 6 Spiders and 3 Forest Spirits before they choke it.",
+		"giver_npc":   "Tree-Warden Eyvind",
+		"required":    {"melee": 20},
+		"repeatable":  false,
+		"daily":       false,
+		"boss":        false,
+		"chain_next":  "",
+		"objectives": [
+			{"type": "kill", "target_id": "spider", "quantity": 6,
+			 "display": "Slay Spiders"},
+			{"type": "kill", "target_id": "forest_spirit", "quantity": 3,
+			 "display": "Slay Forest Spirits"},
+		],
+		"rewards": {
+			"xp":    {"melee": 350, "defense": 100},
+			"gold":  200,
+			"items": [],
+		},
+	},
+
 	"q_ashlands": {
 		"title":       "Ashlands Menace",
 		"description": "Investigate the ashlands by slaying 5 Draugr.",

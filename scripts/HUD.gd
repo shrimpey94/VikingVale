@@ -11066,9 +11066,13 @@ func _action_menu_options(node: Node) -> Array:
 		# default action for a merchant.
 		var npc_shop: String = str(node.get("shop_id")) if node.get("shop_id") != null else ""
 		if str(node.get("npc_type")) == "shopkeeper" and npc_shop != "":
-			var npc_eid: String = str(node.get_meta("edit_id", ""))
+			var npc_eid: String = str(node.call("shop_npc_id")) if node.has_method("shop_npc_id") \
+				else str(node.get_meta("edit_id", ""))
 			npc_opts.append({"label": "Trade", "cb": func() -> void:
 				Events.open_shop.emit(npc_eid, npc_shop)})
+		if str(node.get("npc_type")) == "banker":
+			npc_opts.append({"label": "Use Bank", "cb": func() -> void:
+				Events.open_bank.emit()})
 		npc_opts.append({"label": "Talk", "cb": func() -> void:
 			Events.player_interacted.emit(node)})
 		npc_opts.append({"label": "Attack", "cb": func() -> void:

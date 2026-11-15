@@ -327,7 +327,7 @@ func _build_ui() -> void:
 
 	# ── Version — prominent, invites a click to see the changelog ─────────────
 	var ver := Button.new()
-	ver.text = "v%s  —  Click me to see updates!" % _read_version()
+	ver.text = "%s  —  Click me to see updates!" % _read_version()
 	ver.flat = true
 	ver.focus_mode = Control.FOCUS_NONE
 	ver.add_theme_color_override("font_color", RS_GOLD)

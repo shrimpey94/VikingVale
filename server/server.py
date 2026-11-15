@@ -9,6 +9,7 @@ Run:
 """
 
 import asyncio
+import difflib
 import hashlib
 import json
 import logging
@@ -237,6 +238,20 @@ _QUESTS_PY = {
              "display": "Slay Skeletons"},
         ],
         "rewards": {"xp": {"melee": 150, "vitality": 25}, "gold": 100, "items": []},
+    },
+    "q_ironwood_roots": {
+        "title": "Rot at the Roots",
+        "description": "Tree-Warden Eyvind keeps the last Ironwood Tree. Spiders are webbing its roots and forest spirits gather in the dark around the keep. Slay 6 Spiders and 3 Forest Spirits before they choke it.",
+        "giver_npc": "Tree-Warden Eyvind",
+        "required": {"melee": 20},
+        "repeatable": False, "daily": False, "boss": False, "chain_next": "",
+        "objectives": [
+            {"type": "kill", "target_id": "spider", "quantity": 6,
+             "display": "Slay Spiders"},
+            {"type": "kill", "target_id": "forest_spirit", "quantity": 3,
+             "display": "Slay Forest Spirits"},
+        ],
+        "rewards": {"xp": {"melee": 350, "defense": 100}, "gold": 200, "items": []},
     },
     "q_ashlands": {
         "title": "Ashlands Menace",
@@ -801,8 +816,6 @@ _BASE_PRICES = _build_base_prices()
 # or unique drops land.
 _SOULBOUND_ITEMS = set()
 
-# Shop templates (mirror of ShopCatalog.SHOPS). The structure must match: any
-# stock_template entry needs id / name / color / max / restock_per_tick.
 # Phase 5 of the gold economy — monster gold drops. Mirror of Monster.gd's
 # gold_min/gold_max fields. Roll in _monster_die. Anything not listed drops
 # 0 gold (the dict lookup default).
@@ -819,79 +832,34 @@ _MONSTER_GOLD_PY = {
 }
 
 
-_SHOPS_PY = {
-    "general_store": {
-        "name": "Kjelvik General Store", "buy_multiplier": 1.0,
-        "stock_template": [
-            {"id": "stick",               "name": "Stick",               "color": [0.55, 0.36, 0.14, 1.0], "max": 100, "restock_per_tick": 10.0},
-            {"id": "stone",               "name": "Stone",               "color": [0.58, 0.56, 0.52, 1.0], "max": 100, "restock_per_tick": 10.0},
-            {"id": "arrows",              "name": "Arrows",              "color": [0.72, 0.65, 0.50, 1.0], "max": 200, "restock_per_tick": 20.0},
-            {"id": "oak_log",             "name": "Oak Log",             "color": [0.60, 0.40, 0.15, 1.0], "max":  30, "restock_per_tick":  3.0},
-            {"id": "copper_ore",          "name": "Copper Ore",          "color": [0.75, 0.45, 0.20, 1.0], "max":  30, "restock_per_tick":  3.0},
-            {"id": "wooden_axe",          "name": "Wooden Axe",          "color": [0.55, 0.38, 0.16, 1.0], "max":   5, "restock_per_tick":  0.5},
-            {"id": "wooden_pickaxe",      "name": "Wooden Pickaxe",      "color": [0.50, 0.34, 0.14, 1.0], "max":   5, "restock_per_tick":  0.5},
-            {"id": "wooden_fishing_pole", "name": "Wooden Fishing Pole", "color": [0.45, 0.28, 0.08, 1.0], "max":   5, "restock_per_tick":  0.5},
-            {"id": "fishing_pole",        "name": "Fishing Pole",        "color": [0.48, 0.30, 0.08, 1.0], "max":   3, "restock_per_tick":  0.3},
-            {"id": "wheat_seed",          "name": "Wheat Seed",          "color": [0.90, 0.80, 0.30, 1.0], "max":  40, "restock_per_tick":  4.0},
-            {"id": "carrot_seed",         "name": "Carrot Seed",         "color": [0.90, 0.55, 0.20, 1.0], "max":  40, "restock_per_tick":  4.0},
-            {"id": "barley_seed",         "name": "Barley Seed",         "color": [0.82, 0.72, 0.40, 1.0], "max":  30, "restock_per_tick":  3.0},
-            {"id": "cabbage_seed",        "name": "Cabbage Seed",        "color": [0.45, 0.72, 0.36, 1.0], "max":  30, "restock_per_tick":  3.0},
-            {"id": "rye_seed",            "name": "Rye Seed",            "color": [0.72, 0.62, 0.32, 1.0], "max":  25, "restock_per_tick":  2.5},
-            {"id": "corn_seed",           "name": "Corn Seed",           "color": [0.92, 0.80, 0.25, 1.0], "max":  20, "restock_per_tick":  2.0},
-            {"id": "potato_seed",         "name": "Potato Seed",         "color": [0.72, 0.56, 0.36, 1.0], "max":  20, "restock_per_tick":  2.0},
-        ],
-    },
-    "weapons_smith": {
-        "name": "Frostheim Smith", "buy_multiplier": 1.0,
-        "stock_template": [
-            {"id": "copper_bar",     "name": "Copper Bar",     "color": [0.80, 0.50, 0.20, 1.0], "max": 20, "restock_per_tick": 2.0},
-            {"id": "iron_bar",       "name": "Iron Bar",       "color": [0.60, 0.60, 0.65, 1.0], "max": 15, "restock_per_tick": 1.5},
-            {"id": "copper_axe",     "name": "Copper Axe",     "color": [0.78, 0.48, 0.22, 1.0], "max":  5, "restock_per_tick": 0.5},
-            {"id": "copper_pickaxe", "name": "Copper Pickaxe", "color": [0.72, 0.44, 0.18, 1.0], "max":  5, "restock_per_tick": 0.5},
-            {"id": "iron_axe",       "name": "Iron Axe",       "color": [0.55, 0.55, 0.60, 1.0], "max":  4, "restock_per_tick": 0.4},
-            {"id": "iron_pickaxe",   "name": "Iron Pickaxe",   "color": [0.50, 0.50, 0.55, 1.0], "max":  4, "restock_per_tick": 0.4},
-            {"id": "iron_sword",     "name": "Iron Sword",     "color": [0.55, 0.55, 0.60, 1.0], "max":  3, "restock_per_tick": 0.3},
-            {"id": "iron_helm",      "name": "Iron Helm",      "color": [0.55, 0.55, 0.60, 1.0], "max":  3, "restock_per_tick": 0.3},
-            {"id": "iron_body",      "name": "Iron Body",      "color": [0.55, 0.55, 0.60, 1.0], "max":  2, "restock_per_tick": 0.2},
-            {"id": "iron_legs",      "name": "Iron Legs",      "color": [0.55, 0.55, 0.60, 1.0], "max":  2, "restock_per_tick": 0.2},
-            {"id": "iron_boots",     "name": "Iron Boots",     "color": [0.60, 0.62, 0.65, 1.0], "max":  3, "restock_per_tick": 0.3},
-        ],
-    },
-    "fishmonger": {
-        "name": "Bjorn's Fishmonger", "buy_multiplier": 1.0,
-        "stock_template": [
-            {"id": "earthworm",     "name": "Earthworm",     "color": [0.55, 0.30, 0.20, 1.0], "max": 50, "restock_per_tick": 10.0},
-            {"id": "fatty_lard",    "name": "Fatty Lard",    "color": [0.92, 0.86, 0.62, 1.0], "max": 20, "restock_per_tick":  2.0},
-            {"id": "raw_fish",      "name": "Raw Fish",      "color": [0.70, 0.90, 0.95, 1.0], "max": 30, "restock_per_tick":  3.0},
-            {"id": "raw_salmon",    "name": "Raw Salmon",    "color": [0.95, 0.55, 0.30, 1.0], "max": 15, "restock_per_tick":  1.0},
-            {"id": "cooked_fish",   "name": "Cooked Fish",   "color": [0.85, 0.65, 0.35, 1.0], "max": 12, "restock_per_tick":  1.0},
-            {"id": "cooked_salmon", "name": "Cooked Salmon", "color": [0.95, 0.52, 0.28, 1.0], "max":  8, "restock_per_tick":  0.5},
-        ],
-    },
-    "apothecary": {
-        "name": "Eastmark Apothecary", "buy_multiplier": 1.0,
-        "stock_template": [
-            {"id": "herbs",           "name": "Herbs",           "color": [0.45, 0.80, 0.20, 1.0], "max": 50, "restock_per_tick": 5.0},
-            {"id": "mushrooms",       "name": "Mushrooms",       "color": [0.72, 0.55, 0.38, 1.0], "max": 30, "restock_per_tick": 3.0},
-            {"id": "berries",         "name": "Berries",         "color": [0.72, 0.18, 0.50, 1.0], "max": 20, "restock_per_tick": 2.0},
-            {"id": "moonbloom",       "name": "Moonbloom",       "color": [0.78, 0.62, 0.95, 1.0], "max": 10, "restock_per_tick": 1.0},
-            {"id": "herb_tea",        "name": "Herb Tea",        "color": [0.55, 0.85, 0.45, 1.0], "max": 15, "restock_per_tick": 1.5},
-            {"id": "baked_potato",    "name": "Baked Potato",    "color": [0.74, 0.58, 0.34, 1.0], "max":  8, "restock_per_tick": 0.5},
-            {"id": "cooked_rat_meat", "name": "Cooked Rat Meat", "color": [0.62, 0.40, 0.28, 1.0], "max": 10, "restock_per_tick": 1.0},
-        ],
-    },
-    "magic_vendor": {
-        "name": "Ironwood Magic Vendor", "buy_multiplier": 1.0,
-        "stock_template": [
-            {"id": "rune_essence", "name": "Rune Essence", "color": [0.65, 0.35, 0.80, 1.0], "max": 50, "restock_per_tick": 5.0},
-            {"id": "magic_dust",   "name": "Magic Dust",   "color": [0.65, 0.35, 0.80, 1.0], "max": 30, "restock_per_tick": 3.0},
-            {"id": "feather",      "name": "Feather",      "color": [0.95, 0.94, 0.88, 1.0], "max": 50, "restock_per_tick": 5.0},
-            {"id": "copper_bar",   "name": "Copper Bar",   "color": [0.80, 0.50, 0.20, 1.0], "max": 10, "restock_per_tick": 1.0},
-            {"id": "gold_amulet",  "name": "Gold Amulet",  "color": [0.95, 0.80, 0.15, 1.0], "max":  2, "restock_per_tick": 0.1},
-            {"id": "ironwood_bow", "name": "Ironwood Bow", "color": [0.28, 0.14, 0.06, 1.0], "max":  2, "restock_per_tick": 0.1},
-        ],
-    },
-}
+# Client data files the server reads instead of keeping hand-synced copies
+# (ONE source of truth — two copies drifted before, e.g. the fishmonger's lures
+# and the rare gems were sold in the client catalog but missing here). Each file
+# holds a strict-JSON const between marker lines; see the file headers.
+_SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
+
+
+def _load_gd_json_block(rel_path: str, begin: str, end: str) -> dict:
+    """The JSON object between `# BEGIN_...` / `# END_...` markers in a client
+    .gd file. Never raises: a missing/garbled file prints a loud error and
+    yields {} so the server still boots (the affected feature goes quiet)."""
+    path = _SCRIPTS_DIR / rel_path
+    try:
+        text = path.read_text(encoding="utf-8")
+        body = text.split(begin, 1)[1].split(end, 1)[0]
+        out = json.loads(body[body.index("{"):body.rindex("}") + 1])
+        if not isinstance(out, dict):
+            raise ValueError("block is not a JSON object")
+        return out
+    except Exception as e:
+        print(f"[data] !!! could not load {path}: {e}")
+        return {}
+
+
+# Shop templates — read from scripts/ShopCatalog.gd. Every stock_template entry
+# carries id / name / color / max / restock_per_tick.
+_SHOPS_PY = _load_gd_json_block("ShopCatalog.gd",
+                                "# BEGIN_SHOP_CATALOG_JSON", "# END_SHOP_CATALOG_JSON")
 
 
 # ── Database ───────────────────────────────────────────────────────────────────
@@ -1160,6 +1128,27 @@ def init_db() -> None:
             conn.execute("ALTER TABLE entity_edits ADD COLUMN data TEXT")
         except Exception:
             pass
+        # v1.7.4 — admin audit log: who placed / deleted / moved / edited what,
+        # when. `before` holds the pre-change row (JSON) so a delete can be
+        # undone exactly (same id, same data); `restored` marks an undone delete.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS admin_audit (
+                id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts        REAL NOT NULL,
+                username  TEXT NOT NULL,
+                action    TEXT NOT NULL,
+                entity_id TEXT DEFAULT '',
+                kind      TEXT DEFAULT '',
+                subtype   TEXT DEFAULT '',
+                label     TEXT DEFAULT '',
+                x         REAL,
+                y         REAL,
+                detail    TEXT DEFAULT '',
+                before    TEXT,
+                restored  INTEGER DEFAULT 0
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_admin_audit_entity ON admin_audit(entity_id)")
         # v1.6.1 — server-persisted terrain HEIGHT sculpt (3D client). idx = ty*300+tx;
         # delta layers on the biome base. Sparse (only sculpted tiles). Synced to all
         # clients like tile_overrides so admin height edits aren't client-local.
@@ -3903,30 +3892,63 @@ def _can_edit_map(session: dict) -> bool:
     return r == "owner" or r == "admin" or r == "mapper"
 
 
-async def _handle_admin_wipemonsters(ws, session: dict) -> None:
+_WIPE_CONFIRM_SECS = 60.0
+_pending_wipes: dict = {}    # username → time the confirm prompt was shown
+EXPORT_DIR = Path(__file__).parent / "exports"
+
+
+async def _handle_admin_wipemonsters(ws, session: dict, confirm: bool = False) -> None:
     """Wipe every monster from the world in one shot. Removes all admin-placed
     monsters from world_entities, purges every entry from the live AI dict +
     monster_state DB via _purge_monster_state (which also broadcasts a
     monster_died so all clients free their local visuals), and reports the
     count back to the invoker.
 
-    Any-admin (not owner-only): the world can be repopulated from the admin
-    panel afterward, so a stray misuse is recoverable. Procedural chunk
-    monsters are already disabled in World.gd via PROCEDURAL_MONSTERS=false,
-    so nothing repopulates the world after the wipe."""
+    Two steps (1.7.4): `/wipemonsters` only reports what would go and asks for
+    `/wipemonsters confirm` within 60 s. The confirm first exports every
+    admin-placed monster row to server/exports/ (aborts if that fails) and logs
+    one audit 'wipe' entry, so the whole wipe can be brought back from the
+    admin panel's Recently deleted list. Procedural chunk monsters are disabled
+    in World.gd via PROCEDURAL_MONSTERS=false, so nothing repopulates them."""
     if not _is_admin(session):
         await _admin_confirm(ws, "Only an admin can run /wipemonsters.")
         return
-    # Snapshot every monster the server is currently tracking. Two sources:
-    #   1. world_entities rows with kind='monster' (admin-placed, persisted).
-    #   2. monsters_state RAM entries (procedural + admin, live AI).
-    admin_ids: list = []
+    user = session["username"]
     with _db() as conn:
         rows = conn.execute(
-            "SELECT id FROM world_entities WHERE kind='monster'").fetchall()
-        admin_ids = [str(r["id"]) for r in rows]
+            "SELECT id, kind, subtype, x, y, data FROM world_entities "
+            "WHERE kind='monster'").fetchall()
+    admin_rows = [dict(r) for r in rows]
+    admin_ids = [str(r["id"]) for r in admin_rows]
+    live_only = len(set(monsters_state.keys()) - set(admin_ids))
+    if not confirm:
+        _pending_wipes[user] = time.time()
+        await _admin_confirm(ws,
+            f"/wipemonsters would remove {len(admin_ids)} placed monster(s) "
+            f"+ {live_only} live-only AI. They are exported first and can be "
+            f"restored from Admin → Recently deleted. Type /wipemonsters confirm "
+            f"within {int(_WIPE_CONFIRM_SECS)} s to go ahead.")
+        return
+    asked = _pending_wipes.pop(user, 0.0)
+    if time.time() - asked > _WIPE_CONFIRM_SECS:
+        await _admin_confirm(ws, "No pending wipe (or it expired) — type /wipemonsters first.")
+        return
+    # Export BEFORE deleting anything; a failed export aborts the wipe.
+    try:
+        EXPORT_DIR.mkdir(exist_ok=True)
+        export = EXPORT_DIR / (f"wipemonsters_{time.strftime('%Y%m%d_%H%M%S')}_"
+                               f"{_safe_file_part(user)}.json")
+        export.write_text(json.dumps({"by": user, "ts": time.time(),
+                                      "rows": admin_rows}, indent=1), encoding="utf-8")
+    except Exception as e:
+        await _admin_confirm(ws, f"Wipe ABORTED — couldn't export the monsters first ({e}).")
+        return
+    with _db() as conn:
         conn.execute("DELETE FROM world_entities WHERE kind='monster'")
         conn.commit()
+    _audit(session, "wipe", kind="monster", label=f"{len(admin_ids)} placed monsters",
+           detail=f"export {export.name}",
+           before={"table": "world_entities_bulk", "rows": admin_rows})
     # Union — some monsters have RAM state but no world_entities row (e.g.
     # procedural chunk monsters that were seeded before the wipe flag was
     # flipped). Purge them too so no phantoms tick.
@@ -3940,7 +3962,8 @@ async def _handle_admin_wipemonsters(ws, session: dict) -> None:
     for eid in admin_ids:
         _broadcast({"type": "world_entity_remove", "id": eid})
     total = len(all_ids)
-    await _admin_confirm(ws, f"Wiped {total} monster(s) from the world.")
+    await _admin_confirm(ws, f"Wiped {total} monster(s) from the world. Saved to "
+                             f"exports/{export.name} — undo from Admin → Recently deleted.")
     print(f"[wipemonsters] {session['username']} wiped {total} monster(s) "
           f"({len(admin_ids)} admin-placed, {total - len(admin_ids)} live AI)")
 
@@ -4062,6 +4085,39 @@ async def _handle_admin_rank_command(ws, session: dict, text: str) -> None:
             await _admin_confirm(ws, f"{target_raw} was not an admin.")
 
 
+def _admin_cmd_args_error(parts: list, usage: str, num_name: str, lo, hi) -> str:
+    """'' when `/cmd <player> <int>` is well formed, else a clear message:
+    missing/extra args, a non-number, or a number outside [lo, hi]."""
+    if len(parts) != 3:
+        return (f"Usage: {usage} — expected 2 values, got {len(parts) - 1}."
+                if len(parts) > 3 else f"Usage: {usage}")
+    try:
+        n = int(parts[2])
+    except ValueError:
+        return f"'{parts[2]}' isn't a whole number. Usage: {usage}"
+    if (lo is not None and n < lo) or (hi is not None and n > hi):
+        return f"{num_name} must be {lo}-{hi} (got {n}). Usage: {usage}"
+    return ""
+
+
+async def _handle_admin_set_rank(ws, session: dict, msg: dict) -> None:
+    """Accounts-tab Promote / Demote buttons — the same owner-only logic as the
+    /promote and /demote chat commands. rank "admin" promotes; "" demotes."""
+    username = str(msg.get("username", "")).strip()
+    if not username or any(c.isspace() for c in username):
+        await _admin_confirm(ws, "set_rank: a single username is required.")
+        return
+    cmd = "/promote" if str(msg.get("rank", "")) == "admin" else "/demote"
+    await _handle_admin_rank_command(ws, session, f"{cmd} {username}")
+
+
+# Account-tab actions whose result changes the list — the server re-sends the
+# list (with the admin's current search) as soon as the action is done, so the
+# Accounts tab never shows stale state (it used to guess with a 0.3 s timer).
+_ACCOUNT_LIST_ACTIONS = ("admin_unlock_account", "admin_verify_email", "admin_delete_account",
+                         "admin_grant_mapper", "admin_revoke_mapper", "admin_set_rank")
+
+
 def _name_wall_by_town(subtype: str, x: float, y: float, data: dict) -> None:
     """Name a wall / tower / gate after the town it stands in (in place). Leaves
     non-town walls with whatever name they were built with (e.g. a warband's)."""
@@ -4097,6 +4153,9 @@ def _load_world_entities() -> list:
         _name_wall_by_town(str(r["subtype"]), float(r["x"]), float(r["y"]), data)
         out.append({"id": eid, "kind": r["kind"], "subtype": r["subtype"],
                     "x": float(r["x"]), "y": float(r["y"]), "data": data})
+    # Live Wall-Keepers (in-memory only, never stored) ride the same burst.
+    for rep in town_repairers.values():
+        out.append(_wall_repairer_entity(rep["eid"], float(rep["x"]), float(rep["y"])))
     return out
 
 
@@ -4104,33 +4163,67 @@ async def _admin_confirm(ws, text: str) -> None:
     await _send(ws, {"type": "chat", "username": "Admin", "text": text})
 
 
-async def _handle_admin_place(ws, session: dict, msg: dict) -> None:
-    if not _can_edit_map(session):
-        return
-    kind    = str(msg.get("kind", "")).strip()
-    subtype = str(msg.get("subtype", "")).strip()
-    if kind not in ("resource", "monster", "npc") or not subtype:
-        await _admin_confirm(ws, "Invalid entity.")
-        return
-    x = float(msg.get("x", session["x"]))
-    y = float(msg.get("y", session["y"]))
-    # Structure placement overlap check — two structures can't share space.
-    # Only enforced for structure subtypes; monsters/NPCs/trees stay free.
-    if subtype in _STRUCTURE_SIZES:
-        if _placement_would_overlap(subtype, x, y):
-            await _admin_confirm(ws,
-                f"Cannot place {subtype} — overlaps existing structure.")
-            return
-    data = msg.get("data", {})
-    if not isinstance(data, dict):
-        data = {}
-    eid = "a:" + secrets.token_hex(8)
+# ── Admin audit log (1.7.4) ──────────────────────────────────────────────────
+# Every place / delete / move / rotate / edit / restore lands in admin_audit
+# (who, what, when, where). Deletes keep the pre-delete row in `before`, which
+# is what lets _handle_admin_undelete bring an entity back exactly as it was.
+_AUDIT_KEEP_ROWS = 20000
+
+
+def _safe_file_part(s: str) -> str:
+    return "".join(c if c.isalnum() or c in "-_" else "_" for c in str(s))[:32] or "x"
+
+
+def _audit(session: dict, action: str, eid: str = "", kind: str = "",
+           subtype: str = "", label: str = "", x=None, y=None,
+           detail: str = "", before=None) -> int:
     with _db() as conn:
-        conn.execute(
-            "INSERT INTO world_entities (id, kind, subtype, x, y, data) VALUES (?,?,?,?,?,?)",
-            (eid, kind, subtype, x, y, json.dumps(data)))
+        cur = conn.execute(
+            "INSERT INTO admin_audit (ts, username, action, entity_id, kind, subtype, "
+            "label, x, y, detail, before) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (time.time(), session.get("username", "?"), action, eid, kind, subtype,
+             str(label)[:80], x, y, str(detail)[:300],
+             None if before is None else json.dumps(before)))
+        rid = int(cur.lastrowid)
+        if rid % 500 == 0:   # cheap periodic trim; keeps the newest rows
+            conn.execute("DELETE FROM admin_audit WHERE id <= ?", (rid - _AUDIT_KEEP_ROWS,))
         conn.commit()
+    try:   # a console that can't print a name must never fail the admin action
+        _admin_log(session, f"{action} {eid} {label}".rstrip())
+    except Exception:
+        pass
+    return rid
+
+
+def _entity_label(data: dict, subtype: str, fallback: str = "") -> str:
+    """Human name for the audit log: NPC name, display name, then subtype."""
+    for k in ("npc_name", "display_name", "monster_type"):
+        v = str(data.get(k, "") or "").strip()
+        if v:
+            return v
+    return fallback or subtype
+
+
+def _client_label(msg: dict) -> str:
+    """Optional name the client attached (it knows seeded NPC names; we don't)."""
+    return str(msg.get("label", "") or "").strip()[:80]
+
+
+def _placed_by(username: str, eid: str) -> bool:
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM admin_audit WHERE entity_id=? AND action='place' "
+            "AND username=? LIMIT 1", (eid, username)).fetchone()
+    return row is not None
+
+
+def _activate_admin_entity(eid: str, kind: str, subtype: str, x: float, y: float,
+                           data: dict, owner: str) -> None:
+    """Live-state side of an a: entity coming into the world (fresh place OR an
+    undelete): structure HP, caravan/town-bounds refresh, monster AI seed.
+    Mutates `data` with the seeded HP so the world_entity_add carries it."""
     _known_admin_entity_ids.add(eid)
+    _purged_entity_ids.discard(eid)
     # Structure HP seed — track live HP for combat damage. Non-structure
     # resources (trees, rocks) don't get this — they use the existing
     # per-node depletion / respawn flow.
@@ -4140,7 +4233,7 @@ async def _handle_admin_place(ws, session: dict, msg: dict) -> None:
         structures_state[eid] = {
             "hp": max_hp_s, "max_hp": max_hp_s, "alive": True,
             "subtype": subtype, "x": x, "y": y,
-            "owner": str(data.get("owner", session["username"])),
+            "owner": str(data.get("owner", owner)),
             "wood": wood,
         }
         _mark_structure_dirty(eid)
@@ -4152,14 +4245,6 @@ async def _handle_admin_place(ws, session: dict, msg: dict) -> None:
         data["hp"] = max_hp_s
         data["max_hp"] = max_hp_s
         data["alive"] = True
-    _name_wall_by_town(subtype, x, y, data)   # town walls are named after their town
-    entity = {"id": eid, "kind": kind, "subtype": subtype, "x": x, "y": y, "data": data}
-    _broadcast({"type": "world_entity_add", "entity": entity})
-    # Tell the placer the new id so their client's Undo stack can reverse it.
-    await _send(ws, {"type": "admin_placed", "id": eid, "kind": kind,
-                     "subtype": subtype, "x": x, "y": y})
-    await _admin_confirm(ws, f"Placed {kind} '{subtype}'.")
-    print(f"[admin] {session['username']} placed {kind}:{subtype} at ({x:.0f},{y:.0f})")
     # Stage 1 AI seed for admin-placed monsters. Without this, the monster
     # sits inert in the world until a client triggers monster_join — at
     # which point monster_join's existing-entry branch preserves the AI we
@@ -4188,6 +4273,44 @@ async def _handle_admin_place(ws, session: dict, msg: dict) -> None:
               f"home=({x:.0f},{y:.0f})")
 
 
+async def _handle_admin_place(ws, session: dict, msg: dict) -> None:
+    if not _can_edit_map(session):
+        return
+    kind    = str(msg.get("kind", "")).strip()
+    subtype = str(msg.get("subtype", "")).strip()
+    if kind not in ("resource", "monster", "npc") or not subtype:
+        await _admin_confirm(ws, "Invalid entity.")
+        return
+    x = float(msg.get("x", session["x"]))
+    y = float(msg.get("y", session["y"]))
+    # Structure placement overlap check — two structures can't share space.
+    # Only enforced for structure subtypes; monsters/NPCs/trees stay free.
+    if subtype in _STRUCTURE_SIZES:
+        if _placement_would_overlap(subtype, x, y):
+            await _admin_confirm(ws,
+                f"Cannot place {subtype} — overlaps existing structure.")
+            return
+    data = msg.get("data", {})
+    if not isinstance(data, dict):
+        data = {}
+    eid = "a:" + secrets.token_hex(8)
+    with _db() as conn:
+        conn.execute(
+            "INSERT INTO world_entities (id, kind, subtype, x, y, data) VALUES (?,?,?,?,?,?)",
+            (eid, kind, subtype, x, y, json.dumps(data)))
+        conn.commit()
+    _audit(session, "place", eid, kind, subtype, _entity_label(data, subtype), x, y)
+    _activate_admin_entity(eid, kind, subtype, x, y, data, session["username"])
+    _name_wall_by_town(subtype, x, y, data)   # town walls are named after their town
+    entity = {"id": eid, "kind": kind, "subtype": subtype, "x": x, "y": y, "data": data}
+    _broadcast({"type": "world_entity_add", "entity": entity})
+    # Tell the placer the new id so their client's Undo stack can reverse it.
+    await _send(ws, {"type": "admin_placed", "id": eid, "kind": kind,
+                     "subtype": subtype, "x": x, "y": y})
+    await _admin_confirm(ws, f"Placed {kind} '{subtype}'.")
+    print(f"[admin] {session['username']} placed {kind}:{subtype} at ({x:.0f},{y:.0f})")
+
+
 def _load_entity_edits() -> list:
     with _db() as conn:
         rows = conn.execute("SELECT id, deleted, x, y, rot, data FROM entity_edits").fetchall()
@@ -4214,6 +4337,43 @@ async def _handle_admin_delete(ws, session: dict, msg: dict) -> None:
     eid = str(msg.get("id", "")).strip()
     if not eid:
         return
+    # Snapshot the row BEFORE touching anything — it goes into the audit log so
+    # the delete can be undone exactly (same id, same data, same position).
+    with _db() as conn:
+        if eid.startswith("a:"):
+            row = conn.execute("SELECT id, kind, subtype, x, y, data FROM world_entities "
+                               "WHERE id=?", (eid,)).fetchone()
+            before = {"table": "world_entities", "row": dict(row) if row else None}
+        else:
+            row = conn.execute("SELECT id, deleted, x, y, rot, data FROM entity_edits "
+                               "WHERE id=?", (eid,)).fetchone()
+            before = {"table": "entity_edits", "row": dict(row) if row else None}
+    a_row = before["row"] if eid.startswith("a:") else None
+    try:
+        a_data = json.loads(a_row["data"]) if a_row and a_row["data"] else {}
+    except Exception:
+        a_data = {}
+    if not isinstance(a_data, dict):
+        a_data = {}
+    a_kind = str(a_row["kind"]) if a_row else ""
+    if not eid.startswith("a:"):
+        try:
+            e_data = json.loads(before["row"]["data"]) if before["row"] and before["row"]["data"] else {}
+        except Exception:
+            e_data = {}
+        label = str((e_data or {}).get("npc_name", "") or "") or _client_label(msg) or eid
+        kind = "npc" if eid.startswith("n:") else ""
+    else:
+        label = _entity_label(a_data, str(a_row["subtype"]) if a_row else "", _client_label(msg))
+        kind = a_kind
+    # Mappers build the world; they don't remove the people in it. Seeded town
+    # NPCs (n:) and admin-placed NPCs someone else put down need an admin.
+    if _is_mapper(session):
+        is_npc = eid.startswith("n:") or a_kind == "npc"
+        if is_npc and not (eid.startswith("a:") and _placed_by(session["username"], eid)):
+            await _admin_confirm(ws, f"Mappers can't delete town NPCs or quest givers "
+                                     f"({label}). Ask an admin.")
+            return
     # ALWAYS purge the AI/combat/SQLite state first. If `eid` is a static
     # entity (rock / npc / banner) the purge is a no-op (returns False) and
     # we fall through. If it's a monster (admin-placed `a:...` or procedural
@@ -4241,7 +4401,166 @@ async def _handle_admin_delete(ws, session: dict, msg: dict) -> None:
     # Mark dead in the existence cache so the AI tick loop's safety net
     # rejects any leftover monsters_state entry on the very next tick.
     _purged_entity_ids.add(eid)
-    await _admin_confirm(ws, "Deleted entity.")
+    already_gone = (a_row is None) if eid.startswith("a:") else \
+        bool(before["row"] and before["row"]["deleted"])
+    if not already_gone:
+        _audit(session, "delete", eid, kind,
+               str(a_row["subtype"]) if a_row else "", label,
+               float(a_row["x"]) if a_row else None, float(a_row["y"]) if a_row else None,
+               before=before)
+    await _send(ws, {"type": "admin_deleted", "id": eid, "label": label})
+    await _admin_confirm(ws, f"Deleted {label}.")
+
+
+async def _handle_admin_restore_entity(ws, session: dict, msg: dict) -> None:
+    """Un-delete a SEEDED NPC (n:<index> from the client's World._NPCS table).
+    Drops its whole entity_edits row, so it comes back exactly as seeded: home
+    position, original name + dialogue (quests bind to the exact name, so a stale
+    rename/move must not survive the restore). Clears the in-memory tombstone so
+    no restart is needed, and broadcasts so every connected client respawns it."""
+    if not _can_edit_map(session):
+        return
+    eid = str(msg.get("id", "")).strip()
+    if not eid.startswith("n:") or not eid[2:].isdigit():
+        await _admin_confirm(ws, "Only seeded NPCs (n:) can be restored.")
+        return
+    with _db() as conn:
+        row = conn.execute("SELECT deleted FROM entity_edits WHERE id=?", (eid,)).fetchone()
+        if row is None or not row["deleted"]:
+            await _admin_confirm(ws, f"{eid} is not deleted — nothing to restore.")
+            return
+        conn.execute("DELETE FROM entity_edits WHERE id=?", (eid,))
+        # Any pending "recently deleted" entries for it are now resolved.
+        conn.execute("UPDATE admin_audit SET restored=1 WHERE entity_id=? "
+                     "AND action='delete' AND restored=0", (eid,))
+        conn.commit()
+    _purged_entity_ids.discard(eid)
+    _broadcast({"type": "entity_restore", "id": eid})
+    _audit(session, "restore", eid, "npc", label=_client_label(msg) or eid,
+           detail="seeded NPC back at home spot")
+    await _admin_confirm(ws, f"Restored {eid} at its home spot.")
+
+
+async def _handle_admin_undelete(ws, session: dict, msg: dict) -> None:
+    """Undo a delete (or a /wipemonsters) from the audit log's `before` snapshot.
+    By `audit_id`, or by entity `id` (its newest un-restored delete). a: rows go
+    back into world_entities with the SAME id + data; pre-existing (n:/b:/r:…)
+    entities get their previous entity_edits row back (moves/renames included)."""
+    if not _can_edit_map(session):
+        return
+    aid = msg.get("audit_id")
+    eid_req = str(msg.get("id", "") or "").strip()
+    with _db() as conn:
+        if aid is not None:
+            row = conn.execute("SELECT * FROM admin_audit WHERE id=? AND action IN "
+                               "('delete','wipe') AND restored=0", (int(aid),)).fetchone()
+        else:
+            row = conn.execute("SELECT * FROM admin_audit WHERE entity_id=? AND "
+                               "action='delete' AND restored=0 ORDER BY id DESC LIMIT 1",
+                               (eid_req,)).fetchone()
+    if row is None or not row["before"]:
+        await _admin_confirm(ws, "Nothing to undo there (already restored?).")
+        return
+    before = json.loads(row["before"])
+    table = before.get("table")
+    eid = str(row["entity_id"])
+    label = str(row["label"] or eid)
+    if table in ("world_entities", "world_entities_bulk"):
+        rows = before.get("rows") if table == "world_entities_bulk" else [before.get("row")]
+        back = 0
+        for r in rows or []:
+            if not r:
+                continue
+            rid = str(r["id"])
+            try:
+                data = json.loads(r["data"]) if r.get("data") else {}
+            except Exception:
+                data = {}
+            if not isinstance(data, dict):
+                data = {}
+            with _db() as conn:
+                if conn.execute("SELECT 1 FROM world_entities WHERE id=?", (rid,)).fetchone():
+                    continue   # already back (restored twice / re-placed)
+                conn.execute("INSERT INTO world_entities (id, kind, subtype, x, y, data) "
+                             "VALUES (?,?,?,?,?,?)",
+                             (rid, r["kind"], r["subtype"], r["x"], r["y"], json.dumps(data)))
+                conn.commit()
+            x, y = float(r["x"]), float(r["y"])
+            _activate_admin_entity(rid, str(r["kind"]), str(r["subtype"]), x, y, data,
+                                   str(data.get("owner", session["username"])))
+            _broadcast({"type": "world_entity_add", "entity": {
+                "id": rid, "kind": r["kind"], "subtype": r["subtype"],
+                "x": x, "y": y, "data": data}})
+            back += 1
+        if table == "world_entities":
+            mark_caravan_routes_dirty()
+            _recompute_town_bounds()
+        detail = f"{back} entit{'y' if back == 1 else 'ies'} back"
+    elif table == "entity_edits":
+        prev = before.get("row")
+        with _db() as conn:
+            if prev is None:
+                conn.execute("DELETE FROM entity_edits WHERE id=?", (eid,))
+            else:
+                conn.execute("INSERT OR REPLACE INTO entity_edits (id, deleted, x, y, rot, data) "
+                             "VALUES (?,?,?,?,?,?)",
+                             (eid, int(prev.get("deleted") or 0), prev.get("x"), prev.get("y"),
+                              prev.get("rot") or 0.0, prev.get("data")))
+            conn.commit()
+        _purged_entity_ids.discard(eid)
+        # Respawn as seeded first, then re-apply the old move / data / rotation.
+        _broadcast({"type": "entity_restore", "id": eid})
+        if prev is not None:
+            if prev.get("x") is not None and prev.get("y") is not None:
+                _broadcast({"type": "entity_edit", "id": eid, "x": float(prev["x"]),
+                            "y": float(prev["y"]), "deleted": False})
+            if prev.get("data"):
+                try:
+                    _broadcast({"type": "entity_data_edit", "id": eid,
+                                "data": json.loads(prev["data"])})
+                except Exception:
+                    pass
+            if prev.get("rot"):
+                _broadcast({"type": "world_entity_rotate", "id": eid, "rot": float(prev["rot"])})
+        detail = "previous state back"
+    else:
+        await _admin_confirm(ws, "That entry can't be undone.")
+        return
+    with _db() as conn:
+        conn.execute("UPDATE admin_audit SET restored=1 WHERE id=?", (int(row["id"]),))
+        conn.commit()
+    _audit(session, "undelete", eid, str(row["kind"] or ""), str(row["subtype"] or ""),
+           label, row["x"], row["y"], detail=f"undid #{row['id']}: {detail}")
+    await _send(ws, {"type": "admin_undeleted", "id": eid, "audit_id": int(row["id"]),
+                     "label": label})
+    await _admin_confirm(ws, f"Brought back {label} ({detail}).")
+
+
+async def _handle_admin_audit_list(ws, session: dict, _msg: dict) -> None:
+    """Recent admin activity + the still-deleted entries the panel can restore."""
+    if not _can_edit_map(session):
+        return
+    cols = "id, ts, username, action, entity_id, kind, subtype, label, x, y, detail"
+    with _db() as conn:
+        recent = [dict(r) for r in conn.execute(
+            f"SELECT {cols} FROM admin_audit ORDER BY id DESC LIMIT 150").fetchall()]
+        dels = [dict(r) for r in conn.execute(
+            f"SELECT {cols} FROM admin_audit WHERE action IN ('delete','wipe') "
+            "AND restored=0 ORDER BY id DESC LIMIT 100").fetchall()]
+        # Drop entries whose entity is back by other means (re-placed / restored).
+        live = []
+        for d in dels:
+            eid = str(d["entity_id"])
+            if d["action"] == "delete":
+                if eid.startswith("a:"):
+                    if conn.execute("SELECT 1 FROM world_entities WHERE id=?", (eid,)).fetchone():
+                        continue
+                else:
+                    r = conn.execute("SELECT deleted FROM entity_edits WHERE id=?", (eid,)).fetchone()
+                    if r is None or not r["deleted"]:
+                        continue
+            live.append(d)
+    await _send(ws, {"type": "admin_audit", "recent": recent, "deleted": live})
 
 
 async def _handle_admin_move(ws, session: dict, msg: dict) -> None:
@@ -4252,6 +4571,7 @@ async def _handle_admin_move(ws, session: dict, msg: dict) -> None:
         return
     x = float(msg.get("x", 0.0))
     y = float(msg.get("y", 0.0))
+    _audit_move(session, eid, x, y, _client_label(msg))
     if eid.startswith("a:"):
         with _db() as conn:
             conn.execute("UPDATE world_entities SET x=?, y=? WHERE id=?", (x, y, eid))
@@ -4267,6 +4587,30 @@ async def _handle_admin_move(ws, session: dict, msg: dict) -> None:
                 (eid, x, y))
             conn.commit()
         _broadcast({"type": "entity_edit", "id": eid, "x": x, "y": y, "deleted": False})
+
+
+def _audit_move(session: dict, eid: str, x: float, y: float, label: str) -> None:
+    """Audit a move with its FROM position (read before the update lands)."""
+    with _db() as conn:
+        if eid.startswith("a:"):
+            r = conn.execute("SELECT kind, subtype, x, y, data FROM world_entities "
+                             "WHERE id=?", (eid,)).fetchone()
+        else:
+            r = conn.execute("SELECT x, y, data FROM entity_edits WHERE id=?", (eid,)).fetchone()
+    kind = subtype = ""
+    frm = "home"
+    if r is not None:
+        try:
+            d = json.loads(r["data"]) if r["data"] else {}
+        except Exception:
+            d = {}
+        if eid.startswith("a:"):
+            kind, subtype = str(r["kind"]), str(r["subtype"])
+        label = _entity_label(d if isinstance(d, dict) else {}, subtype, label)
+        if r["x"] is not None:
+            frm = f"({float(r['x']):.0f},{float(r['y']):.0f})"
+    _audit(session, "move", eid, kind, subtype, label or eid, x, y,
+           detail=f"from {frm}")
 
 
 async def _handle_admin_rotate(ws, session: dict, msg: dict) -> None:
@@ -4303,6 +4647,19 @@ async def _handle_admin_rotate(ws, session: dict, msg: dict) -> None:
                 (eid, rot))
             conn.commit()
     _broadcast({"type": "world_entity_rotate", "id": eid, "rot": rot})
+    _audit(session, "rotate", eid, label=_client_label(msg) or eid,
+           detail=f"{math.degrees(rot):.0f}°")
+
+
+def _edit_detail(old: dict, patch: dict, old_label: str = "") -> str:
+    """'npc_name: Ulfr the Smith → Blacksmith Ulfr; shop_id: '' → weapons_smith'."""
+    parts = []
+    for k, v in patch.items():
+        ov = old.get(str(k))
+        if ov is None and str(k) == "npc_name" and old_label:
+            ov = old_label
+        parts.append(f"{k}: {str(ov if ov is not None else '')[:40]!r} → {str(v)[:40]!r}")
+    return "; ".join(parts)
 
 
 async def _handle_admin_edit_entity(ws, session: dict, msg: dict) -> None:
@@ -4332,6 +4689,7 @@ async def _handle_admin_edit_entity(ws, session: dict, msg: dict) -> None:
                     cur = {}
             if not isinstance(cur, dict):
                 cur = {}
+            old = {str(k): cur.get(str(k)) for k in patch}
             for k, v in patch.items():
                 cur[str(k)] = v
             conn.execute(
@@ -4340,8 +4698,10 @@ async def _handle_admin_edit_entity(ws, session: dict, msg: dict) -> None:
                 (eid, json.dumps(cur)))
             conn.commit()
         _broadcast({"type": "entity_data_edit", "id": eid, "data": cur})
+        _audit(session, "edit", eid, "npc" if eid.startswith("n:") else "",
+               label=str(cur.get("npc_name", "") or _client_label(msg) or eid),
+               detail=_edit_detail(old, patch, _client_label(msg)))
         await _admin_confirm(ws, "Edited entity.")
-        print(f"[admin] {session['username']} data-edited {eid} fields={list(patch.keys())}")
         return
     with _db() as conn:
         row = conn.execute(
@@ -4358,14 +4718,22 @@ async def _handle_admin_edit_entity(ws, session: dict, msg: dict) -> None:
             data = {}
         # Merge the changed fields. Admin-gated, so we trust the keys, but keep
         # values JSON-serialisable (the client only ever sends scalars/strings).
+        old = {str(k): data.get(str(k)) for k in patch}
+        old_label = _entity_label(data, str(row["subtype"]))
         for k, v in patch.items():
             data[str(k)] = v
         kind = str(row["kind"])
         subtype = str(row["subtype"])
+        # An NPC's subtype IS its npc_type — keep the column in step when the
+        # Inspect editor changes the type, so a re-place/undelete stays right.
+        if kind == "npc" and str(data.get("npc_type", "") or ""):
+            subtype = str(data["npc_type"])
         x = float(row["x"]); y = float(row["y"])
-        conn.execute("UPDATE world_entities SET data=? WHERE id=?",
-                     (json.dumps(data), eid))
+        conn.execute("UPDATE world_entities SET data=?, subtype=? WHERE id=?",
+                     (json.dumps(data), subtype, eid))
         conn.commit()
+    _audit(session, "edit", eid, kind, subtype, _entity_label(data, subtype), x, y,
+           detail=_edit_detail(old, patch, old_label))
     # Tear the old node down on every client, then re-add the fresh one.
     _broadcast({"type": "world_entity_remove", "id": eid})
     if kind == "monster":
@@ -4768,6 +5136,82 @@ def _find_target_session(target: str):
     return _session_by_username(target)
 
 
+def _item_catalog() -> dict:
+    """Every real item id the server knows → {name, color}, built from the
+    authoritative tables: baked recipes / node drops / monster + sea loot / fish,
+    the shop catalog, farm crops, quest rewards and the explicit price table.
+    Backs the admin item picker and the give-item id check, so a typo can no
+    longer mint a junk item. Rebuilt per call (admin-only, rare) so a fresh
+    bake shows up immediately."""
+    out: dict = {}
+
+    def put(iid, name="", color=None):
+        iid = str(iid or "")
+        if not iid or iid.startswith("_"):
+            return
+        cur = out.setdefault(iid, {"name": "", "color": None})
+        if name and not cur["name"]:
+            cur["name"] = str(name)
+        if color and not cur["color"]:
+            cur["color"] = _color_to_list(color)
+
+    for r in craft_recipes.values():
+        if isinstance(r, dict):
+            put(r.get("out_id"), r.get("out_name"), r.get("out_color"))
+            for inp in r.get("input", []):
+                if isinstance(inp, dict):
+                    put(inp.get("id"), inp.get("name"))
+    for n in node_drops.values():
+        if isinstance(n, dict):
+            put(n.get("drop_id"), n.get("drop_name"), n.get("color"))
+        elif isinstance(n, list):   # _forage_seeds
+            for s in n:
+                if isinstance(s, dict):
+                    put(s.get("seed"), s.get("seed_name"), s.get("color"))
+    for m in list(monster_loot.values()) + list(sea_loot.values()):
+        if not isinstance(m, dict):
+            continue
+        for e in m.get("loot", []):
+            if isinstance(e, dict):
+                put(e.get("id"), e.get("name"), e.get("color"))
+        for k in ("boot", "gem"):
+            if isinstance(m.get(k), dict):
+                put(m[k].get("id"), m[k].get("name"), m[k].get("color"))
+        for t in m.get("tiers", []):
+            if isinstance(t, list) and len(t) >= 4:
+                put(t[1], t[2], t[3])
+    for fid, f in fish_species.items():
+        if isinstance(f, dict):
+            put(fid, f.get("name"), f.get("color"))
+    for shop in _SHOPS_PY.values():
+        for e in shop.get("stock_template", []):
+            put(e.get("id"), e.get("name"), e.get("color"))
+    for crop in FARM_CROP_OF.values():
+        put(crop.get("id"), crop.get("name"))
+    for q in _QUESTS_PY.values():
+        for e in q.get("rewards", {}).get("items", []):
+            if isinstance(e, dict):
+                put(e.get("id"), e.get("name"), e.get("color"))
+    for iid in _BASE_PRICES_EXPLICIT:
+        put(iid)
+    for iid, d in out.items():
+        if not d["name"]:
+            d["name"] = iid.replace("_", " ").title()
+        if not d["color"]:
+            d["color"] = [0.7, 0.7, 0.7, 1.0]
+    return out
+
+
+async def _handle_admin_item_catalog(ws, session: dict, _msg: dict) -> None:
+    """Admin item picker feed: the full known-item list, sorted by name."""
+    if not _is_admin(session):
+        return
+    cat = _item_catalog()
+    items = sorted(({"id": k, "name": v["name"], "color": v["color"]} for k, v in cat.items()),
+                   key=lambda e: e["name"].lower())
+    await _send(ws, {"type": "admin_item_catalog", "items": items})
+
+
 async def _handle_admin_give_item(ws, session: dict, msg: dict) -> None:
     if not _is_admin(session):
         return
@@ -4779,6 +5223,18 @@ async def _handle_admin_give_item(ws, session: dict, msg: dict) -> None:
     if not target or not item_id or qty <= 0:
         await _admin_confirm(ws, "Usage: target+item_id+qty required.")
         return
+    # Server-side id check: only real items (token-upgraded gear "id~uN" counts
+    # as its base piece). Name + colour come from the server's own tables, not
+    # the client, so a give always lands as the proper item.
+    cat = _item_catalog()
+    known = cat.get(item_id.split("~u", 1)[0])
+    if known is None:
+        close = difflib.get_close_matches(item_id, list(cat.keys()), n=3, cutoff=0.6)
+        await _admin_confirm(ws, f"Unknown item id '{item_id}' — nothing given."
+                                 + (f" Did you mean: {', '.join(close)}?" if close else
+                                    " Pick it from the Items tab list."))
+        return
+    name, color = known["name"], known["color"]
     tws, tsession = _find_target_session(target)
     if tsession is None:
         await _admin_confirm(ws, f"{target} is not online.")
@@ -4786,6 +5242,9 @@ async def _handle_admin_give_item(ws, session: dict, msg: dict) -> None:
     inv = tsession.get("inventory", [])
     added = _inv_add_qty(inv, item_id, name, qty, color)
     tsession["inventory"] = inv
+    # Session-only grant → record it in the save ledger, or the player's next
+    # save caps it away as an injection.
+    _grant_to_session(tsession, item_id, name, color, "", 0, added)
     if tws is not None:
         await _push_inventory_to(tws, inv)
     await _admin_confirm(ws, f"Gave {added}× {name} to {target}"
@@ -5122,6 +5581,26 @@ _SEASON_RESET_TABLES = {
 }
 
 
+def _backup_db(tag: str) -> Path:
+    """WAL-safe snapshot of the live DB via SQLite's online backup API (a plain
+    file copy misses pages still sitting in game_server.db-wal). The copy is
+    integrity-checked before it's trusted; raises on any failure."""
+    # game_server.db.<tag>_<ts> — matches the .gitignore `game_server.db*` rule
+    # (it holds account hashes) and sits beside the manual .bak_ copies.
+    dest = DB_PATH.with_name(f"{DB_PATH.name}.{tag}_{time.strftime('%Y%m%d_%H%M%S')}")
+    src = sqlite3.connect(DB_PATH)
+    dst = sqlite3.connect(dest)
+    try:
+        src.backup(dst)
+        ok = dst.execute("PRAGMA quick_check").fetchone()[0]
+    finally:
+        dst.close()
+        src.close()
+    if ok != "ok":
+        raise RuntimeError(f"backup {dest.name} failed quick_check: {ok}")
+    return dest
+
+
 async def _handle_admin_season_reset(ws, session: dict, msg: dict) -> None:
     if not _is_owner(session):
         await _admin_confirm(ws, "Season reset is owner-only.")
@@ -5130,14 +5609,17 @@ async def _handle_admin_season_reset(ws, session: dict, msg: dict) -> None:
     if not isinstance(fields, list) or not fields:
         await _admin_confirm(ws, "Season reset: nothing selected.")
         return
-    # Safety net — snapshot the DB before a destructive wipe.
+    # Safety net — snapshot the DB before a destructive wipe. No verified
+    # backup, no reset.
     try:
-        import shutil
-        backup = DB_PATH.with_suffix(f".pre_reset_{int(time.time())}.db")
-        shutil.copy2(DB_PATH, backup)
+        backup = _backup_db("pre_reset")
         print(f"[reset] backed up DB → {backup.name}")
     except Exception as e:
         print(f"[reset] backup failed: {e}")
+        await _admin_confirm(ws, f"Season reset ABORTED — the safety backup failed ({e}). "
+                                 "Nothing was changed.")
+        return
+    _audit(session, "season_reset", detail=f"fields={fields} backup={backup.name}")
     done: list = []
     set_clauses = [_SEASON_RESET_COLS[f][0] for f in fields if f in _SEASON_RESET_COLS]
     with _db() as conn:
@@ -5222,6 +5704,7 @@ async def _handle_admin_restore_last_loss(ws, session: dict, msg: dict) -> None:
     added = _inv_add_qty(inv, row["item_id"], row["item_name"],
                          int(row["quantity"]), color)
     tsession["inventory"] = inv
+    _grant_to_session(tsession, row["item_id"], row["item_name"], color, "", 0, added)
     try:
         with _db() as conn:
             conn.execute(
@@ -5417,30 +5900,41 @@ def _stock_to_int(stock_floats: dict) -> dict:
     return {iid: int(qty) for iid, qty in stock_floats.items()}
 
 
+def _npc_shop_ids(conn) -> dict:
+    """npc_id → shop_id for every NPC that trades: admin-placed NPCs carry it in
+    world_entities.data; seeded NPCs ("n:<row>") take it from an admin edit
+    override (entity_edits.data) or else from the registry."""
+    out: dict = dict(_SEED_NPC_SHOPS)
+    rows = conn.execute("SELECT id, data FROM entity_edits WHERE id LIKE 'n:%' "
+                        "AND data IS NOT NULL AND data != ''").fetchall()
+    rows += conn.execute("SELECT id, data FROM world_entities WHERE kind='npc'").fetchall()
+    for r in rows:
+        try:
+            d = json.loads(r["data"] or "{}")
+        except Exception:
+            continue
+        if isinstance(d, dict) and "shop_id" in d:
+            sid = str(d.get("shop_id", ""))
+            if sid:
+                out[str(r["id"])] = sid
+            else:
+                out.pop(str(r["id"]), None)
+    return out
+
+
 def _load_shop_stock_from_disk() -> None:
     """Populate `shopkeeper_state` from the shop_stock table. Post-
     consolidation SQLite is the only store; the legacy JSON was migrated to
     .bak by migration v3. Stock rows group by npc_id; each shop's shop_id is
-    looked up from world_entities (where admin-placed shopkeepers live)."""
+    resolved by _npc_shop_ids (admin data, seed edits, then the registry).
+    Items a template gained since the last save start fully stocked."""
     global shopkeeper_state
     try:
         with _db() as conn:
             stock_rows = conn.execute(
                 "SELECT npc_id, item_id, quantity, last_restock "
                 "FROM shop_stock").fetchall()
-            # Best-known shop_id per NPC lives in world_entities.data JSON.
-            we_rows = conn.execute(
-                "SELECT id, data FROM world_entities WHERE kind='npc'"
-            ).fetchall()
-        npc_to_shop: dict = {}
-        for r in we_rows:
-            try:
-                d = json.loads(r["data"] or "{}")
-                sid = str(d.get("shop_id", ""))
-                if sid:
-                    npc_to_shop[str(r["id"])] = sid
-            except Exception:
-                continue
+            npc_to_shop = _npc_shop_ids(conn)
         grouped: dict = {}
         latest_restock: dict = {}
         for r in stock_rows:
@@ -5453,6 +5947,8 @@ def _load_shop_stock_from_disk() -> None:
             shop_id = npc_to_shop.get(npc_id, "")
             if shop_id not in _SHOPS_PY:
                 continue
+            for entry in _SHOPS_PY[shop_id].get("stock_template", []):
+                stock.setdefault(str(entry["id"]), float(entry["max"]))
             shopkeeper_state[npc_id] = {
                 "shop_id":         shop_id,
                 "current_stock":   stock,
@@ -5565,6 +6061,14 @@ async def _handle_shop_open(ws, session: dict, msg: dict) -> None:
     if not _player_near_npc(session, npc_id):
         await _send(ws, {"type": "shop_result", "ok": False,
                          "reason": "You're too far from the shopkeeper."})
+        return
+    # The shop must be THIS NPC's shop (a client can't open the gem vendor's
+    # stock at the fishmonger). NPCs we can't resolve keep the old behaviour.
+    with _db() as conn:
+        expected = _npc_shop_ids(conn).get(npc_id, "")
+    if expected and expected != shop_id:
+        await _send(ws, {"type": "shop_result", "ok": False,
+                         "reason": "This merchant doesn't sell that."})
         return
     st = _get_or_seed_shop_state(npc_id, shop_id)
     # Read skill_xp for the sell-back multiplier snapshot.
@@ -9370,34 +9874,35 @@ def _world_eater_tick() -> None:
         _broadcast({"type": "world_entity_move", "id": we_id, "x": nx, "y": ny})
 
 
-# NPC name → town_id. Used by the shop tax skim AND by reputation (Phase 5a) to
-# resolve which town a QUEST belongs to from its giver_npc. Mirrors the
-# client-side `Lore.town_of_npc` table — keep both in sync.
-_NPC_TO_TOWN = {
-    # Bjorn's Landing
-    "Sea Captain Valdis": "bjorn",
-    "Fish Trader Knud": "bjorn",
-    "Sigrid the Fishmonger": "bjorn",
-    "Merchant Eydis": "bjorn",
-    # Kjelvik
-    "Elder Bjarne": "kjelvik",
-    "Trader Hroar": "kjelvik",
-    "Merchant Dalla": "kjelvik",
-    "Old Brynjar": "kjelvik",
-    # Frostheim
-    "Hunter Ragnhild": "frostheim",
-    "Merchant Bera": "frostheim",
-    "Brynhildr the Apothecary": "frostheim",
-    # Ironwood Keep
-    "Blacksmith Ulfr": "ironwood",
-    "Trader Thorvald": "ironwood",
-    "Torsten the Wanderer": "ironwood",
-    "Ironwood Hermit Skade": "ironwood",
-    # Eastmark Post
-    "Scout Halfdan": "eastmark",
-    "Wandering Merchant Freyja": "eastmark",
-    "Captain Sten": "eastmark",
-}
+# Named-NPC registry — read from scripts/data/NpcRegistry.gd, the ONE table the
+# client also uses (Lore.town_of_npc, seeded shops). name → {town, seed?, shop?}.
+_NPC_REGISTRY = _load_gd_json_block("data/NpcRegistry.gd",
+                                    "# BEGIN_NPC_REGISTRY_JSON", "# END_NPC_REGISTRY_JSON")
+# NPC name → town_id. Used by the shop tax skim, the "murdered townsfolk"
+# penalty AND reputation (Phase 5a) to resolve which town a QUEST belongs to
+# from its giver_npc.
+_NPC_TO_TOWN = {name: str(d.get("town", "")) for name, d in _NPC_REGISTRY.items()
+                if isinstance(d, dict) and d.get("town")}
+# Seeded NPC id ("n:<row>") → name / shop. The server has no copy of World._NPCS,
+# so this is how it knows a seeded shopkeeper's name (tax) and shop (stock reload).
+_SEED_NPC_NAMES = {f"n:{int(d['seed'])}": name for name, d in _NPC_REGISTRY.items()
+                   if isinstance(d, dict) and "seed" in d}
+_SEED_NPC_SHOPS = {f"n:{int(d['seed'])}": str(d["shop"]) for name, d in _NPC_REGISTRY.items()
+                   if isinstance(d, dict) and "seed" in d and d.get("shop")}
+
+
+def _check_quest_npc_names() -> list:
+    """Quest giver / talk-target names that are missing from the registry (their
+    quests would earn no town standing). Printed at startup; returned for tests."""
+    missing = set()
+    for q in _QUESTS_PY.values():
+        names = [str(q.get("giver_npc", ""))]
+        names += [str(o.get("target_id", "")) for o in q.get("objectives", [])
+                  if o.get("type") == "talk"]
+        missing.update(n for n in names if n and n not in _NPC_REGISTRY)
+    for n in sorted(missing):
+        print(f"[data] !! quest NPC '{n}' is not in NpcRegistry.gd — no town standing for its quests")
+    return sorted(missing)
 
 
 def _town_of_npc(npc_name: str) -> str:
@@ -9406,9 +9911,10 @@ def _town_of_npc(npc_name: str) -> str:
 
 
 def _town_of_shopkeeper(npc_id: str, npc_name: str) -> str:
-    """Resolve a shopkeeper's town_id for tax-skim lookups. We map by NPC
-    name; npc_id is kept in the signature for future per-shop overrides."""
-    return _town_of_npc(npc_name)
+    """Resolve a shopkeeper's town_id for tax-skim lookups by NPC name. Seeded
+    shopkeepers ("n:<row>") have no world_entities row, so their name comes
+    from the registry's seed index."""
+    return _town_of_npc(npc_name or _SEED_NPC_NAMES.get(npc_id, ""))
 
 
 # ── Kjelvik castle safe zone (Phase 5b) ──────────────────────────────────────
@@ -9632,15 +10138,20 @@ def _is_town_wall_structure(st: dict) -> bool:
 town_repairers: dict = {}
 
 
+def _wall_repairer_entity(eid: str, x: float, y: float) -> dict:
+    """Wire entity for a Wall-Keeper — shared by the live broadcast and the
+    login/spectate burst, so a player who joins mid-repair sees it too."""
+    return {"id": eid, "kind": "npc", "subtype": "worker", "x": x, "y": y,
+            "data": {"npc_type": "worker", "npc_name": "Wall-Keeper",
+                     "wander_radius": 0.0, "quest_text": "", "shop_id": ""}}
+
+
 def _ensure_wall_repairer(town: str, wx: float, wy: float) -> None:
     rx, ry = wx + 40.0, wy + 40.0   # stand a step off the wall so it doesn't overlap
     cur = town_repairers.get(town)
     if cur is None:
         eid = "wr:" + town
-        _broadcast({"type": "world_entity_add", "entity": {
-            "id": eid, "kind": "npc", "subtype": "worker", "x": rx, "y": ry,
-            "data": {"npc_type": "worker", "npc_name": "Wall-Keeper",
-                     "wander_radius": 0.0, "quest_text": "", "shop_id": ""}}})
+        _broadcast({"type": "world_entity_add", "entity": _wall_repairer_entity(eid, rx, ry)})
         town_repairers[town] = {"eid": eid, "x": rx, "y": ry}
     elif abs(cur["x"] - rx) > 8.0 or abs(cur["y"] - ry) > 8.0:
         _broadcast({"type": "world_entity_move", "id": cur["eid"], "x": rx, "y": ry})
@@ -13983,6 +14494,14 @@ async def _handle_admin_grant_thrall(ws, session, msg: dict) -> None:
     await _admin_confirm(ws, f"Granted a Tier {tier} thrall to {target}.")
 
 
+async def _dispatch_message(ws, session, mtype: str, msg: dict) -> None:
+    """Route one message, then — for Accounts-tab actions — re-send the account
+    list (with the admin's search) so the tab shows the result on the reply."""
+    await _route_message(ws, session, mtype, msg)
+    if mtype in _ACCOUNT_LIST_ACTIONS and session is not None:
+        await _handle_admin_list_accounts(ws, session, {"query": msg.get("query", "")})
+
+
 async def _route_message(ws, session, mtype: str, msg: dict) -> None:
     if mtype == "register":
         await _handle_register(ws, msg)
@@ -14088,29 +14607,35 @@ async def _route_message(ws, session, mtype: str, msg: dict) -> None:
             if text.startswith("/ally ") or text == "/unally":
                 await _handle_ally_command(ws, session, text)
                 return
-            if text == "/wipemonsters":
-                await _handle_admin_wipemonsters(ws, session)
+            if text in ("/wipemonsters", "/wipemonsters confirm"):
+                await _handle_admin_wipemonsters(ws, session, text.endswith(" confirm"))
                 return
             # /tokens <player> <amount> — admin grant PvP Tokens (Phase 1d),
             # for testing upgrades before the PvP kill loop lands (Phase 8).
-            if text.startswith("/tokens "):
-                parts = text.split()
-                if _is_admin(session) and len(parts) >= 3:
-                    try:
+            # Typos get a clear usage line (admins only — players never learn
+            # the command exists); a bare "/tokens" no longer leaks to chat.
+            if text == "/tokens" or text.startswith("/tokens "):
+                if _is_admin(session):
+                    err = _admin_cmd_args_error(text.split(), "/tokens <player> <amount>",
+                                                "amount", None, None)
+                    if err:
+                        await _admin_confirm(ws, err)
+                    else:
+                        parts = text.split()
                         await _handle_admin_tokens(ws, session, {
                             "target": parts[1], "amount": int(parts[2])})
-                    except ValueError:
-                        await _admin_confirm(ws, "Usage: /tokens <player> <amount>")
                 return
             # /thrall <player> <tier> — admin grant a thrall for testing (Phase 10).
-            if text.startswith("/thrall "):
-                parts = text.split()
-                if _is_admin(session) and len(parts) >= 3:
-                    try:
+            if text == "/thrall" or text.startswith("/thrall "):
+                if _is_admin(session):
+                    err = _admin_cmd_args_error(text.split(), "/thrall <player> <tier 1-6>",
+                                                "tier", 1, 6)
+                    if err:
+                        await _admin_confirm(ws, err)
+                    else:
+                        parts = text.split()
                         await _handle_admin_grant_thrall(ws, session, {
                             "target": parts[1], "tier": int(parts[2])})
-                    except ValueError:
-                        await _admin_confirm(ws, "Usage: /thrall <player> <tier 1-6>")
                 return
             # /rep <player> <town> <amount> — admin standing grant (Phase 5a).
             if text.startswith("/rep "):
@@ -14178,6 +14703,12 @@ async def _route_message(ws, session, mtype: str, msg: dict) -> None:
         await _handle_admin_place(ws, session, msg)
     elif mtype == "admin_delete":
         await _handle_admin_delete(ws, session, msg)
+    elif mtype == "admin_undelete":
+        await _handle_admin_undelete(ws, session, msg)
+    elif mtype == "admin_audit_list":
+        await _handle_admin_audit_list(ws, session, msg)
+    elif mtype == "admin_restore_entity":
+        await _handle_admin_restore_entity(ws, session, msg)
     elif mtype == "admin_move":
         await _handle_admin_move(ws, session, msg)
     elif mtype == "admin_rotate":
@@ -14196,6 +14727,10 @@ async def _route_message(ws, session, mtype: str, msg: dict) -> None:
         await _handle_admin_spawn(ws, session, msg)
     elif mtype == "admin_give_item":
         await _handle_admin_give_item(ws, session, msg)
+    elif mtype == "admin_item_catalog":
+        await _handle_admin_item_catalog(ws, session, msg)
+    elif mtype == "admin_set_rank":
+        await _handle_admin_set_rank(ws, session, msg)
     elif mtype == "admin_take_item":
         await _handle_admin_take_item(ws, session, msg)
     elif mtype == "admin_view_inventory":
@@ -14359,7 +14894,7 @@ async def handle_connection(ws) -> None:
             # A handler raising must NOT drop the player's connection — log it and
             # keep the socket alive so one bad message can't kick them offline.
             try:
-                await _route_message(ws, session, mtype, msg)
+                await _dispatch_message(ws, session, mtype, msg)
             except websockets.exceptions.ConnectionClosed:
                 raise
             except Exception as e:
@@ -14446,6 +14981,9 @@ async def main() -> None:
     # Shop stock rehydrates from JSON before clients connect — the very first
     # shop_open after a restart returns the persisted stock, not the template max.
     _load_shop_stock_from_disk()
+    print(f"[data] {len(_SHOPS_PY)} shops (ShopCatalog.gd), "
+          f"{len(_NPC_REGISTRY)} named NPCs (NpcRegistry.gd)")
+    _check_quest_npc_names()
     # Farm plot state — same pattern: reload persisted plot timers so
     # crops that were mid-growth at shutdown resume from where they were.
     _load_farm_plots_from_disk()
@@ -14511,7 +15049,10 @@ async def main() -> None:
     print(f"VikingVale server  ws://0.0.0.0:{PORT}")
     print("[server-build] spectate-relay+mime-gather · 2026-08-23")
     print("Press Ctrl+C to stop.\n")
-    async with serve(handle_connection, "0.0.0.0", PORT) as server:
+    # open_timeout: a client opens its socket while it's still loading the world
+    # and can't finish the handshake until its first frame (~18 s on a cold
+    # start). The 10 s default dropped it ("Cannot reach server").
+    async with serve(handle_connection, "0.0.0.0", PORT, open_timeout=30) as server:
         # Background loops run as tasks so we can wait on the shutdown signal
         # instead of blocking forever in gather(). serve_forever() is a task
         # too; it's cancelled below once we've flushed saves.

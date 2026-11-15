@@ -629,17 +629,58 @@ func send_admin_place(kind: String, subtype: String, x: float, y: float, data: D
 		_send({"type": "admin_place", "kind": kind, "subtype": subtype,
 			   "x": x, "y": y, "data": data})
 
-func send_admin_delete(entity_id: String) -> void:
+## `label` = the entity's display name, for the server's audit log (the server
+## can't name seeded NPCs on its own — their roster lives in World._NPCS).
+func send_admin_delete(entity_id: String, label: String = "") -> void:
 	if state == NetState.LOGGED_IN:
-		_send({"type": "admin_delete", "id": entity_id})
+		_send({"type": "admin_delete", "id": entity_id, "label": label})
 
-func send_admin_move(entity_id: String, x: float, y: float) -> void:
-	if state == NetState.LOGGED_IN:
-		_send({"type": "admin_move", "id": entity_id, "x": x, "y": y})
+## Un-delete a seeded NPC (n:<index>) back to its home spot and seed defaults.
+func send_admin_restore_entity(entity_id: String, label: String = "") -> void:
+	if state == NetState.LOGGED_IN and entity_id.begins_with("n:"):
+		_send({"type": "admin_restore_entity", "id": entity_id, "label": label})
 
-func send_admin_rotate(entity_id: String, rot: float) -> void:
+## Undo a delete exactly as it was (same id/data/position) — by entity id (its
+## newest delete) or by an audit-log row id from the Recently deleted list.
+func send_admin_undelete(entity_id: String, audit_id: int = -1) -> void:
+	if state != NetState.LOGGED_IN:
+		return
+	var m := {"type": "admin_undelete", "id": entity_id}
+	if audit_id >= 0:
+		m["audit_id"] = audit_id
+	_send(m)
+
+## Ask for the admin audit log (recent activity + still-deleted entries).
+func send_admin_audit_list() -> void:
 	if state == NetState.LOGGED_IN:
-		_send({"type": "admin_rotate", "id": entity_id, "rot": rot})
+		_send({"type": "admin_audit_list"})
+
+## Keep entity_edits_cache in step with live edits, so a 2D↔3D switch (which
+## replays the cache) and the admin NPC roster both see the current state.
+## `patch` keys: deleted / x / y / data. `remove` drops the row (a restore).
+func _update_edit_cache(entity_id: String, patch: Dictionary, remove: bool = false) -> void:
+	if entity_id.is_empty():
+		return
+	for i in range(entity_edits_cache.size()):
+		var row: Dictionary = entity_edits_cache[i]
+		if str(row.get("id", "")) == entity_id:
+			if remove:
+				entity_edits_cache.remove_at(i)
+			else:
+				row.merge(patch, true)
+			return
+	if not remove:
+		var fresh: Dictionary = {"id": entity_id, "deleted": false, "x": null, "y": null, "rot": 0.0}
+		fresh.merge(patch, true)
+		entity_edits_cache.append(fresh)
+
+func send_admin_move(entity_id: String, x: float, y: float, label: String = "") -> void:
+	if state == NetState.LOGGED_IN:
+		_send({"type": "admin_move", "id": entity_id, "x": x, "y": y, "label": label})
+
+func send_admin_rotate(entity_id: String, rot: float, label: String = "") -> void:
+	if state == NetState.LOGGED_IN:
+		_send({"type": "admin_rotate", "id": entity_id, "rot": rot, "label": label})
 
 ## Live property edit of an admin-placed (a:) entity — `patch` carries only the
 ## changed data fields (level, display_name, quest_text, shop_id, …). The server
@@ -753,10 +794,22 @@ func send_admin_list_players() -> void:
 		return
 	_send({"type": "admin_list_players"})
 
+## Admin item picker — the server replies with every known item id
+## (admin_item_catalog → Events.admin_item_catalog_received).
+func send_admin_item_catalog() -> void:
+	if state != NetState.LOGGED_IN:
+		return
+	_send({"type": "admin_item_catalog"})
+
 # Admin Accounts tab (Phase E)
+## The Accounts tab's current search. Account actions carry it so the server can
+## re-send the (filtered) list the moment the action is done.
+var admin_accounts_query: String = ""
+
 func send_admin_list_accounts(query: String = "") -> void:
 	if state != NetState.LOGGED_IN:
 		return
+	admin_accounts_query = query
 	_send({"type": "admin_list_accounts", "query": query})
 
 func send_admin_reset_password(username: String) -> void:
@@ -767,12 +820,12 @@ func send_admin_reset_password(username: String) -> void:
 func send_admin_unlock_account(username: String) -> void:
 	if state != NetState.LOGGED_IN:
 		return
-	_send({"type": "admin_unlock_account", "username": username})
+	_send({"type": "admin_unlock_account", "username": username, "query": admin_accounts_query})
 
 func send_admin_verify_email(username: String) -> void:
 	if state != NetState.LOGGED_IN:
 		return
-	_send({"type": "admin_verify_email", "username": username})
+	_send({"type": "admin_verify_email", "username": username, "query": admin_accounts_query})
 
 ## Owner-only PERMANENT account deletion. Server re-checks _is_owner + refuses
 ## to delete the owner/self; the Accounts tab gates this behind a type-the-name
@@ -780,7 +833,14 @@ func send_admin_verify_email(username: String) -> void:
 func send_admin_delete_account(username: String) -> void:
 	if state != NetState.LOGGED_IN:
 		return
-	_send({"type": "admin_delete_account", "username": username})
+	_send({"type": "admin_delete_account", "username": username, "query": admin_accounts_query})
+
+## Owner-only Promote ("admin") / Demote ("") — same rules as /promote, /demote.
+func send_admin_set_rank(username: String, rank: String) -> void:
+	if state != NetState.LOGGED_IN:
+		return
+	_send({"type": "admin_set_rank", "username": username, "rank": rank,
+		"query": admin_accounts_query})
 
 ## Owner-only mapper rank management — the Accounts tab surfaces these
 ## via per-row Grant / Revoke buttons. The server enforces owner-only;
@@ -849,12 +909,12 @@ func send_farm_harvest(entity_id: String) -> void:
 func send_admin_grant_mapper(username: String) -> void:
 	if state != NetState.LOGGED_IN:
 		return
-	_send({"type": "admin_grant_mapper", "username": username})
+	_send({"type": "admin_grant_mapper", "username": username, "query": admin_accounts_query})
 
 func send_admin_revoke_mapper(username: String) -> void:
 	if state != NetState.LOGGED_IN:
 		return
-	_send({"type": "admin_revoke_mapper", "username": username})
+	_send({"type": "admin_revoke_mapper", "username": username, "query": admin_accounts_query})
 
 func send_admin_upload_terrain(bitmap_b64: String) -> void:
 	if state != NetState.LOGGED_IN:
@@ -2131,12 +2191,25 @@ func _handle(msg: Dictionary) -> void:
 			Events.entity_edits_received.emit(entity_edits_cache)
 
 		"entity_edit":
-			Events.entity_edit_applied.emit(str(msg.get("id", "")),
+			var ee_id := str(msg.get("id", ""))
+			if bool(msg.get("deleted", false)):
+				_update_edit_cache(ee_id, {"deleted": true})
+			else:
+				_update_edit_cache(ee_id, {"deleted": false,
+					"x": float(msg.get("x", 0.0)), "y": float(msg.get("y", 0.0))})
+			Events.entity_edit_applied.emit(ee_id,
 				bool(msg.get("deleted", false)),
 				float(msg.get("x", 0.0)), float(msg.get("y", 0.0)))
 
+		"entity_restore":
+			var er_id := str(msg.get("id", ""))
+			_update_edit_cache(er_id, {}, true)
+			Events.entity_restored.emit(er_id)
+
 		"entity_data_edit":
 			var ded: Variant = msg.get("data", {})
+			if ded is Dictionary:
+				_update_edit_cache(str(msg.get("id", "")), {"data": (ded as Dictionary).duplicate(true)})
 			Events.entity_data_edited.emit(str(msg.get("id", "")),
 				(ded as Dictionary) if ded is Dictionary else {})
 
@@ -2160,6 +2233,16 @@ func _handle(msg: Dictionary) -> void:
 					if item is Dictionary:
 						GameManager.inventory.append(item as Dictionary)
 				Events.inventory_changed.emit()
+
+		"admin_deleted":
+			Events.admin_entity_deleted.emit(str(msg.get("id", "")), str(msg.get("label", "")))
+
+		"admin_undeleted":
+			Events.admin_entity_undeleted.emit(str(msg.get("id", "")), str(msg.get("label", "")))
+
+		"admin_audit":
+			Events.admin_audit_received.emit(msg.get("recent", []) as Array,
+				msg.get("deleted", []) as Array)
 
 		"admin_placed":
 			# Echo of a successful admin_place — carries the new a: id so the
@@ -2185,6 +2268,15 @@ func _handle(msg: Dictionary) -> void:
 					if r is Dictionary:
 						accounts.append(r as Dictionary)
 			Events.admin_account_list_received.emit(accounts)
+
+		"admin_item_catalog":
+			var craw: Variant = msg.get("items", [])
+			var cat: Array = []
+			if craw is Array:
+				for c: Variant in (craw as Array):
+					if c is Dictionary:
+						cat.append(c as Dictionary)
+			Events.admin_item_catalog_received.emit(cat)
 
 		"admin_inventory_view":
 			var iraw: Variant = msg.get("inventory", [])
