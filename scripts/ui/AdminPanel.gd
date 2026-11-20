@@ -15,6 +15,7 @@ const NpcRoster = preload("res://scripts/admin/NpcRoster.gd")
 const UITheme = preload("res://scripts/ui/UITheme.gd")
 const Boats   = preload("res://scripts/Boat.gd")
 const ShopCat = preload("res://scripts/ShopCatalog.gd")
+const InteractableScript = preload("res://scripts/Interactable.gd")
 const TILE := 32.0
 
 const PAINT_BIOMES: Array = [
@@ -327,6 +328,15 @@ var _hover_lbl: Label = null
 var _audit_dim: Control = null
 ## World-px of the entity when a Move drag started (source for the move undo).
 var _drag_old_pos: Vector2 = Vector2.ZERO
+## 1.7.5 (U): a drag started on a real entity, so its origin is known even at (0,0).
+var _drag_has_old: bool = false
+## 1.7.5 (U): undoable ops waiting for the server's admin_ack. req → {"push": entry}
+## (record the reverse op once accepted) or {"restore": entry} (an undo replay —
+## give the step back if the server refused it).
+var _pending_ops: Dictionary = {}
+var _req_seq: int = 0
+## 1.7.5 (H): gameplay footprint box drawn inside the hover box.
+var _hover_foot: Panel = null
 
 ## SEPARATE undo for tile PAINTING (biome only). Each entry is one paint stroke =
 ## an Array of {tx, ty, prior} (prior "" means the tile had no override → re-clear
@@ -355,6 +365,7 @@ func _ready() -> void:
 	Events.admin_item_catalog_received.connect(_on_item_catalog_received)
 	Events.admin_inventory_view_received.connect(_on_admin_inventory_view_received)
 	Events.admin_entity_placed.connect(_on_admin_entity_placed)
+	Events.admin_op_acked.connect(_on_admin_op_acked)
 	Events.entity_restored.connect(_on_npc_restored)
 	Events.admin_entity_deleted.connect(_on_admin_entity_deleted)
 	Events.admin_entity_undeleted.connect(_on_admin_entity_undeleted)
@@ -2148,6 +2159,40 @@ func _screen_to_world(screen_pos: Vector2) -> Vector2:
 func _world() -> Node:
 	return get_parent()
 
+## 1.7.5 (H): the entity under the cursor — smallest drawn box containing it, else
+## the nearest centre within 44 px (the old pick). Same call for hover and click,
+## so what is highlighted is exactly what a click hits.
+func _pick(wpos: Vector2, spos: Vector2 = Vector2(-1, -1)) -> String:
+	var w := _world() as Object
+	if w == null:
+		return ""
+	if spos.x < 0.0:
+		spos = get_viewport().get_mouse_position()
+	if w.has_method("admin_entity_pick"):
+		return str(w.call("admin_entity_pick", spos, wpos, 44.0))
+	return str(w.call("admin_entity_at", wpos, 44.0))
+
+func _next_req() -> int:
+	_req_seq += 1
+	return _req_seq
+
+## 1.7.5 (U): server verdict on a tagged move/rotate/edit.
+func _on_admin_op_acked(req: int, ok: bool, op: String) -> void:
+	if not _pending_ops.has(req):
+		return
+	var pend: Dictionary = _pending_ops[req]
+	_pending_ops.erase(req)
+	if pend.has("push"):
+		if ok:
+			_push_undo(pend["push"] as Dictionary)
+		else:
+			Events.chat_message.emit("[Admin] The server refused that %s — nothing changed." % op)
+	elif pend.has("restore") and not ok:
+		_undo_stack.append(pend["restore"])
+		_refresh_undo_btn()
+		Events.chat_message.emit("[Admin] Undo of that %s was refused — the step is kept (%d to undo)." % [
+			op, _undo_stack.size()])
+
 func _on_overlay_input(event: InputEvent) -> void:
 	if _mode == Mode.OFF:
 		return
@@ -2164,32 +2209,45 @@ func _on_overlay_input(event: InputEvent) -> void:
 			Mode.PLACE:
 				if mb.pressed: _place_at(wpos)
 			Mode.DELETE:
-				if mb.pressed: _delete_at(wpos)
+				if mb.pressed: _delete_at(wpos, mb.position)
 			Mode.INSPECT:
-				if mb.pressed: _inspect_at(wpos)
+				if mb.pressed: _inspect_at(wpos, mb.position)
 			Mode.MOVE:
 				if mb.pressed:
-					_drag_id = str((_world() as Object).call("admin_entity_at", wpos, 44.0))
+					_drag_id = _pick(wpos, mb.position)
+					_drag_has_old = false
+					_drag_pos = wpos
 					if _drag_id != "" and (_world() as Object).has_method("admin_entity_pos"):
 						_drag_old_pos = (_world() as Object).call("admin_entity_pos", _drag_id)
+						_drag_has_old = true   # picked a live entity: its origin is real, even (0,0)
 				elif _drag_id != "":
-					if _drag_old_pos != Vector2.ZERO:   # unknown origin → no bogus undo to (0,0)
-						_push_undo({"op": "move", "id": _drag_id,
-							"x": _drag_old_pos.x, "y": _drag_old_pos.y})
+					var req := _next_req()
+					if _drag_has_old:
+						_pending_ops[req] = {"push": {"op": "move", "id": _drag_id,
+							"x": _drag_old_pos.x, "y": _drag_old_pos.y}}
+					# 1.7.5 (V): a tree still showing its position-picked shape sends it,
+					# so the server stores it and the move keeps the look.
+					var vid := -1
+					if (_world() as Object).has_method("admin_entity_unpinned_variant"):
+						vid = int((_world() as Object).call("admin_entity_unpinned_variant", _drag_id))
 					NetworkManager.send_admin_move(_drag_id, _drag_pos.x, _drag_pos.y,
-						_entity_name(_drag_id))
+						_entity_name(_drag_id), req, vid)
 					_drag_id = ""
+					_drag_has_old = false
 			Mode.ROTATE:
 				# Click an entity to rotate it a step; server persists + syncs it.
 				if mb.pressed:
-					var rid := str((_world() as Object).call("admin_entity_at", wpos, 44.0))
+					var rid := _pick(wpos, mb.position)
 					if rid != "":
 						var step := (PI / 4.0) if mb.button_index == MOUSE_BUTTON_LEFT else -(PI / 4.0)
 						var cur := 0.0
 						if (_world() as Object).has_method("admin_entity_rot"):
 							cur = float((_world() as Object).call("admin_entity_rot", rid))
-						_push_undo({"op": "rotate", "id": rid, "rot": cur})
-						NetworkManager.send_admin_rotate(rid, cur + step, _entity_name(rid))
+						# Snap to the 45° grid so steps always land on a direction sprite.
+						var nxt := fposmod(snappedf(cur + step, PI / 4.0), TAU)
+						var req := _next_req()
+						_pending_ops[req] = {"push": {"op": "rotate", "id": rid, "rot": cur}}
+						NetworkManager.send_admin_rotate(rid, nxt, _entity_name(rid), req)
 			Mode.TILE, Mode.TINT, Mode.PASSABILITY:
 				_painting = mb.pressed
 				if mb.pressed:
@@ -2236,7 +2294,7 @@ func _on_overlay_input(event: InputEvent) -> void:
 			_paint_at(wpos)
 		elif _mode in [Mode.SCULPT_RAISE, Mode.SCULPT_LOWER] and _painting:
 			_sculpt_at(wpos, _mode == Mode.SCULPT_RAISE)
-		_update_hover(wpos)
+		_update_hover(wpos, (event as InputEventMouseMotion).position)
 		_update_brush_preview()
 
 ## Sculpt terrain height at a world px (3D client only; inert in 2D).
@@ -2256,6 +2314,11 @@ func _place_at(wpos: Vector2) -> void:
 	var data: Dictionary = (e["data"] as Dictionary).duplicate()
 	if str(e.get("kind", "")) == "monster" and _level_spin != null:
 		data["level"] = int(_level_spin.value)
+	# 1.7.5 (V): every placed Pine/Cherry/Oak stores its shape — a picked "Shape N"
+	# template, or the shape this spot would have given — so moving never changes it.
+	if str(data.get("type_str", "")) == "tree" and not data.has("variant_id") \
+			and str(data.get("display_name", "")) in ["Pine Tree", "Cherry Tree", "Oak Tree"]:
+		data["variant_id"] = InteractableScript.legacy_variant_index(wpos, 3)
 	NetworkManager.send_admin_place(str(e["kind"]), _subtype_of(e),
 		wpos.x, wpos.y, data)
 
@@ -2364,8 +2427,8 @@ func _subtype_of(e: Dictionary) -> String:
 		"npc":      return str(d.get("npc_type", ""))
 	return ""
 
-func _delete_at(wpos: Vector2) -> void:
-	var id := str((_world() as Object).call("admin_entity_at", wpos, 44.0))
+func _delete_at(wpos: Vector2, spos: Vector2 = Vector2(-1, -1)) -> void:
+	var id := _pick(wpos, spos)
 	if id == "":
 		return
 	var nm := _entity_name(id)
@@ -2467,13 +2530,20 @@ func _do_undo() -> void:
 			NetworkManager.send_admin_place(str(entry["kind"]), str(entry["subtype"]),
 				float(entry["x"]), float(entry["y"]), entry.get("data", {}))
 		"move":
+			var mreq := _next_req()
+			_pending_ops[mreq] = {"restore": entry}
 			NetworkManager.send_admin_move(str(entry["id"]),
-				float(entry["x"]), float(entry["y"]))
+				float(entry["x"]), float(entry["y"]), _entity_name(str(entry["id"])), mreq)
 		"rotate":
-			NetworkManager.send_admin_rotate(str(entry["id"]), float(entry["rot"]))
+			var rreq := _next_req()
+			_pending_ops[rreq] = {"restore": entry}
+			NetworkManager.send_admin_rotate(str(entry["id"]), float(entry["rot"]),
+				_entity_name(str(entry["id"])), rreq)
 		"edit":
+			var ereq := _next_req()
+			_pending_ops[ereq] = {"restore": entry}
 			NetworkManager.send_admin_edit_entity(str(entry["id"]),
-				entry.get("patch", {}) as Dictionary)
+				entry.get("patch", {}) as Dictionary, ereq)
 	_undoing = false
 	_refresh_undo_btn()
 	Events.chat_message.emit("[Admin] Undid last edit  (%d left)." % _undo_stack.size())
@@ -3161,8 +3231,8 @@ func _problem_row(p: Dictionary, dim: Control) -> VBoxContainer:
 ## INSPECT click: find the entity under the cursor, read its cached wire data
 ## from World, and open the property editor. Only admin-placed (a:) entities are
 ## editable — procedural entities have no per-field override on the server.
-func _inspect_at(wpos: Vector2) -> void:
-	var id := str((_world() as Object).call("admin_entity_at", wpos, 44.0))
+func _inspect_at(wpos: Vector2, spos: Vector2 = Vector2(-1, -1)) -> void:
+	var id := _pick(wpos, spos)
 	if id == "":
 		return
 	# Admin-placed (a:) AND pre-existing NPCs/bosses (n:/b:) are editable — the
@@ -3222,10 +3292,26 @@ func _open_entity_editor(id: String, info: Dictionary) -> void:
 			fields["wander_radius"] = _add_float_row(vb, "Wander px",
 				float(data.get("wander_radius", 32.0)), 0.0, 256.0)
 		_:
-			# resource / station / wall / farm_plot — generic props.
+			# resource / station / wall / farm_plot — generic props. The gameplay
+			# type is shown, never edited (1.7.5: seeded ones are editable too).
+			_add_ro_row(vb, "Type", str(data.get("type_str", subtype)))
+			if str(data.get("skill", "")) != "":
+				_add_ro_row(vb, "Skill", str(data["skill"]))
+			if str(data.get("wood", "")) != "":
+				_add_ro_row(vb, "Wood", str(data["wood"]))
 			fields["display_name"] = _add_str_row(vb, "Name", str(data.get("display_name", "")))
 			fields["level"]        = _add_int_row(vb, "Req level", int(data.get("level", 1)), 1, 99)
 			fields["action"]       = _add_str_row(vb, "Action", str(data.get("action", "Interact")))
+			var ca: Array = data.get("color", []) as Array if data.get("color") is Array else []
+			if ca.size() >= 3:
+				fields["color"] = _add_color_row(vb, "Colour", Color(float(ca[0]), float(ca[1]),
+					float(ca[2]), float(ca[3]) if ca.size() > 3 else 1.0))
+			if data.has("variant_id"):
+				fields["variant_id"] = _add_shape_row(vb, int(data["variant_id"]))
+			if data.has("rot"):
+				_add_ro_row(vb, "Rotation", "%d°" % roundi(rad_to_deg(float(data["rot"]))))
+			if subtype == "gate" or str(data.get("type_str", "")) == "gate":
+				_add_gate_controls(vb, id, data, dim)
 
 	var btn_row := HBoxContainer.new()
 	btn_row.add_theme_constant_override("separation", 8)
@@ -3253,8 +3339,9 @@ func _open_entity_editor(id: String, info: Dictionary) -> void:
 			var rev: Dictionary = {}
 			for k_v: Variant in patch.keys():
 				rev[str(k_v)] = (fields[str(k_v)] as Dictionary)["orig"]
-			_push_undo({"op": "edit", "id": id, "patch": rev})
-			NetworkManager.send_admin_edit_entity(id, patch)
+			var req := _next_req()
+			_pending_ops[req] = {"push": {"op": "edit", "id": id, "patch": rev}}
+			NetworkManager.send_admin_edit_entity(id, patch, req)
 			dim.queue_free()
 		var warns := _npc_edit_warnings(id, kind, data, subtype, patch) if kind == "npc" else []
 		if warns.is_empty():
@@ -3320,6 +3407,12 @@ func _collect_patch(fields: Dictionary) -> Dictionary:
 			"opt":
 				var ob := ctrl as OptionButton
 				new_val = ob.get_item_text(ob.selected)
+			"color":
+				var cc := (ctrl as ColorPickerButton).color
+				new_val = [snappedf(cc.r, 0.001), snappedf(cc.g, 0.001), snappedf(cc.b, 0.001),
+					snappedf(cc.a, 0.001)]
+			"shape":
+				new_val = (ctrl as OptionButton).selected
 			_:       continue
 		if new_val != f["orig"]:
 			patch[key] = new_val
@@ -3373,6 +3466,59 @@ func _add_opt_row(vb: VBoxContainer, label: String, value: String, options: Arra
 	ob.select(maxi(0, opts.find(value)))
 	row.add_child(ob)
 	return {"ctrl": ob, "type": "opt", "orig": ob.get_item_text(ob.selected)}
+
+## 1.7.5 gates: state line + admin Open / Close / Lock / Unlock. The server applies
+## them as an admin override (always allowed) and writes them to the admin log.
+## An admin Lock is a staff lock: players can't work the gate until staff unlock.
+func _add_gate_controls(vb: VBoxContainer, id: String, data: Dictionary, dim: Control) -> void:
+	var state := "Open" if bool(data.get("gate_open", false)) else "Closed"
+	if bool(data.get("gate_locked", false)):
+		var lwb := str(data.get("gate_lock_warband", "?"))
+		state += "  ·  locked by staff" if lwb == "__staff__" else "  ·  locked by warband %s" % lwb
+	_add_ro_row(vb, "Gate", state)
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 6)
+	vb.add_child(row)
+	for act: String in ["open", "close", "lock", "unlock"]:
+		var b := Button.new()
+		b.text = act.capitalize()
+		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		b.disabled = (act == "open" and bool(data.get("gate_open", false))) \
+			or (act == "close" and not bool(data.get("gate_open", false))) \
+			or (act == "lock" and bool(data.get("gate_locked", false))) \
+			or (act == "unlock" and not bool(data.get("gate_locked", false)))
+		b.pressed.connect(func() -> void:
+			NetworkManager.send_gate_action(id, act, _entity_name(id))
+			dim.queue_free())
+		row.add_child(b)
+
+## 1.7.5 (S): colour picker; the patch value is [r,g,b,a] like the stored data.
+func _add_color_row(vb: VBoxContainer, label: String, value: Color) -> Dictionary:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 6)
+	vb.add_child(row)
+	row.add_child(_editor_label(label))
+	var cp := ColorPickerButton.new()
+	cp.color = value
+	cp.custom_minimum_size = Vector2(60, 22)
+	cp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_child(cp)
+	return {"ctrl": cp, "type": "color", "orig": [snappedf(value.r, 0.001), snappedf(value.g, 0.001),
+		snappedf(value.b, 0.001), snappedf(value.a, 0.001)]}
+
+## 1.7.5 (V): tree shape picker (stored variant_id 0..2).
+func _add_shape_row(vb: VBoxContainer, value: int) -> Dictionary:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 6)
+	vb.add_child(row)
+	row.add_child(_editor_label("Shape"))
+	var ob := OptionButton.new()
+	ob.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	for i in range(3):
+		ob.add_item("Shape %d" % (i + 1))
+	ob.select(clampi(value, 0, 2))
+	row.add_child(ob)
+	return {"ctrl": ob, "type": "shape", "orig": ob.selected}
 
 func _add_text_row(vb: VBoxContainer, label: String, value: String) -> Dictionary:
 	vb.add_child(_editor_label(label))
@@ -3443,12 +3589,12 @@ func _make_tint_slider(label_text: String) -> HSlider:
 ## Ring + name tag on the entity a click would hit (DELETE red, others gold).
 ## Same pick as the click itself (admin_entity_at, 44 px), so what you see is
 ## exactly what you get. Hidden in every other mode.
-func _update_hover(wpos: Vector2) -> void:
+func _update_hover(wpos: Vector2, cursor: Vector2 = Vector2(-1, -1)) -> void:
 	var picking := _mode in [Mode.DELETE, Mode.MOVE, Mode.ROTATE, Mode.INSPECT]
 	var w := _world() as Object
 	var id := ""
 	if picking and w != null and w.has_method("admin_entity_at"):
-		id = _drag_id if _drag_id != "" else str(w.call("admin_entity_at", wpos, 44.0))
+		id = _drag_id if _drag_id != "" else _pick(wpos, cursor)
 	if _hover_ring == null:
 		_hover_ring = Panel.new()
 		_hover_ring.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -3460,13 +3606,23 @@ func _update_hover(wpos: Vector2) -> void:
 		_hover_lbl.add_theme_color_override("font_outline_color", Color(0, 0, 0))
 		_hover_lbl.add_theme_constant_override("outline_size", 4)
 		_overlay.add_child(_hover_lbl)
+	if _hover_foot == null:
+		_hover_foot = Panel.new()
+		_hover_foot.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		_overlay.add_child(_hover_foot)
 	var spos := Vector2(-1, -1)
 	if id != "" and w.has_method("admin_entity_screen_pos"):
 		spos = w.call("admin_entity_screen_pos", id)
-	if id == "" or spos.x < 0.0:
+	# 1.7.5 (H): real bounds — outer box = what is drawn (art), inner = gameplay
+	# click/collision footprint. Falls back to the old fixed ring.
+	var rects: Dictionary = {}
+	if id != "" and w.has_method("admin_entity_screen_rects"):
+		rects = w.call("admin_entity_screen_rects", id) as Dictionary
+	if id == "" or (spos.x < 0.0 and rects.is_empty()):
 		_hover_id = ""
 		_hover_ring.visible = false
 		_hover_lbl.visible = false
+		_hover_foot.visible = false
 		return
 	if id != _hover_id:
 		_hover_id = id
@@ -3475,14 +3631,31 @@ func _update_hover(wpos: Vector2) -> void:
 		sb.bg_color = Color(col.r, col.g, col.b, 0.12)
 		sb.border_color = col
 		sb.set_border_width_all(2)
-		sb.set_corner_radius_all(26)
+		sb.set_corner_radius_all(26 if rects.is_empty() else 3)
 		_hover_ring.add_theme_stylebox_override("panel", sb)
+		var fsb := StyleBoxFlat.new()
+		fsb.bg_color = Color(col.r, col.g, col.b, 0.22)
+		fsb.border_color = Color(1, 1, 1, 0.85)
+		fsb.set_border_width_all(1)
+		_hover_foot.add_theme_stylebox_override("panel", fsb)
 		var verb := {Mode.DELETE: "🗑 Delete", Mode.MOVE: "✥ Move",
 			Mode.ROTATE: "⟳ Rotate", Mode.INSPECT: "✎ Edit"}
 		_hover_lbl.text = "%s  %s  (%s)" % [str(verb.get(_mode, "")), _entity_name(id), id]
 		_hover_lbl.add_theme_color_override("font_color", col)
-	_hover_ring.position = spos - _hover_ring.size * 0.5
-	_hover_lbl.position = spos + Vector2(-_hover_lbl.size.x * 0.5, 30)
+	if rects.is_empty():
+		_hover_ring.size = Vector2(52, 52)
+		_hover_ring.position = spos - _hover_ring.size * 0.5
+		_hover_lbl.position = spos + Vector2(-_hover_lbl.size.x * 0.5, 30)
+		_hover_foot.visible = false
+	else:
+		var art: Rect2 = (rects["art"] as Rect2).grow(2.0)
+		var foot: Rect2 = rects["foot"]
+		_hover_ring.position = art.position
+		_hover_ring.size = art.size.max(Vector2(8, 8))
+		_hover_foot.position = foot.position
+		_hover_foot.size = foot.size.max(Vector2(4, 4))
+		_hover_foot.visible = true
+		_hover_lbl.position = Vector2(art.get_center().x - _hover_lbl.size.x * 0.5, art.end.y + 4)
 	_hover_ring.visible = true
 	_hover_lbl.visible = true
 

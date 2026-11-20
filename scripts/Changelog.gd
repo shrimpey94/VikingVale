@@ -10,6 +10,19 @@ class_name Changelog
 
 const ENTRIES: Array = [
 	{
+		"version": "1.7.5",
+		"date": "2026-11",
+		"title": "Gates and Great Halls",
+		"notes": [
+			"Towns have been rebuilt as 3D-modelled art in both 2D and 3D view: chapels, great halls, taverns, warehouses and town buildings; the Barracks, Kjelvik Keep, the Hall of Warbands and the Auction House; forges, banks, wells, market stalls and armory racks; and every wall, fence and gate, from Oak to Ancient. Turned walls, fences and gates show their turned art in 2D as well.",
+			"Gates now open and close. Right-click a gate to Open or Close it, and walk straight through when it's open. Monsters can get through an open gate too, so close it behind you.",
+			"Warbands can Lock and Unlock gates on land under their banner. A locked gate can only be opened by that warband, and the lock lifts by itself if the land changes hands. Town gates, like the Kjelvik Gate, can't be locked: anyone can open or close them. You can't close a gate on someone standing in it.",
+			"Town gates are now named as gates (for example “Kjelvik Gate”) instead of walls.",
+			"Fixed: warband members couldn't build inside their own banner's area.",
+			"Fixed: walls removed by staff kept stopping monsters until the next server restart.",
+		],
+	},
+	{
 		"version": "1.7.4",
 		"date": "2026-11",
 		"title": "Town Folk Return",

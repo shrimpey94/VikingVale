@@ -24,6 +24,7 @@ const _Interactable := preload("res://scenes/Interactable.tscn")
 const _Monster      := preload("res://scripts/Monster.gd")
 const _NPC          := preload("res://scripts/NPC.gd")
 const NpcRegistry   := preload("res://scripts/data/NpcRegistry.gd")
+const AdminEntityData := preload("res://scripts/admin/AdminEntityData.gd")
 const _Farming      := preload("res://scripts/Farming.gd")
 const _Caravan      := preload("res://scripts/Caravan.gd")
 const _WorldThrall  := preload("res://scripts/WorldThrall.gd")
@@ -336,6 +337,7 @@ var _moved:       Dictionary = {}         # edit_id → Vector2 (override spawn 
 ## edit_id → data-override dict (name/dialogue/level) for pre-existing NPCs/bosses.
 ## Applied at spawn + live via entity_data_edited, so procedural entities are editable.
 var _edits_data:  Dictionary = {}
+var _rot2d:       Dictionary = {}   # 1.7.5: id → stored admin yaw (radians)
 ## Procedural entities that were admin-MOVED are pulled OUT of chunk streaming so
 ## their home chunk can't cull them (they'd vanish in front of the player). They
 ## become persistent like admin (a:) entities. edit_id → node. Prevents the home
@@ -418,6 +420,8 @@ func _ready() -> void:
 	Events.entity_data_edited.connect(_on_entity_data_edited)
 	Events.world_entity_moved.connect(_on_world_entity_moved)
 	Events.world_entity_rotated.connect(_on_world_entity_rotated)
+	Events.entity_variant_pinned.connect(_on_entity_variant_pinned)
+	Events.gate_state_changed.connect(_on_gate_state_cache)
 	Events.monster_attacked.connect(_on_monster_attacked)
 	# Admin-painted persistent terrain overrides
 	Events.tile_overrides_received.connect(_on_tile_overrides_received)
@@ -976,7 +980,10 @@ func _refresh_admin_stream_now() -> void:
 	for dx in range(-ACTIVE_RADIUS, ACTIVE_RADIUS + 1):
 		for dy in range(-ACTIVE_RADIUS, ACTIVE_RADIUS + 1):
 			var ch := Vector2i(pcx + dx, pcy + dy)
-			if _admin_index.has(ch) and not _admin_loaded.has(ch):
+			# 1.7.5: mark EVERY chunk in range loaded (empty ones too) — otherwise an
+			# entity placed later into an empty nearby chunk was only indexed and
+			# stayed invisible until the player crossed into another chunk.
+			if ch.x >= 0 and ch.y >= 0 and not _admin_loaded.has(ch):
 				_load_admin_chunk(ch)
 
 ## True if this admin entity should STREAM by chunk (numerous, gameplay-light).
@@ -1040,7 +1047,7 @@ func _update_admin_chunks(desired: Dictionary) -> void:
 	for ch: Variant in to_unload:
 		_unload_admin_chunk(ch as Vector2i)
 	for ch: Variant in desired.keys():
-		if _admin_index.has(ch) and not _admin_loaded.has(ch):
+		if not _admin_loaded.has(ch):   # 1.7.5: empty chunks too (see _refresh_admin_stream_now)
 			_load_admin_chunk(ch as Vector2i)
 
 func _arr_to_color(raw: Variant) -> Color:
@@ -1069,6 +1076,10 @@ func _spawn_admin_entity(entity: Dictionary) -> void:
 			node.action_label          = str(data.get("action", "Interact"))
 			node.color                 = _arr_to_color(data.get("color"))
 			node.entity_id             = id
+			if data.has("gate_open"):   # 1.7.5: gate state from the burst / re-add
+				node.set("gate_open", bool(data["gate_open"]))
+				node.set("gate_locked", bool(data.get("gate_locked", false)))
+				node.set("gate_lock_warband", str(data.get("gate_lock_warband", "")))
 			# Seed structure HP mirror from the login-burst / add payload so
 			# the HP bar draws correctly for damaged structures on first
 			# frame (server overlays these fields from structures_state at
@@ -1214,8 +1225,14 @@ func _spawn_admin_entity(entity: Dictionary) -> void:
 	if _admin_registry.has(id):
 		(_admin_registry[id] as Node).set_meta("edit_id", id)
 		_admin_entity_data[id] = entity.duplicate(true)   # seed the Inspect editor
-		# NOTE: admin ROTATION is intentionally 3D-only (it distorts the flat 2D
-		# sprites). The server still persists + broadcasts it for the 3D client.
+		# 1.7.5 (R/V): stored yaw + tree shape. 2D shows rotation only where the
+		# art has directional sprites (walls/fence/gate); the value is kept for all.
+		var an := _admin_registry[id] as Node
+		if data.has("rot"):
+			_rot2d[id] = float(data["rot"])
+			if "admin_rot" in an: an.set("admin_rot", float(data["rot"]))
+		if data.has("variant_id") and "variant_id" in an:
+			an.set("variant_id", int(data["variant_id"]))
 
 func _remove_admin_node(id: String) -> void:
 	var node: Variant = _admin_registry.get(id)
@@ -1278,7 +1295,7 @@ func _synth_info_for(node: Node, id: String) -> Dictionary:
 		var lv: Variant = node.get("level")
 		return {"id": id, "kind": "monster", "subtype": str(mtype),
 			"data": {"level": int(lv) if lv != null else 1}}
-	return {}
+	return AdminEntityData.resource_info_of(node, id)
 
 ## All currently-loaded editable entities as [{id, name, pos}], name-sorted, for
 ## the admin browser. a: (admin-placed) entities + NPCs/bosses are always loaded;
@@ -1354,6 +1371,12 @@ func admin_teleport(world_pos: Vector2) -> void:
 		Events.chat_message.emit("[Admin] Left the interior — open the map again to teleport.")
 		return
 	_player.global_position = world_pos
+	# 1.7.5: drop the old walk target too — otherwise the player walks straight
+	# back to wherever it last clicked (the teleport looked like it "didn't take").
+	_player.set("_target_pos", world_pos)
+	_player.set("_target_interactable", null)
+	_player.set("_target_monster", null)
+	_player.set("velocity", Vector2.ZERO)
 	_update_chunks(world_pos)   # stream the destination in immediately
 	Events.chat_message.emit("[Admin] Teleported to (%d, %d)." % [int(world_pos.x), int(world_pos.y)])
 
@@ -1370,6 +1393,11 @@ func _register_editable(node: Node2D, id: String) -> bool:
 	node.set_meta("edit_id", id)
 	if _moved.has(id):
 		node.position = _moved[id] as Vector2
+	# 1.7.5 (S/R): a chunk-streamed entity re-applies its saved edits on every spawn.
+	if _rot2d.has(id) and "admin_rot" in node:
+		node.set("admin_rot", float(_rot2d[id]))
+	if _edits_data.has(id):
+		_apply_entity_data(node, _edits_data[id] as Dictionary)
 	return true
 
 func _find_editable_node(id: String) -> Node2D:
@@ -1383,6 +1411,9 @@ func _on_entity_edits_received(edits: Array) -> void:
 	_deleted_ids.clear()
 	_moved.clear()
 	_edits_data.clear()
+	for k: Variant in _rot2d.keys():   # keep a: rotations (they live in entity data)
+		if not str(k).begins_with("a:"):
+			_rot2d.erase(k)
 	for e: Variant in edits:
 		if not (e is Dictionary):
 			continue
@@ -1396,8 +1427,15 @@ func _on_entity_edits_received(edits: Array) -> void:
 			_deleted_ids[id] = true
 		elif d.get("x") != null and d.get("y") != null:
 			_moved[id] = Vector2(float(d["x"]), float(d["y"]))
-	# Apply to anything already spawned (towns/NPCs/bosses, loaded chunks). Rotation
-	# is 3D-only, so it's deliberately not applied to the 2D sprites here.
+		# Explicit rotation (1.7.5 servers flag it; older ones only send non-zero).
+		if bool(d.get("has_rot", false)) or float(d.get("rot", 0.0)) != 0.0:
+			_rot2d[id] = float(d.get("rot", 0.0))
+	# Apply to anything already spawned (towns/NPCs/bosses, loaded chunks).
+	for id: Variant in _rot2d.keys():
+		var rn := _find_editable_node(str(id))
+		if rn != null and "admin_rot" in rn:
+			rn.set("admin_rot", float(_rot2d[id]))
+			rn.queue_redraw()
 	for id: Variant in _deleted_ids.keys():
 		var dn := _find_editable_node(str(id))
 		if dn != null:
@@ -1429,6 +1467,7 @@ func _apply_entity_data(node: Node, data: Dictionary) -> void:
 		node.set("npc_type", str(data["npc_type"]))
 	if data.has("level") and node.has_method("scale_to_level"):
 		node.call("scale_to_level", int(data["level"]))
+	AdminEntityData.apply_resource_data(node, data)
 	if node.has_method("queue_redraw"):
 		node.call("queue_redraw")
 
@@ -1548,16 +1587,100 @@ func _on_world_entity_moved(entity_id: String, x: float, y: float) -> void:
 						and not (_admin_loaded[new_ch] as Array).has(entity_id):
 					(_admin_loaded[new_ch] as Array).append(entity_id)
 
-## Admin rotation is 3D-ONLY (it distorts the flat 2D sprites). The 2D client
-## intentionally ignores the rotation broadcast; the server still persists it and
-## the 3D client applies it. No-op kept so the signal connection stays valid.
-func _on_world_entity_rotated(_entity_id: String, _rot: float) -> void:
-	pass
+## 1.7.5 (R): the 2D client keeps every stored rotation. Walls/Fence/Gate show it
+## through their eight-direction sprites; other upright 2D sprites stay as drawn
+## (rotating a flat upright sprite would distort it) — 3D shows the yaw.
+func _on_world_entity_rotated(entity_id: String, rot: float) -> void:
+	_rot2d[entity_id] = rot
+	if _admin_entity_data.has(entity_id):
+		var info: Dictionary = _admin_entity_data[entity_id]
+		if info.get("data") is Dictionary:
+			(info["data"] as Dictionary)["rot"] = rot
+	var n := _find_editable_node(entity_id)
+	if n != null and "admin_rot" in n:
+		n.set("admin_rot", rot)
+		n.queue_redraw()
 
-## The AdminPanel rotate tool reads this to compute the next step. The 2D client
-## doesn't track rotation (3D-only), so it always reports 0 here.
-func admin_entity_rot(_entity_id: String) -> float:
-	return 0.0
+## The AdminPanel rotate tool reads this to compute the next step.
+func admin_entity_rot(entity_id: String) -> float:
+	var n := _find_editable_node(entity_id)
+	if n != null and "admin_rot" in n and _rot2d.has(entity_id):
+		return float(n.get("admin_rot"))
+	return float(_rot2d.get(entity_id, 0.0))
+
+## 1.7.5: keep the Inspect copy of a gate current (the node updates itself).
+func _on_gate_state_cache(entity_id: String, open: bool, locked: bool, lock_wb: String) -> void:
+	for store: Variant in [_admin_entity_data.get(entity_id)]:
+		if store is Dictionary and (store as Dictionary).get("data") is Dictionary:
+			var d: Dictionary = (store as Dictionary)["data"]
+			d["gate_open"] = open
+			d["gate_locked"] = locked
+			d["gate_lock_warband"] = lock_wb
+
+## 1.7.5 (V): an admin-placed tree's shape was pinned on its first move.
+func _on_entity_variant_pinned(entity_id: String, variant: int) -> void:
+	var n := _find_editable_node(entity_id)
+	if n != null and "variant_id" in n:
+		n.set("variant_id", variant)
+		n.queue_redraw()
+	for store: Variant in [_admin_entity_data.get(entity_id)]:
+		if store is Dictionary and (store as Dictionary).get("data") is Dictionary:
+			((store as Dictionary)["data"] as Dictionary)["variant_id"] = variant
+	if _admin_id_chunk.has(entity_id):
+		for e: Variant in _admin_index.get(_admin_id_chunk[entity_id], []):
+			if str((e as Dictionary).get("id", "")) == entity_id and (e as Dictionary).get("data") is Dictionary:
+				((e as Dictionary)["data"] as Dictionary)["variant_id"] = variant
+
+## 1.7.5: shape a tree shows right now (-1 = not a shaped tree, or already stored).
+## Admin Move sends it so the first move pins the look.
+func admin_entity_unpinned_variant(id: String) -> int:
+	var n := _find_editable_node(id)
+	if n == null or not n.has_method("current_variant") or int(n.get("variant_id")) >= 0:
+		return -1
+	return int(n.call("current_variant"))
+
+# ── 1.7.5 (H) admin bounds + picking ──────────────────────────────────────────
+## Screen-space bounds of an entity: {"art": Rect2 of what is drawn, "foot":
+## Rect2 of the gameplay click/collision footprint}, or {} if not loaded.
+func admin_entity_screen_rects(id: String) -> Dictionary:
+	var n := _find_editable_node(id)
+	return _screen_rects_of(n) if n != null else {}
+
+func _screen_rects_of(n: Node2D) -> Dictionary:
+	var xf := get_viewport().get_canvas_transform() * n.get_global_transform()
+	var art := Rect2(-20, -44, 40, 52)   # monsters / NPCs: a person-sized box
+	var foot := Rect2(-12, -12, 24, 24)
+	if n.has_method("admin_art_rect"):
+		art = n.call("admin_art_rect") as Rect2
+		foot = n.call("admin_footprint_rect") as Rect2
+	return {"art": xf * art, "foot": xf * foot}
+
+## Entity under the cursor: of those whose drawn bounds contain `screen_pos`,
+## the smallest (a tree in front of a hall wins); else the nearest centre within
+## `radius` world px (the old pick). Click/collision areas are unchanged.
+func admin_entity_pick(screen_pos: Vector2, world_pos: Vector2, radius: float = 44.0) -> String:
+	var best := ""
+	var best_area := INF
+	var best_d := INF
+	for grp: String in ["interactable", "monster"]:
+		for nd: Node in get_tree().get_nodes_in_group(grp):
+			if not nd.has_meta("edit_id"):
+				continue
+			var n := nd as Node2D
+			if n.global_position.distance_squared_to(world_pos) > 400.0 * 400.0:
+				continue
+			var rs := _screen_rects_of(n)
+			var art: Rect2 = rs["art"]
+			if not art.has_point(screen_pos):
+				continue
+			# Smallest box wins; equal boxes (a wall run) → nearest footprint centre.
+			var d := (rs["foot"] as Rect2).get_center().distance_squared_to(screen_pos)
+			var area := art.get_area()
+			if area < best_area - 1.0 or (absf(area - best_area) <= 1.0 and d < best_d):
+				best_area = area
+				best_d = d
+				best = str(n.get_meta("edit_id"))
+	return best if best != "" else admin_entity_at(world_pos, radius)
 
 # ── Server combat dispatch (route by entity_id to the live monster) ────────────
 func _reg_mob(entity_id: String):
@@ -2357,11 +2480,30 @@ func _on_entity_restored(entity_id: String) -> void:
 	_moved.erase(entity_id)
 	_edits_data.erase(entity_id)
 	_promoted_ids.erase(entity_id)
-	if not entity_id.begins_with("n:"):
+	_rot2d.erase(entity_id)
+	if _find_editable_node(entity_id) != null:
 		return
-	var i := int(entity_id.substr(2))
-	if i >= 0 and i < _NPCS.size() and _find_editable_node(entity_id) == null:
-		_spawn_seed_npc(i)
+	# 1.7.5 (U): every seeded kind comes back live, not just NPCs (town rows,
+	# Kjelvik castle ring, wild chunk resources used to need a relog).
+	var parts := entity_id.split(":")
+	if entity_id.begins_with("n:"):
+		var i := int(entity_id.substr(2))
+		if i >= 0 and i < _NPCS.size():
+			_spawn_seed_npc(i)
+	elif entity_id.begins_with("t:"):
+		var ti := int(entity_id.substr(2))
+		if ti >= 0 and ti < _TOWN_NODES.size():
+			_spawn_town_row($Interactables, _TOWN_NODES[ti] as Array, entity_id)
+	elif entity_id.begins_with("kc:"):
+		var castle := _kjelvik_castle_nodes()
+		var ki := int(entity_id.substr(3))
+		if ki >= 0 and ki < castle.size():
+			_spawn_town_row($Interactables, castle[ki] as Array, entity_id)
+	elif entity_id.begins_with("r:") and parts.size() == 4:
+		var key := Vector2i(int(parts[1]), int(parts[2]))
+		if _active_chunks.has(key):   # regenerate the chunk; unloaded chunks respawn it later
+			_unload_chunk(key)
+			_load_chunk(key.x, key.y)
 
 ## Which town an NPC stands in, for the regional wardrobe (Phase 5c). Mirrors
 ## the _SAFE_ZONES order; Kjelvik is checked first so the castle-quarter NPCs

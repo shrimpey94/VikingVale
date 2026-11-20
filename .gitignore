@@ -89,3 +89,6 @@ art_source/archive/
 ASSET_REPLACEMENT_PLAN.md
 ASSET_PRODUCTION_TRACKER.md
 docs/art/
+
+# Private inter-agent handoff mailboxes, including done archives.
+/docs/handoffs/

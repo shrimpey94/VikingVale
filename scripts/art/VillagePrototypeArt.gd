@@ -59,6 +59,7 @@ static func draw_asset(logic: Node2D, key: String) -> bool:
 		var color: Color = logic.get("color")
 		tint = Color(color.r / base.r, color.g / base.g, color.b / base.b, color.a)
 	logic.draw_texture_rect_region(entry["texture"], Rect2(offset, size), Rect2(Vector2(frame * size.x, 0), size), tint)
+	logic.set_meta("art_rect", Rect2(offset, size))   # admin hover/pick bounds
 	return true
 
 static func instantiate_visual(key: String, logic: Node2D = null, color := Color.WHITE) -> Node3D:

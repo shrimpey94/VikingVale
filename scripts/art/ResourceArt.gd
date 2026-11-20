@@ -133,6 +133,7 @@ static func draw_2d(logic: Node2D, key: String) -> bool:
 		logic.draw_texture_rect_region(tex, dst, Rect2(overlay * CELL, 0, CELL, CELL),
 			Color(tint.r, tint.g, tint.b, tint.a * pulse))
 	logic.set_meta("resource_frame", frame)     # QA harness only
+	logic.set_meta("art_rect", dst)             # admin hover/pick bounds
 	logic.set_meta("resource_overlay", overlay)
 	return true
 

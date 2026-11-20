@@ -1648,11 +1648,25 @@ def _migrate_v18(conn) -> None:
     """)
 
 
+def _migrate_v19(conn) -> None:
+    """Gates (1.7.5): open / locked / lock_warband on the structure mirror. Old
+    rows default to closed + unlocked (the pre-1.7.5 behaviour). A 1.7.4 server
+    still writes these rows fine (explicit column list → defaults)."""
+    cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(structure_state)").fetchall()}
+    if "gate_open" not in cols:
+        conn.execute("ALTER TABLE structure_state ADD COLUMN gate_open INTEGER NOT NULL DEFAULT 0")
+    if "gate_locked" not in cols:
+        conn.execute("ALTER TABLE structure_state ADD COLUMN gate_locked INTEGER NOT NULL DEFAULT 0")
+    if "lock_warband" not in cols:
+        conn.execute("ALTER TABLE structure_state ADD COLUMN lock_warband TEXT NOT NULL DEFAULT ''")
+
+
 _MIGRATIONS = [
     _migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4,
     _migrate_v5, _migrate_v6, _migrate_v7, _migrate_v8,
     _migrate_v9, _migrate_v10, _migrate_v11, _migrate_v12, _migrate_v13,
     _migrate_v14, _migrate_v15, _migrate_v16, _migrate_v17, _migrate_v18,
+    _migrate_v19,
 ]
 
 
@@ -4125,7 +4139,8 @@ def _name_wall_by_town(subtype: str, x: float, y: float, data: dict) -> None:
         return
     town = _town_at_world(float(x), float(y))
     if town:
-        data["display_name"] = TOWN_NAMES.get(town, town.capitalize()) + " Wall"
+        data["display_name"] = TOWN_NAMES.get(town, town.capitalize()) + \
+            (" Gate" if str(subtype) == "gate" else " Wall")
 
 
 def _load_world_entities() -> list:
@@ -4150,6 +4165,7 @@ def _load_world_entities() -> list:
             data["hp"]     = int(sst.get("hp", 0))
             data["max_hp"] = int(sst.get("max_hp", 1))
             data["alive"]  = bool(sst.get("alive", True))
+            _overlay_gate_state(eid, data)
         _name_wall_by_town(str(r["subtype"]), float(r["x"]), float(r["y"]), data)
         out.append({"id": eid, "kind": r["kind"], "subtype": r["subtype"],
                     "x": float(r["x"]), "y": float(r["y"]), "data": data})
@@ -4236,6 +4252,15 @@ def _activate_admin_entity(eid: str, kind: str, subtype: str, x: float, y: float
             "owner": str(data.get("owner", owner)),
             "wood": wood,
         }
+        if subtype == "gate":
+            # 1.7.5: a restored gate comes back exactly as it was (snapshot keys
+            # are moved out of the stored data); a new one is closed + unlocked.
+            structures_state[eid].update({
+                "open": bool(data.pop("gate_open", False)),
+                "locked": bool(data.pop("gate_locked", False)),
+                "lock_warband": str(data.pop("gate_lock_warband", "") or "")})
+            _overlay_gate_state(eid, data)
+            _gate_state_changed(eid, broadcast=False)
         _mark_structure_dirty(eid)
         mark_caravan_routes_dirty()   # new wall may block a road → reroute caravans
         if any(h in subtype for h in _WALL_SUBTYPE_HINTS):
@@ -4319,7 +4344,9 @@ def _load_entity_edits() -> list:
         edit = {"id": r["id"], "deleted": bool(r["deleted"]),
                 "x": (None if r["x"] is None else float(r["x"])),
                 "y": (None if r["y"] is None else float(r["y"])),
-                "rot": (0.0 if r["rot"] is None else float(r["rot"]))}
+                "rot": (0.0 if r["rot"] is None else float(r["rot"])),
+                # 1.7.5: explicit-zero vs never-rotated (old clients ignore it).
+                "has_rot": r["rot"] is not None}
         if r["data"]:
             try:
                 dd = json.loads(r["data"])
@@ -4344,6 +4371,13 @@ async def _handle_admin_delete(ws, session: dict, msg: dict) -> None:
             row = conn.execute("SELECT id, kind, subtype, x, y, data FROM world_entities "
                                "WHERE id=?", (eid,)).fetchone()
             before = {"table": "world_entities", "row": dict(row) if row else None}
+            if row is not None and str(row["subtype"]) == "gate" and eid in structures_state:
+                try:   # 1.7.5: restore brings the gate back open/locked as it was
+                    snap = json.loads(row["data"] or "{}")
+                except Exception:
+                    snap = {}
+                _overlay_gate_state(eid, snap)
+                before["row"]["data"] = json.dumps(snap)
         else:
             row = conn.execute("SELECT id, deleted, x, y, rot, data FROM entity_edits "
                                "WHERE id=?", (eid,)).fetchone()
@@ -4387,6 +4421,13 @@ async def _handle_admin_delete(ws, session: dict, msg: dict) -> None:
             conn.execute("DELETE FROM world_entities WHERE id=?", (eid,))
             conn.commit()
         _known_admin_entity_ids.discard(eid)
+        # 1.7.5: drop the live structure mirror too — a deleted wall/gate used to
+        # keep blocking monsters (and keep its gate lock) until the next restart.
+        # Its HP/gate state is in the delete snapshot; undelete re-activates it.
+        if structures_state.pop(eid, None) is not None:
+            _mark_structure_dirty(eid)
+            global _struct_blocked_at
+            _struct_blocked_at = 0.0
         _broadcast({"type": "world_entity_remove", "id": eid})
         mark_caravan_routes_dirty()   # a removed wall may reopen a shorter road
         _recompute_town_bounds()      # a removed wall may shrink the town limit
@@ -4481,9 +4522,10 @@ async def _handle_admin_undelete(ws, session: dict, msg: dict) -> None:
             with _db() as conn:
                 if conn.execute("SELECT 1 FROM world_entities WHERE id=?", (rid,)).fetchone():
                     continue   # already back (restored twice / re-placed)
+                stored = {k: v for k, v in data.items() if k not in _GATE_DATA_KEYS}
                 conn.execute("INSERT INTO world_entities (id, kind, subtype, x, y, data) "
                              "VALUES (?,?,?,?,?,?)",
-                             (rid, r["kind"], r["subtype"], r["x"], r["y"], json.dumps(data)))
+                             (rid, r["kind"], r["subtype"], r["x"], r["y"], json.dumps(stored)))
                 conn.commit()
             x, y = float(r["x"]), float(r["y"])
             _activate_admin_entity(rid, str(r["kind"]), str(r["subtype"]), x, y, data,
@@ -4505,7 +4547,7 @@ async def _handle_admin_undelete(ws, session: dict, msg: dict) -> None:
                 conn.execute("INSERT OR REPLACE INTO entity_edits (id, deleted, x, y, rot, data) "
                              "VALUES (?,?,?,?,?,?)",
                              (eid, int(prev.get("deleted") or 0), prev.get("x"), prev.get("y"),
-                              prev.get("rot") or 0.0, prev.get("data")))
+                              prev.get("rot"), prev.get("data")))
             conn.commit()
         _purged_entity_ids.discard(eid)
         # Respawn as seeded first, then re-apply the old move / data / rotation.
@@ -4520,7 +4562,7 @@ async def _handle_admin_undelete(ws, session: dict, msg: dict) -> None:
                                 "data": json.loads(prev["data"])})
                 except Exception:
                     pass
-            if prev.get("rot"):
+            if prev.get("rot") is not None:   # explicit 0 too (no random respawn yaw)
                 _broadcast({"type": "world_entity_rotate", "id": eid, "rot": float(prev["rot"])})
         detail = "previous state back"
     else:
@@ -4563,30 +4605,103 @@ async def _handle_admin_audit_list(ws, session: dict, _msg: dict) -> None:
     await _send(ws, {"type": "admin_audit", "recent": recent, "deleted": live})
 
 
+async def _admin_ack(ws, msg: dict, ok: bool, op: str) -> None:
+    """1.7.5: tell the requesting editor whether an undoable op landed, so its
+    Undo history only records (or gives back) steps the server accepted. Only
+    sent when the client asked (`req`); 1.7.4 clients never do."""
+    req = msg.get("req")
+    if req is not None:
+        await _send(ws, {"type": "admin_ack", "req": req, "ok": bool(ok), "op": op})
+
+
+def _valid_variant(v):
+    """Stable tree shape index (0..7) or None. Pine/Cherry use 0..2."""
+    if isinstance(v, bool):
+        return None
+    try:
+        iv = int(v)
+    except (TypeError, ValueError):
+        return None
+    return iv if 0 <= iv <= 7 else None
+
+
 async def _handle_admin_move(ws, session: dict, msg: dict) -> None:
     if not _can_edit_map(session):
+        await _admin_ack(ws, msg, False, "move")
         return
     eid = str(msg.get("id", "")).strip()
     if not eid:
+        await _admin_ack(ws, msg, False, "move")
         return
-    x = float(msg.get("x", 0.0))
-    y = float(msg.get("y", 0.0))
+    try:
+        x = float(msg.get("x", 0.0))
+        y = float(msg.get("y", 0.0))
+    except (TypeError, ValueError):
+        x = y = float("nan")
+    if not (math.isfinite(x) and math.isfinite(y)):
+        await _admin_ack(ws, msg, False, "move")
+        return
+    # 1.7.5 (V): a tree whose shape was picked from its position sends the shape it
+    # shows NOW; it is stored once (never overwritten) so moving keeps the look.
+    variant = _valid_variant(msg.get("variant_id"))
     _audit_move(session, eid, x, y, _client_label(msg))
     if eid.startswith("a:"):
+        pinned = None
         with _db() as conn:
-            conn.execute("UPDATE world_entities SET x=?, y=? WHERE id=?", (x, y, eid))
+            if variant is not None:
+                row = conn.execute("SELECT data FROM world_entities WHERE id=?", (eid,)).fetchone()
+                try:
+                    d = json.loads(row["data"]) if row and row["data"] else {}
+                except Exception:
+                    d = {}
+                if row is not None and isinstance(d, dict) and "variant_id" not in d:
+                    d["variant_id"] = variant
+                    pinned = variant
+                    conn.execute("UPDATE world_entities SET data=? WHERE id=?", (json.dumps(d), eid))
+            cur = conn.execute("UPDATE world_entities SET x=?, y=? WHERE id=?", (x, y, eid))
             conn.commit()
-        _broadcast({"type": "world_entity_move", "id": eid, "x": x, "y": y})
+        if cur.rowcount == 0:
+            await _admin_ack(ws, msg, False, "move")
+            await _admin_confirm(ws, "Entity not found (already removed?).")
+            return
+        mv = {"type": "world_entity_move", "id": eid, "x": x, "y": y}
+        if pinned is not None:
+            mv["variant_id"] = pinned
+        sst = structures_state.get(eid)
+        if sst is not None:   # 1.7.5: the live mirror follows (monster blocking, gateway)
+            global _struct_blocked_at
+            sst["x"], sst["y"] = x, y
+            _mark_structure_dirty(eid)
+            _struct_blocked_at = 0.0
+        _broadcast(mv)
         mark_caravan_routes_dirty()   # a moved wall changes the blocked footprint
         _recompute_town_bounds()      # a moved wall changes the town limit
     else:
+        pinned_data = None
         with _db() as conn:
+            if variant is not None:
+                row = conn.execute("SELECT data FROM entity_edits WHERE id=?", (eid,)).fetchone()
+                try:
+                    d = json.loads(row["data"]) if row and row["data"] else {}
+                except Exception:
+                    d = {}
+                if not isinstance(d, dict):
+                    d = {}
+                if "variant_id" not in d:
+                    d["variant_id"] = variant
+                    pinned_data = d
             conn.execute(
                 "INSERT INTO entity_edits (id, deleted, x, y) VALUES (?,0,?,?) "
                 "ON CONFLICT(id) DO UPDATE SET x=excluded.x, y=excluded.y, deleted=0",
                 (eid, x, y))
+            if pinned_data is not None:
+                conn.execute("UPDATE entity_edits SET data=? WHERE id=?",
+                             (json.dumps(pinned_data), eid))
             conn.commit()
+        if pinned_data is not None:   # shape first, so no frame shows the new-spot shape
+            _broadcast({"type": "entity_data_edit", "id": eid, "data": pinned_data})
         _broadcast({"type": "entity_edit", "id": eid, "x": x, "y": y, "deleted": False})
+    await _admin_ack(ws, msg, True, "move")
 
 
 def _audit_move(session: dict, eid: str, x: float, y: float, label: str) -> None:
@@ -4619,16 +4734,27 @@ async def _handle_admin_rotate(ws, session: dict, msg: dict) -> None:
     store rotation in world_entities.data['rot']; pre-existing (t:/n:/b:/kc:…)
     entities store it in entity_edits.rot — mirroring the admin MOVE plumbing."""
     if not _can_edit_map(session):
+        await _admin_ack(ws, msg, False, "rotate")
         return
     eid = str(msg.get("id", "")).strip()
     if not eid:
+        await _admin_ack(ws, msg, False, "rotate")
+        return
+    try:
+        rot = float(msg.get("rot", 0.0))
+    except (TypeError, ValueError):
+        rot = float("nan")
+    if not math.isfinite(rot):
+        await _admin_ack(ws, msg, False, "rotate")
         return
     # Normalise to [0, 2π) so the stored value stays bounded.
-    rot = float(msg.get("rot", 0.0)) % (2.0 * math.pi)
+    rot = rot % (2.0 * math.pi)
     if eid.startswith("a:"):
         with _db() as conn:
             row = conn.execute("SELECT data FROM world_entities WHERE id=?", (eid,)).fetchone()
             if row is None:
+                await _admin_ack(ws, msg, False, "rotate")
+                await _admin_confirm(ws, "Entity not found (already removed?).")
                 return
             try:
                 data = json.loads(row["data"]) if row["data"] else {}
@@ -4649,6 +4775,7 @@ async def _handle_admin_rotate(ws, session: dict, msg: dict) -> None:
     _broadcast({"type": "world_entity_rotate", "id": eid, "rot": rot})
     _audit(session, "rotate", eid, label=_client_label(msg) or eid,
            detail=f"{math.degrees(rot):.0f}°")
+    await _admin_ack(ws, msg, True, "rotate")
 
 
 def _edit_detail(old: dict, patch: dict, old_label: str = "") -> str:
@@ -4670,11 +4797,26 @@ async def _handle_admin_edit_entity(ws, session: dict, msg: dict) -> None:
     (possibly new) level. Only a: entities are editable — procedural entities
     (t:/n:/kc:…) have no arbitrary-field override table."""
     if not _can_edit_map(session):
+        await _admin_ack(ws, msg, False, "edit")
         return
     eid = str(msg.get("id", "")).strip()
     patch = msg.get("patch", {})
     if not eid or not isinstance(patch, dict) or not patch:
+        await _admin_ack(ws, msg, False, "edit")
         return
+    # 1.7.5: the visual fields the Inspect form now edits must be well-formed.
+    if "variant_id" in patch and _valid_variant(patch["variant_id"]) is None:
+        await _admin_ack(ws, msg, False, "edit")
+        await _admin_confirm(ws, "Invalid shape.")
+        return
+    if "color" in patch:
+        c = patch["color"]
+        if not (isinstance(c, list) and len(c) == 4 and all(
+                isinstance(v, (int, float)) and not isinstance(v, bool)
+                and math.isfinite(float(v)) and 0.0 <= float(v) <= 1.0 for v in c)):
+            await _admin_ack(ws, msg, False, "edit")
+            await _admin_confirm(ws, "Invalid colour.")
+            return
     if not eid.startswith("a:"):
         # Pre-existing entity (n:/b:/kc:/t:…) — store a DATA override in
         # entity_edits (merged) and broadcast it so clients apply it live. Keeps
@@ -4701,6 +4843,7 @@ async def _handle_admin_edit_entity(ws, session: dict, msg: dict) -> None:
         _audit(session, "edit", eid, "npc" if eid.startswith("n:") else "",
                label=str(cur.get("npc_name", "") or _client_label(msg) or eid),
                detail=_edit_detail(old, patch, _client_label(msg)))
+        await _admin_ack(ws, msg, True, "edit")
         await _admin_confirm(ws, "Edited entity.")
         return
     with _db() as conn:
@@ -4708,6 +4851,7 @@ async def _handle_admin_edit_entity(ws, session: dict, msg: dict) -> None:
             "SELECT kind, subtype, x, y, data FROM world_entities WHERE id=?",
             (eid,)).fetchone()
         if row is None:
+            await _admin_ack(ws, msg, False, "edit")
             await _admin_confirm(ws, "Entity not found (already removed?).")
             return
         try:
@@ -4752,9 +4896,12 @@ async def _handle_admin_edit_entity(ws, session: dict, msg: dict) -> None:
         monsters_state[eid] = st
         _mark_monster_dirty(eid)
         _purged_entity_ids.discard(eid)   # it lives again — clear the tombstone
+    if eid in structures_state:
+        _overlay_gate_state(eid, data)
     entity = {"id": eid, "kind": kind, "subtype": subtype,
               "x": x, "y": y, "data": data}
     _broadcast({"type": "world_entity_add", "entity": entity})
+    await _admin_ack(ws, msg, True, "edit")
     await _admin_confirm(ws, f"Edited {kind} '{subtype}'.")
     print(f"[admin] {session['username']} edited {eid} fields={list(patch.keys())}")
 
@@ -6508,6 +6655,46 @@ def _seed_castle_structures() -> None:
 BANNER_TERRITORY_RADIUS = 512.0
 
 
+def _banner_warbands_at(conn, x: float, y: float) -> set:
+    """Warband ids whose banner claim (BANNER_TERRITORY_RADIUS) covers (x, y).
+    Banners of warbands that no longer exist are ignored."""
+    r2 = BANNER_TERRITORY_RADIUS * BANNER_TERRITORY_RADIUS
+    live = {str(r["id"]) for r in conn.execute("SELECT id FROM clans").fetchall()}
+    out = set()
+    for row in conn.execute("SELECT x, y, data FROM world_entities WHERE kind='banner'").fetchall():
+        try:
+            bdata = json.loads(row["data"] or "{}")
+        except Exception:
+            bdata = {}
+        wb = str((bdata or {}).get("warband_id", ""))
+        if not wb or wb not in live:
+            continue
+        dx = x - float(row["x"]); dy = y - float(row["y"])
+        if dx * dx + dy * dy <= r2:
+            out.add(wb)
+    return out
+
+
+def _land_controller(conn, x: float, y: float) -> tuple:
+    """Who controls the land at (x, y) — (status, warband_id), status one of
+    'controlled' | 'contested' | 'unpledged' | 'wild'. Only 'controlled' has an
+    owner; owner decision (1.7.5): contested land and unpledged towns count as
+    uncontrolled. Towns (wall-expanded bounds) belong to their pledged warband;
+    elsewhere, the single warband whose banner covers the spot."""
+    town = _town_at_world(x, y, margin=1)
+    if town:
+        holder = _warband_holding_town(conn, town)
+        if holder and conn.execute("SELECT 1 FROM clans WHERE id=?", (holder,)).fetchone():
+            return ("controlled", holder)
+        return ("unpledged", "")
+    wbs = _banner_warbands_at(conn, x, y)
+    if len(wbs) == 1:
+        return ("controlled", next(iter(wbs)))
+    if len(wbs) > 1:
+        return ("contested", "")
+    return ("wild", "")
+
+
 def _territory_gate_for_player(session: dict, x: float, y: float):
     """Return None if `session`'s player can build at (x, y). Otherwise
     return a chat-back reason string.
@@ -6524,9 +6711,11 @@ def _territory_gate_for_player(session: dict, x: float, y: float):
             cid = _clan_id_for_player(conn, session["id"])
             if cid is None:
                 return "You need a warband to build here."
+            # 1.7.5 fix: banners are stored as kind='banner' (see
+            # _handle_build_warband_structure); the old kind='resource' query
+            # never found one, so nobody could build anywhere.
             rows = conn.execute(
-                "SELECT x, y, data FROM world_entities WHERE kind='resource' "
-                "AND subtype='banner'"
+                "SELECT x, y, data FROM world_entities WHERE kind='banner'"
             ).fetchall()
     except Exception:
         # Territory tables missing / DB error → fail-open for MVP so a
@@ -9482,6 +9671,7 @@ def _maybe_apply_pledge(conn, session: dict, quest_id: str, now: float) -> None:
         "  pledged_at = excluded.pledged_at",
         (town_id, cid, now))
     print(f"[pledge] {session['username']}'s warband {cid} now holds {town_id}")
+    _recheck_gate_locks_soon()
     # Seal lifecycle — pledge change might give one warband all five
     # towns (triggering the seal to charge) or break a prior hold
     # (triggering dormant). Cheap recompute.
@@ -10316,11 +10506,13 @@ def _caravan_structure_blocked() -> set:
     blocked = set()
     with _db() as conn:
         rows = conn.execute(
-            "SELECT subtype, x, y FROM world_entities WHERE kind='resource'").fetchall()
+            "SELECT id, subtype, x, y FROM world_entities WHERE kind='resource'").fetchall()
     for r in rows:
         sub = str(r["subtype"])
         if sub not in _STRUCTURE_SIZES:
             continue
+        if sub == "gate" and structures_state.get(str(r["id"]), {}).get("open", False):
+            continue   # 1.7.5: open gate — caravans may pass
         w, h = _STRUCTURE_SIZES[sub]
         cx, cy = float(r["x"]), float(r["y"])
         tx0 = int((cx - w / 2.0) // 32); tx1 = int((cx + w / 2.0) // 32)
@@ -11889,7 +12081,8 @@ def _load_structure_state_from_db() -> None:
     try:
         with _db() as conn:
             rows = conn.execute(
-                "SELECT entity_id, hp, max_hp, alive, subtype, x, y, owner, wood "
+                "SELECT entity_id, hp, max_hp, alive, subtype, x, y, owner, wood, "
+                "gate_open, gate_locked, lock_warband "
                 "FROM structure_state").fetchall()
             # Look up which entity_ids still exist so we can skip orphans.
             existing = {
@@ -11913,6 +12106,11 @@ def _load_structure_state_from_db() -> None:
                 "owner":   str(r["owner"] or ""),
                 "wood":    str(r["wood"] or "oak"),
             }
+            if str(r["subtype"]) == "gate":
+                structures_state[eid].update({
+                    "open":   bool(int(r["gate_open"] or 0)),
+                    "locked": bool(int(r["gate_locked"] or 0)),
+                    "lock_warband": str(r["lock_warband"] or "")})
             loaded += 1
         if loaded:
             print(f"[boot] loaded {loaded} structure_state row(s) from SQLite")
@@ -11938,8 +12136,9 @@ def _flush_structure_state() -> int:
                     continue
                 conn.execute(
                     "INSERT OR REPLACE INTO structure_state "
-                    "(entity_id, hp, max_hp, alive, subtype, x, y, owner, wood) "
-                    "VALUES (?,?,?,?,?,?,?,?,?)",
+                    "(entity_id, hp, max_hp, alive, subtype, x, y, owner, wood, "
+                    "gate_open, gate_locked, lock_warband) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                     (eid,
                      int(st.get("hp", 0)),
                      int(st.get("max_hp", 1)),
@@ -11948,7 +12147,10 @@ def _flush_structure_state() -> int:
                      float(st.get("x", 0.0)),
                      float(st.get("y", 0.0)),
                      str(st.get("owner", "")),
-                     str(st.get("wood", "oak"))))
+                     str(st.get("wood", "oak")),
+                     1 if st.get("open", False) else 0,
+                     1 if st.get("locked", False) else 0,
+                     str(st.get("lock_warband", ""))))
                 wrote += 1
             conn.commit()
     except Exception as e:
@@ -11956,10 +12158,230 @@ def _flush_structure_state() -> int:
     return wrote
 
 
+# ── Gates (1.7.5) ─────────────────────────────────────────────────────────────
+# Server-authoritative open/closed + lock, persisted in structure_state (v19),
+# synced with `gate_state`, included in the login burst and delete snapshots.
+# Rules (owner-approved):
+#   • town gates (any gate inside a town's bounds; they're all named "<Town> Gate"):
+#     anyone opens/closes; players can NEVER lock them, pledged or not — one
+#     warband must not be able to shut everyone out of a main town.
+#   • uncontrolled land (wild, contested): anyone opens/closes; nobody can lock.
+#   • banner land (exactly one warband's banner covers it): members of that
+#     warband lock/unlock. Unlocked → anyone opens/closes; locked (closed +
+#     barred) → only the lock-holding warband opens/closes.
+#   • control changes → a warband lock lapses automatically (and everyone is told).
+#   • admins can always open, close, lock and unlock. An admin lock is a STAFF
+#     lock (lock_warband = GATE_STAFF_LOCK): only admins work the gate, and it
+#     never lapses on its own.
+#   • closing (or locking) is refused while someone stands in the gateway.
+GATE_REACH_PX = 96.0          # how close a player must stand to work a gate
+GATE_GAP_HALF = 22.0          # gateway half-width checked for blockers (gate is 32 px)
+GATE_STAFF_LOCK = "__staff__"  # lock_warband of a staff lock (never a clan id)
+_GATE_DATA_KEYS = ("gate_open", "gate_locked", "gate_lock_warband")
+_gate_recheck_pending = False
+
+
+def _gate_lock_control(conn, x: float, y: float) -> tuple:
+    """Who may LOCK a gate at (x, y) — (status, warband_id). Like
+    _land_controller, but towns are always 'town' (never player-lockable), so
+    only banner land can be 'controlled'."""
+    if _town_at_world(x, y, margin=1):
+        return ("town", "")
+    return _land_controller(conn, x, y)
+
+
+def _overlay_gate_state(eid: str, data: dict) -> None:
+    st = structures_state.get(eid)
+    if st is None or st.get("subtype") != "gate":
+        return
+    data["gate_open"] = bool(st.get("open", False))
+    data["gate_locked"] = bool(st.get("locked", False))
+    data["gate_lock_warband"] = str(st.get("lock_warband", ""))
+
+
+def _gate_msg(eid: str) -> dict:
+    st = structures_state.get(eid, {})
+    return {"type": "gate_state", "id": eid, "open": bool(st.get("open", False)),
+            "locked": bool(st.get("locked", False)),
+            "lock_warband": str(st.get("lock_warband", ""))}
+
+
+def _gate_state_changed(eid: str, broadcast: bool = True) -> None:
+    """Persist + make pathing follow at once (monsters, caravans), then sync."""
+    global _struct_blocked_at
+    _mark_structure_dirty(eid)
+    _struct_blocked_at = 0.0          # monster blocked tiles rebuild next AI tick
+    mark_caravan_routes_dirty()
+    if broadcast:
+        _broadcast(_gate_msg(eid))
+
+
+def _gateway_blocked(eid: str) -> str:
+    """Name of whatever stands in the gateway, or ''. Players and live monsters."""
+    st = structures_state.get(eid, {})
+    gx, gy = float(st.get("x", 0.0)), float(st.get("y", 0.0))
+    for s in sessions.values():
+        try:
+            if abs(float(s.get("x", 1e9)) - gx) <= GATE_GAP_HALF and \
+                    abs(float(s.get("y", 1e9)) - gy) <= GATE_GAP_HALF:
+                return str(s.get("username", "someone"))
+        except (TypeError, ValueError):
+            continue
+    for mid, m in monsters_state.items():
+        if not m.get("alive", True):
+            continue
+        if abs(float(m.get("x", 1e9)) - gx) <= GATE_GAP_HALF and \
+                abs(float(m.get("y", 1e9)) - gy) <= GATE_GAP_HALF:
+            return "a monster"
+    return ""
+
+
+def _recheck_gate_locks() -> int:
+    """Lift every warband lock whose warband no longer controls the gate's land
+    (town gates are never warband-lockable). Staff locks are left alone.
+    Returns how many locks lapsed."""
+    global _gate_recheck_pending
+    _gate_recheck_pending = False
+    locked = [(eid, st) for eid, st in structures_state.items()
+              if st.get("subtype") == "gate" and st.get("locked", False)
+              and str(st.get("lock_warband", "")) != GATE_STAFF_LOCK]
+    if not locked:
+        return 0
+    lapsed = 0
+    with _db() as conn:
+        for eid, st in locked:
+            status, wb = _gate_lock_control(conn, float(st.get("x", 0.0)), float(st.get("y", 0.0)))
+            if status == "controlled" and wb == str(st.get("lock_warband", "")):
+                continue
+            st["locked"] = False
+            st["lock_warband"] = ""
+            _gate_state_changed(eid)
+            lapsed += 1
+            print(f"[gate] lock on {eid} lapsed (land now {status} {wb})")
+    return lapsed
+
+
+def _recheck_gate_locks_soon() -> None:
+    """Called from inside a DB transaction (pledge write): re-check right after
+    it commits instead of re-entering the DB now."""
+    global _gate_recheck_pending
+    if _gate_recheck_pending:
+        return
+    _gate_recheck_pending = True
+    try:
+        asyncio.get_running_loop().call_soon(_recheck_gate_locks)
+    except RuntimeError:
+        pass   # no loop (tests/boot) — the 5 s loop / boot call covers it
+
+
+async def _handle_gate_action(ws, session: dict, msg: dict) -> None:
+    eid = str(msg.get("id", "")).strip()
+    action = str(msg.get("action", "")).strip()
+
+    async def say(text: str) -> None:
+        await _send(ws, {"type": "chat", "username": "System", "text": text})
+        await _send(ws, _gate_msg(eid))   # resync this client's view either way
+
+    if action not in ("open", "close", "lock", "unlock"):
+        return
+    st = structures_state.get(eid)
+    if st is None or st.get("subtype") != "gate":
+        await _send(ws, {"type": "chat", "username": "System", "text": "That isn't a gate."})
+        return
+    if not st.get("alive", True):
+        await say("The gate lies in ruins.")
+        return
+    admin = _is_admin(session)
+    gx, gy = float(st.get("x", 0.0)), float(st.get("y", 0.0))
+    if not admin:
+        try:
+            far = math.hypot(float(session.get("x", 1e9)) - gx,
+                             float(session.get("y", 1e9)) - gy) > GATE_REACH_PX
+        except (TypeError, ValueError):
+            far = True
+        if far:
+            await say("You need to stand next to the gate.")
+            return
+    with _db() as conn:
+        status, owner_wb = _gate_lock_control(conn, gx, gy)
+        my_wb = _clan_id_for_player(conn, session["id"]) or ""
+    is_open = bool(st.get("open", False))
+    is_locked = bool(st.get("locked", False))
+    lock_wb = str(st.get("lock_warband", ""))
+    holds_lock = is_locked and my_wb != "" and my_wb == lock_wb
+    member = status == "controlled" and my_wb != "" and my_wb == owner_wb
+    if action in ("open", "close") and is_locked and not (admin or holds_lock):
+        await say("The gate is locked.")
+        return
+    if action == "open":
+        if is_open:
+            await say("The gate is already open.")
+            return
+        st["open"] = True
+    elif action == "close":
+        if not is_open:
+            await say("The gate is already closed.")
+            return
+        who = _gateway_blocked(eid)
+        if who:
+            await say(f"You can't close the gate — {who} is standing in the gateway.")
+            return
+        st["open"] = False
+    elif action == "lock":
+        if is_locked:
+            await say("The gate is already locked.")
+            return
+        if not (member or admin):
+            if status == "town":
+                await say("Town gates can't be locked.")
+            elif status in ("wild", "unpledged"):
+                await say("Nobody holds this land — the gate can't be locked.")
+            elif status == "contested":
+                await say("This land is contested — the gate can't be locked.")
+            else:
+                await say("Only the warband that holds this land can lock its gate.")
+            return
+        if is_open:
+            who = _gateway_blocked(eid)
+            if who:
+                await say(f"You can't close the gate — {who} is standing in the gateway.")
+                return
+        st["open"] = False
+        st["locked"] = True
+        # A member locks for their warband; an admin who isn't a member places a
+        # staff lock (only admins work it, it never lapses on its own).
+        st["lock_warband"] = owner_wb if member else GATE_STAFF_LOCK
+    elif action == "unlock":
+        if not is_locked:
+            await say("The gate isn't locked.")
+            return
+        if not (admin or holds_lock):
+            if lock_wb == GATE_STAFF_LOCK:
+                await say("This gate has been locked by the staff.")
+            else:
+                await say("Only the warband that locked this gate can unlock it.")
+            return
+        st["locked"] = False
+        st["lock_warband"] = ""
+    _gate_state_changed(eid)
+    verb = {"open": "open", "close": "close", "lock": "lock", "unlock": "unlock"}[action]
+    await _send(ws, {"type": "chat", "username": "System", "text": f"You {verb} the gate."})
+    if admin and not (member or holds_lock or (not is_locked and action in ("open", "close"))):
+        _audit(session, "gate", eid, "resource", "gate", label=_client_label(msg) or eid,
+               x=gx, y=gy, detail=f"admin override: {action}")
+    elif admin:
+        _audit(session, "gate", eid, "resource", "gate", label=_client_label(msg) or eid,
+               x=gx, y=gy, detail=action)
+
+
 async def _structure_state_flush_loop() -> None:
     """5s batched flush, mirroring _monster_state_flush_loop."""
     while True:
         await asyncio.sleep(5.0)
+        try:
+            _recheck_gate_locks()   # 1.7.5: control can change in many places
+        except Exception as e:
+            print(f"[gate] lock recheck failed: {e}")
         _flush_structure_state()
 
 # ── Monster AI tuning (server-side wander / aggro / chase / attack) ───────────
@@ -12063,6 +12485,8 @@ def _refresh_struct_blocked_tiles(now: float) -> None:
         sub = st.get("subtype", "")
         if sub not in _STRUCTURE_SIZES:
             continue
+        if sub == "gate" and st.get("open", False):
+            continue   # 1.7.5: an open gate is a gap in the wall
         w, h = _STRUCTURE_SIZES[sub]
         cx, cy = float(st.get("x", 0.0)), float(st.get("y", 0.0))
         tx0 = int((cx - w / 2.0) // 32)
@@ -14713,6 +15137,8 @@ async def _route_message(ws, session, mtype: str, msg: dict) -> None:
         await _handle_admin_move(ws, session, msg)
     elif mtype == "admin_rotate":
         await _handle_admin_rotate(ws, session, msg)
+    elif mtype == "gate_action":
+        await _handle_gate_action(ws, session, msg)
     elif mtype == "admin_edit_entity":
         await _handle_admin_edit_entity(ws, session, msg)
     elif mtype == "admin_sculpt":
@@ -15032,6 +15458,7 @@ async def main() -> None:
     # ring is named + defended + rep-gated as part of the town). Needs the
     # world_entities rows, which exist by now.
     _recompute_town_bounds()
+    _recheck_gate_locks()   # 1.7.5: control may have changed while we were down
     for _tid in _TOWN_TILE_BOUNDS:
         _b = _bounds_of(_tid)
         if _b != _TOWN_TILE_BOUNDS[_tid]:

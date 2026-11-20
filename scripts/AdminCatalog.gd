@@ -24,6 +24,14 @@ static func _res(type_str: String, name: String, skill: String, level: int,
 		},
 	}
 
+## 1.7.5 (V): a tree template with a fixed shape (Pine/Cherry rows 0..2).
+static func _tree_shape(name: String, skill: String, level: int, c: Color, v: int) -> Dictionary:
+	var e := _res("tree", name, skill, level, "Chop", c)
+	e["id"] = "%s_shape_%d" % [e["id"], v + 1]
+	e["label"] = "%s (shape %d)" % [name, v + 1]
+	(e["data"] as Dictionary)["variant_id"] = v
+	return e
+
 static func _mon(monster_type: String, label: String, level: int) -> Dictionary:
 	return {
 		"id": "mon_" + monster_type, "kind": "monster", "label": label,
@@ -72,6 +80,14 @@ static func entries(roster: Dictionary = {}) -> Array:
 		_res("tree", "Ironwood Tree","woodcutting", 30, "Chop", Color(0.30, 0.18, 0.08)),
 		_res("tree", "Frost Tree",   "woodcutting", 50, "Chop", Color(0.72, 0.90, 0.98)),
 		_res("tree", "Ancient Tree", "woodcutting", 70, "Chop", Color(0.35, 0.20, 0.08)),
+		# 1.7.5 — each Pine/Cherry shape as its own pick (stored variant_id; the plain
+		# entries above store the shape their spot gives). Name stays the tree's own.
+		_tree_shape("Pine Tree",   "woodcutting",  5, Color(0.10, 0.42, 0.20), 0),
+		_tree_shape("Pine Tree",   "woodcutting",  5, Color(0.10, 0.42, 0.20), 1),
+		_tree_shape("Pine Tree",   "woodcutting",  5, Color(0.10, 0.42, 0.20), 2),
+		_tree_shape("Cherry Tree", "woodcutting", 20, Color(0.98, 0.72, 0.80), 0),
+		_tree_shape("Cherry Tree", "woodcutting", 20, Color(0.98, 0.72, 0.80), 1),
+		_tree_shape("Cherry Tree", "woodcutting", 20, Color(0.98, 0.72, 0.80), 2),
 		# ── Rocks ───────────────────────────────────────────────────────────────
 		_res("rock", "Copper Rock",  "mining",  1, "Mine", Color(0.72, 0.42, 0.22)),
 		_res("rock", "Iron Rock",    "mining", 15, "Mine", Color(0.55, 0.55, 0.60)),
@@ -95,7 +111,9 @@ static func entries(roster: Dictionary = {}) -> Array:
 		_res("herb", "Berry Bush",      "foraging", 25, "Pick", Color(0.24, 0.50, 0.20)),
 		_res("herb", "Ancient Root",    "foraging", 65, "Pick", Color(0.42, 0.28, 0.12)),
 		# ── Stations / structures (admin-placeable; town-only by default) ─────
-		_res("forge",        "Forge",          "smithing",     1, "Use",     Color(0.60, 0.45, 0.20)),
+		# Forge / Auction House use the seeded colour: the authored art (1.7.5)
+		# is painted for it, and any other colour tints the whole building.
+		_res("forge",        "Forge",          "smithing",     1, "Use",     Color(0.80, 0.35, 0.12)),
 		_res("fire",         "Campfire",       "cooking",      1, "Cook",    Color(0.95, 0.55, 0.10)),
 		_res("bank",         "Bank",           "",             1, "Bank",    Color(0.30, 0.60, 0.85)),
 		_res("building",     "Town Building",  "",             1, "Enter",   Color(0.55, 0.45, 0.32)),
@@ -118,7 +136,20 @@ static func entries(roster: Dictionary = {}) -> Array:
 		_res("fortified_wall", "Fortified Wall (Iron)",    "construction", 70, "Inspect", Color(0.55, 0.55, 0.60)),
 		_res("fortified_wall", "Fortified Wall (Mithril)", "construction", 70, "Inspect", Color(0.40, 0.65, 0.90)),
 		_res("fortified_wall", "Fortified Wall (Runite)",  "construction", 70, "Inspect", Color(0.65, 0.20, 0.82)),
-		_res("auction_house","Auction House",  "",             1, "Browse",  Color(0.85, 0.70, 0.25)),
+		_res("auction_house","Auction House",  "",             1, "Browse",  Color(0.45, 0.60, 0.85)),
+		# ── Named town buildings (1.7.5) — exact seeded type/name/colour, so a
+		# placed one gets its authored art without hand-renaming. Renaming a
+		# "building" later reverts it to the procedural draw (art is per name).
+		_res("building",     "Chapel",           "soul", 1, "Inspect", Color(0.75, 0.72, 0.66)),
+		_res("building",     "Great Hall",       "soul", 1, "Inspect", Color(0.35, 0.22, 0.12)),
+		_res("building",     "Tavern",           "soul", 1, "Inspect", Color(0.70, 0.48, 0.22)),
+		_res("building",     "Warehouse",        "soul", 1, "Inspect", Color(0.50, 0.44, 0.32)),
+		_res("large_house",  "Barracks",         "soul", 1, "Inspect", Color(0.52, 0.42, 0.30)),
+		_res("grand_hall",   "Kjelvik Keep",     "soul", 1, "Inspect", Color(0.42, 0.40, 0.46)),
+		_res("clan_hall",    "Hall of Warbands", "soul", 1, "Inspect", Color(0.40, 0.34, 0.44)),
+		_res("well",         "Castle Well",      "soul", 1, "Inspect", Color(0.58, 0.60, 0.64)),
+		_res("armory_rack",  "Armory",           "soul", 1, "Inspect", Color(0.60, 0.55, 0.40)),
+		_res("market_stall", "Market Stall",     "soul", 1, "Browse",  Color(0.72, 0.50, 0.28)),
 		_res("stick",        "Stick Pickup",   "foraging",     1, "Pick",    Color(0.55, 0.36, 0.18)),
 		_res("stone",        "Stone Pickup",   "foraging",     1, "Pick",    Color(0.58, 0.56, 0.52)),
 		# ── Monsters ────────────────────────────────────────────────────────────

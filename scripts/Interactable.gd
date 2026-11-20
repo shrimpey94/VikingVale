@@ -12,6 +12,7 @@ const VillageArt = preload("res://scripts/art/VillagePrototypeArt.gd")
 const StonePickupArt = preload("res://scripts/art/StonePickupArt.gd")
 const ForestArt = preload("res://scripts/art/ForestArt.gd")
 const ResourceArt = preload("res://scripts/art/ResourceArt.gd")
+const TownArt = preload("res://scripts/art/TownArt.gd")
 
 enum State { IDLE, BEING_HIT, DEPLETED }
 
@@ -36,6 +37,14 @@ var _struct_hit_ms:  int = 0  # last structure-attack time (ms) — local 1.5s t
 
 # Server-authoritative shared state (set by World on chunk resource nodes).
 var entity_id        := ""
+# 1.7.5 admin state (visual only). `variant_id` >= 0 = stored tree shape (else the
+# legacy position pick); `admin_rot` = stored yaw, used by 2D directional art.
+var variant_id: int   = -1
+var admin_rot: float  = 0.0
+# 1.7.5 gate state (server-authoritative; set from the entity data + gate_state).
+var gate_open: bool = false
+var gate_locked: bool = false
+var gate_lock_warband: String = ""
 # Structure HP mirror — set by Events.structure_hp_changed for the 18
 # buildable subtypes. Drives the HP bar draw + attack/repair gating.
 var structure_hp: int     = -1  # -1 = unknown / not a structure
@@ -99,6 +108,9 @@ func _ready() -> void:
 	if interactable_type_str in _STRUCTURE_SIZES:
 		Events.structure_hp_changed.connect(_on_structure_hp_changed)
 		Events.structure_destroyed.connect(_on_structure_destroyed)
+	if interactable_type_str == "gate":
+		Events.gate_state_changed.connect(_on_gate_state_changed)
+		_sync_gate_body()
 
 # ── Per-type stats ───────────────────────────────────────────────────────────
 # Tiers (shared by tree / rock / fish / herb) use required_level ranges.
@@ -331,6 +343,7 @@ func _on_structure_hp_changed(eid: String, hp: int, max_hp: int,
 		_state = State.IDLE
 		if get_node_or_null("StructureBody") == null and interactable_type_str in _STRUCTURE_SIZES:
 			_add_structure_static_body(_STRUCTURE_SIZES[interactable_type_str])
+			_sync_gate_body()   # a rebuilt OPEN gate stays passable
 	structure_hp = hp
 	structure_max_hp = max_hp
 	structure_alive = alive
@@ -338,6 +351,30 @@ func _on_structure_hp_changed(eid: String, hp: int, max_hp: int,
 	# so the popups tick + expire even when the node is otherwise idle.
 	set_process(true)
 	queue_redraw()
+
+## 1.7.5 gates: the server's state drives collision (shared by 2D and 3D, since
+## both move the same 2D player body) and the open/closed art.
+func _on_gate_state_changed(eid: String, open: bool, locked: bool, lock_wb: String) -> void:
+	if eid != entity_id or eid == "":
+		return
+	apply_gate_state(open, locked, lock_wb)
+
+func apply_gate_state(open: bool, locked: bool, lock_wb: String) -> void:
+	gate_open = open
+	gate_locked = locked
+	gate_lock_warband = lock_wb
+	_sync_gate_body()
+	queue_redraw()
+
+func _sync_gate_body() -> void:
+	if interactable_type_str != "gate":
+		return
+	var body := get_node_or_null("StructureBody")
+	if body == null:
+		return
+	for cs: Node in body.get_children():
+		if cs is CollisionShape2D:
+			(cs as CollisionShape2D).set_deferred("disabled", gate_open)
 
 ## Signal handler: destroyed broadcast. Free the collision body + tint.
 func _on_structure_destroyed(eid: String) -> void:
@@ -1076,6 +1113,9 @@ func _on_player_stop_action() -> void:
 
 # ── Drawing ──────────────────────────────────────────────────────────────────
 func _draw() -> void:
+	# Art adapters re-record the rect they draw each frame (admin hover/pick).
+	if has_meta("art_rect"):
+		remove_meta("art_rect")
 	# Shadow audit: shadows are reserved for LIVING MOVING entities (players,
 	# monsters, NPCs). Static resource nodes (trees, rocks, herbs, fish spots,
 	# stations) no longer draw a ground shadow — they're terrain, not actors.
@@ -1162,7 +1202,8 @@ func _draw_body() -> void:
 	if not depleted and not (interactable_type_str == "stone" and StonePickupArt.available()) \
 			and not VillageArt.available(VillageArt.asset_for(interactable_type_str, display_name)) \
 			and not ForestArt.available(ForestArt.asset_for(interactable_type_str, display_name)) \
-			and not ResourceArt.available(ResourceArt.asset_for(interactable_type_str, display_name, required_level)):
+			and not ResourceArt.available(ResourceArt.asset_for(interactable_type_str, display_name, required_level)) \
+			and not TownArt.skips_depth_overlay(self):
 		_draw_depth_overlay()
 
 	# (Removed) Depleted state used to draw a 40×44 dark rect overlay on top
@@ -1243,8 +1284,41 @@ func _magic_glow_color() -> Color:
 ## (x, y) and (x+1, y) and they'll often pick different variants — making
 ## forests look natural rather than copy-pasted. Used by oak / pine / cherry.
 func _tree_variant_index(modulo: int = 3) -> int:
-	var h: int = int(abs(position.x * 73.0 + position.y * 31.0))
+	if variant_id >= 0:   # 1.7.5: stored shape — moving the tree keeps its look
+		return variant_id % maxi(1, modulo)
+	return legacy_variant_index(position, modulo)
+
+## The pre-1.7.5 position pick, used for entities with no stored `variant_id`
+## (and to pin the shape a tree shows right before its first move).
+static func legacy_variant_index(pos: Vector2, modulo: int = 3) -> int:
+	var h: int = int(abs(pos.x * 73.0 + pos.y * 31.0))
 	return h % maxi(1, modulo)
+
+## Shape the tree shows now, or -1 for non-variant entities (admin Move pins it).
+func current_variant() -> int:
+	if interactable_type_str != "tree":
+		return -1
+	if display_name in ["Pine Tree", "Cherry Tree", "Oak Tree"]:
+		return _tree_variant_index(3)
+	return -1
+
+# ── 1.7.5 (H) admin bounds ────────────────────────────────────────────────────
+## Gameplay click footprint in local px (the Area2D rect; structures also block
+## with the same size). Never resized to match art.
+func admin_footprint_rect() -> Rect2:
+	var cs := get_node_or_null("CollisionShape2D") as CollisionShape2D
+	if cs != null and cs.shape is RectangleShape2D:
+		var sz := (cs.shape as RectangleShape2D).size
+		return Rect2(cs.position - sz * 0.5, sz)
+	return Rect2(-16, -16, 32, 32)
+
+## Local px bounds of what is drawn: the authored sprite rect when an art adapter
+## drew this frame, else an estimate (procedural sprites rise above their footprint).
+func admin_art_rect() -> Rect2:
+	if has_meta("art_rect"):
+		return get_meta("art_rect") as Rect2
+	var f := admin_footprint_rect()
+	return Rect2(f.position.x, f.position.y - f.size.y * 0.75, f.size.x, f.size.y * 1.75)
 
 ## Small bright shine dot drawn near the top-center of a circular canopy,
 ## simulating the specular peak where overhead light hits the dome's
@@ -2212,8 +2286,10 @@ func _draw_crop_plant(seed_id: String, frac: float, ripe: bool) -> void:
 					draw_circle(top, 1.4, leaf.lightened(0.10))
 
 func _draw_forge(c: Color, cd: Color) -> void:
-	draw_rect(Rect2(-13, -8, 26, 22), cd)
-	draw_rect(Rect2(-10, -8, 20, 16), c)
+	# Authored hearth (1.7.5) replaces only the body; the flames stay on top.
+	if not TownArt.draw_2d(self, TownArt.key_of(self)):
+		draw_rect(Rect2(-13, -8, 26, 22), cd)
+		draw_rect(Rect2(-10, -8, 20, 16), c)
 	var fr := 6.0 + sin(_time_elapsed * 4.5) * 1.8
 	draw_circle(Vector2( 0, -14), fr,   Color(1.00, 0.50, 0.05))
 	draw_circle(Vector2(-4, -10), 4.5,  Color(1.00, 0.70, 0.10))
@@ -2435,6 +2511,8 @@ func _draw_fire(_c: Color) -> void:
 	draw_circle(Vector2(0.0, -(fl * 0.85)), fl * 0.35, Color(1.00, 0.88, 0.35, 0.78))
 
 func _draw_bank(_c: Color) -> void:
+	if TownArt.draw_2d(self, TownArt.key_of(self)):
+		return
 	# Stone base
 	draw_rect(Rect2(-16, 2, 32, 16), Color(0.48, 0.45, 0.40))
 	draw_rect(Rect2(-14, 0, 28, 6),  Color(0.58, 0.54, 0.48))
@@ -2522,6 +2600,10 @@ func _draw_lit_window(cx: float, cy: float, r: float) -> void:
 
 func _draw_building(c: Color, cd: Color) -> void:
 	if display_name == "House" and VillageArt.draw_asset(self, "timber_house"):
+		return
+	# Authored Chapel/Great Hall/Tavern/Warehouse/Town Building (1.7.5); other
+	# names keep the procedural draw.
+	if TownArt.draw_2d(self, TownArt.key_of(self)):
 		return
 	# Roof tone — dark thatch, tinted slightly toward the wall colour.
 	var roof := Color(0.30, 0.20, 0.12).lerp(cd.darkened(0.2), 0.35)
@@ -2739,6 +2821,8 @@ func _draw_stone(c: Color, cd: Color) -> void:
 	draw_circle(Vector2(-1, -2), 2, c.lightened(0.18))  # highlight
 
 func _draw_auction_house(c: Color, cd: Color) -> void:
+	if TownArt.draw_2d(self, TownArt.key_of(self)):
+		return
 	# Base structure — wide hall
 	draw_rect(Rect2(-20, -10, 40, 22), cd)
 	draw_rect(Rect2(-18,  -8, 36, 18), c)
@@ -2973,6 +3057,10 @@ func _draw_outpost() -> void:
 ## `fortified` toggles the reinforcement bands. StaticBody2D physical block
 ## is added separately in `_setup_collision`.
 func _draw_wall_segment(c: Color, _cd: Color, fortified: bool) -> void:
+	# Authored catalog walls at their default colour (1.7.5); fortified, renamed
+	# and re-tinted walls keep the faux-3D draw below.
+	if not fortified and TownArt.draw_2d(self, TownArt.key_of(self)):
+		return
 	# Faux-3D wall (art pass v1.5.3) — a front stone face with real HEIGHT, a lit
 	# top cap that recedes up-back, a shaded right side, and crenellations for
 	# fortified walls. Lit from the upper-left. Slightly wider than the tile so a
@@ -3075,6 +3163,10 @@ func _draw_faux_tower(hw: float, stone: Color, big: bool) -> void:
 ## body and `cd` for shadow accents. Each kind gets a distinct compact
 ## silhouette so the admin can tell what they placed at a glance.
 func _draw_structure_silhouette(kind: String, c: Color, cd: Color) -> void:
+	# Authored structures (1.7.5) draw before the size-class transform below: their
+	# sprites already bake the 2.2x/4.5x silhouette scale.
+	if TownArt.draw_2d(self, TownArt.key_of(self)):
+		return
 	# Scale the entire silhouette to match the structure's size class. The
 	# per-kind draws below are authored at a ~28-px "unit" scale; Medium
 	# (64×64) tiles at 2.2× and Large (128×128) at 4.5× so a Watchtower
@@ -3095,12 +3187,13 @@ func _draw_structure_silhouette(kind: String, c: Color, cd: Color) -> void:
 				draw_rect(Rect2(fx - 1, -8, 3, 18), c)
 			draw_rect(Rect2(-16, -4, 32, 2), cd)
 		"gate":
-			# Two posts + a horizontal beam.
+			# Two posts + a horizontal beam; open (1.7.5) = bare posts.
 			draw_rect(Rect2(-14, -14, 4, 28), cd)
 			draw_rect(Rect2(10, -14, 4, 28), cd)
-			draw_rect(Rect2(-14, -14, 28, 4), c)
-			draw_rect(Rect2(-14, 10, 28, 4), c)
-			draw_line(Vector2(-14, -12), Vector2(14, 12), c.darkened(0.20), 1.5)
+			if not gate_open:
+				draw_rect(Rect2(-14, -14, 28, 4), c)
+				draw_rect(Rect2(-14, 10, 28, 4), c)
+				draw_line(Vector2(-14, -12), Vector2(14, 12), c.darkened(0.20), 1.5)
 		"watchtower":
 			_draw_faux_tower(11.0, c, false)
 		"guard_tower":

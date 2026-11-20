@@ -68,6 +68,8 @@ static func state_frame(logic: Node) -> int:
 static func variant_row(key: String, logic: Node2D) -> int:
 	var rows := int(ASSETS[key]["rows"])
 	if rows <= 1: return 0
+	var stored: Variant = logic.get("variant_id")   # 1.7.5: stored shape wins
+	if stored != null and int(stored) >= 0: return int(stored) % rows
 	var p := logic.position
 	return int(abs(p.x * 73.0 + p.y * 31.0)) % rows
 
@@ -91,8 +93,10 @@ static func draw_2d(logic: Node2D, key: String) -> bool:
 	# children, so this affects only its own draws.
 	if logic.texture_filter != CanvasItem.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS:
 		logic.texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
-	logic.draw_texture_rect_region(_cache[key]["texture"], Rect2(offset * 0.5, Vector2(cell, cell) * 0.5),
+	var dst := Rect2(offset * 0.5, Vector2(cell, cell) * 0.5)
+	logic.draw_texture_rect_region(_cache[key]["texture"], dst,
 		Rect2(frame * cell, row * cell, cell, cell), tint_for(key, logic.get("color")))
+	logic.set_meta("art_rect", dst)   # admin hover/pick bounds
 	logic.set_meta("forest_frame", frame)   # QA harness only
 	logic.set_meta("forest_row", row)
 	return true

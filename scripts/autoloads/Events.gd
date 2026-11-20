@@ -207,6 +207,8 @@ extends Node
 ## for their own id and update HP bars + kill the collision body.
 @warning_ignore("unused_signal") signal structure_hp_changed(entity_id: String, hp: int, max_hp: int, alive: bool)
 @warning_ignore("unused_signal") signal structure_destroyed(entity_id: String)
+## 1.7.5: server-authoritative gate state (open/closed, lock + holding warband).
+@warning_ignore("unused_signal") signal gate_state_changed(entity_id: String, open: bool, locked: bool, lock_warband: String)
 @warning_ignore("unused_signal") signal mob_dead_on_join(entity_id: String, respawn_in: float)
 @warning_ignore("unused_signal") signal mob_full(entity_id: String)
 @warning_ignore("unused_signal") signal mob_states_received(nodes: Array)
@@ -306,6 +308,10 @@ extends Node
 ## Echo of a successful admin_place — the AdminPanel Undo stack listens so it can
 ## reverse a placement (the client only learns the new a: id from this reply).
 @warning_ignore("unused_signal") signal admin_entity_placed(id: String, kind: String, subtype: String, x: float, y: float)
+## 1.7.5: server verdict on a tagged move/rotate/edit (`req` from the AdminPanel).
+@warning_ignore("unused_signal") signal admin_op_acked(req: int, ok: bool, op: String)
+## 1.7.5: an admin-placed tree's shape was pinned on its first move.
+@warning_ignore("unused_signal") signal entity_variant_pinned(entity_id: String, variant_id: int)
 ## Echo of a successful admin_delete / admin_undelete (sent only to the admin who
 ## did it) — the Undo stack records the reverse op on these, not on the request.
 @warning_ignore("unused_signal") signal admin_entity_deleted(id: String, label: String)

@@ -18,6 +18,8 @@ const VillageArt = preload("res://scripts/art/VillagePrototypeArt.gd")
 const StonePickupArt = preload("res://scripts/art/StonePickupArt.gd")
 const ForestArt = preload("res://scripts/art/ForestArt.gd")
 const ResourceArt = preload("res://scripts/art/ResourceArt.gd")
+const TownArt = preload("res://scripts/art/TownArt.gd")
+const AdminEntityData = preload("res://scripts/admin/AdminEntityData.gd")
 # Real 2D LOGIC nodes (gather/combat/collision) live off-screen paired to each 3D
 # mesh visual; picking routes to them so the whole 2D interaction pipeline reuses.
 const InteractableTscn  := preload("res://scenes/Interactable.tscn")
@@ -199,6 +201,8 @@ func _ready() -> void:
 	Events.entity_restored.connect(_on_entity_restored3d)
 	Events.entity_edits_received.connect(_on_entity_edits3d)
 	Events.entity_data_edited.connect(_on_entity_data_edited3d)
+	Events.entity_variant_pinned.connect(_on_entity_variant_pinned3d)
+	Events.gate_state_changed.connect(_on_gate_state3d)
 	# Shared monster combat state (routed to the paired 2D Monster nodes).
 	Events.mob_state.connect(_on_mob_state)
 	Events.mob_hit.connect(_on_mob_hit)
@@ -1072,6 +1076,11 @@ func _interactable_node(type_str: String, col: Color, nm: String = "", logic: No
 		res.scale = Vector3.ONE * randf_range(0.86, 1.16)
 		res.rotation.y = randf() * TAU
 		return res
+	# Families 08–11/16/17 (1.7.5): town buildings, halls, forge, bank, well/market/
+	# armory, walls/fence/gate. Unit scale + zero yaw so walls tile on the 1 m grid.
+	var town := TownArt.instantiate_visual(TownArt.asset_for(type_str, nm, col), logic, col)
+	if town != null:
+		return town
 	if _STRUCTURE_TYPES.has(type_str):
 		return _mesh_instance(_mesh.call("structure", type_str, col) as Mesh)
 	var node: Node3D
@@ -1167,6 +1176,7 @@ func _region_for_pos(p: Vector2) -> String:
 ## its position each frame. Keyed by server entity id so the feeds can find it.
 func _pair(id: String, node2d: Node2D, mesh: Node3D, px: Vector2) -> void:
 	node2d.position = px
+	node2d.set_meta("ent_id", id)
 	_ent_container.add_child(node2d)
 	add_child(mesh)
 	_place(mesh, px)
@@ -1306,14 +1316,27 @@ func _spawn_seed_npc3d(i: int) -> void:
 
 ## Admin restored a deleted seeded NPC — respawn it at its seed defaults.
 func _on_entity_restored3d(entity_id: String) -> void:
-	if not entity_id.begins_with("n:"):
-		return
-	var i := int(entity_id.substr(2))
-	if i < 0 or i >= _seed_npcs3d.size():
-		return
 	_edits_data3d.erase(entity_id)
-	if _node_of(entity_id) == null:
-		_spawn_seed_npc3d(i)
+	if _node_of(entity_id) != null:
+		return
+	# 1.7.5 (U): every seeded kind comes back live, not just NPCs.
+	var parts := entity_id.split(":")
+	if entity_id.begins_with("n:"):
+		var i := int(entity_id.substr(2))
+		if i >= 0 and i < _seed_npcs3d.size():
+			_spawn_seed_npc3d(i)
+	elif entity_id.begins_with("t:") or entity_id.begins_with("kc:"):
+		var w: Object = WorldScript.new()
+		var rows: Array = w.call("get_town_nodes") if entity_id.begins_with("t:") else w.call("get_castle_nodes")
+		w.free()
+		var ri := int(parts[1])
+		if ri >= 0 and ri < rows.size():
+			_static_structure(rows[ri] as Array, entity_id)
+	elif entity_id.begins_with("r:") and parts.size() == 4:
+		var key := Vector2i(int(parts[1]), int(parts[2]))
+		if _res_chunks.has(key):   # regenerate the chunk; unloaded chunks respawn it later
+			_unload_res_chunk(key)
+			_load_res_chunk(key.x, key.y)
 
 func _static_structure(row: Array, id: String) -> void:   # [pos,type,name,skill,lvl,action,color]
 	_spawn_interactable(id, str(row[1]), str(row[2]), str(row[3]),
@@ -1369,6 +1392,8 @@ func _load_res_chunk(cx: int, cy: int) -> void:
 		if _ent.has(id):
 			continue
 		_spawn_interactable(id, str(d[0]), str(d[1]), str(d[2]), int(d[3]), str(d[4]), d[5] as Color, pos)
+		if not _apply_saved_edit3d(id):   # 1.7.5: deleted wild node stays deleted
+			continue
 		ids.append(id)
 	_res_chunks[Vector2i(cx, cy)] = ids
 	if not ids.is_empty():
@@ -1418,10 +1443,17 @@ func _spawn_admin_ent3d(entity: Dictionary) -> void:
 			_spawn_interactable(id, "seal_statue", "Seal of Kings", "", 1, "Inspect", Color(0.95, 0.78, 0.18), px)
 		"world_eater":
 			_spawn_interactable(id, "world_eater", "The World-Eater", "", 1, "Witness", Color(0.35, 0.05, 0.45), px)
-	# Restore a saved admin rotation (v1.6.1) after the visual exists.
-	var rot := float(data.get("rot", 0.0))
-	if rot != 0.0:
-		_apply_ent_rot3d(id, rot)
+	# Restore a saved admin rotation (v1.6.1) after the visual exists. 1.7.5: an
+	# explicit 0 counts too, so a restored entity never keeps a random spawn yaw.
+	if data.has("rot"):
+		_apply_ent_rot3d(id, float(data["rot"]))
+	if data.has("variant_id"):
+		var vn := _node_of(id)
+		if vn != null and "variant_id" in vn:
+			vn.set("variant_id", int(data["variant_id"]))
+	if data.has("gate_open"):   # 1.7.5: gate state from the burst / re-add
+		_on_gate_state3d(id, bool(data["gate_open"]), bool(data.get("gate_locked", false)),
+			str(data.get("gate_lock_warband", "")))
 	if _ent.has(id):
 		_admin_entity_data[id] = entity.duplicate(true)   # seed the Inspect editor
 
@@ -1448,7 +1480,9 @@ func _refresh_admin_stream_now3d() -> void:
 	for dx in range(-RES_RADIUS, RES_RADIUS + 1):
 		for dy in range(-RES_RADIUS, RES_RADIUS + 1):
 			var ch := Vector2i(pcx + dx, pcy + dy)
-			if _admin_index3d.has(ch) and not _admin_loaded3d.has(ch):
+			# 1.7.5: empty chunks count as loaded too, so an entity placed into one
+			# later spawns at once instead of waiting for a chunk change.
+			if ch.x >= 0 and ch.y >= 0 and not _admin_loaded3d.has(ch):
 				_load_admin_chunk3d(ch)
 
 func _remove_ent3d(entity_id: String) -> void:
@@ -1510,7 +1544,7 @@ func _update_admin_chunks3d(desired: Dictionary) -> void:
 	for ch: Variant in to_unload:
 		_unload_admin_chunk3d(ch as Vector2i)
 	for ch: Variant in desired.keys():
-		if _admin_index3d.has(ch) and not _admin_loaded3d.has(ch):
+		if not _admin_loaded3d.has(ch):   # 1.7.5: empty chunks too (see above)
 			_load_admin_chunk3d(ch as Vector2i)
 
 func _deindex_admin3d(entity_id: String) -> void:
@@ -1588,6 +1622,15 @@ func _apply_ent_rot3d(entity_id: String, rot: float) -> void:
 	if is_instance_valid(v):
 		(v as Node3D).rotation.y = rot
 		(v as Node3D).set_meta("admin_rot", rot)
+	# Mirror onto the hidden 2D logic node (directional 2D art after a mode switch,
+	# Inspect, and the rotate tool's next step).
+	var n := _node_of(entity_id)
+	if n != null and "admin_rot" in n:
+		n.set("admin_rot", rot)
+	if _admin_entity_data.has(entity_id):
+		var info: Dictionary = _admin_entity_data[entity_id]
+		if info.get("data") is Dictionary:
+			(info["data"] as Dictionary)["rot"] = rot
 
 ## Current admin Y-rotation of an entity (radians), or 0 — read by the AdminPanel
 ## rotate tool to compute the next step.
@@ -1598,6 +1641,108 @@ func admin_entity_rot(entity_id: String) -> float:
 	if is_instance_valid(v) and (v as Node3D).has_meta("admin_rot"):
 		return float((v as Node3D).get_meta("admin_rot"))
 	return 0.0
+
+## 1.7.5: shape a tree shows now if not yet stored (-1 otherwise). Admin Move sends
+## it so the first move pins the 2D look.
+func admin_entity_unpinned_variant(id: String) -> int:
+	var n := _node_of(id)
+	if n == null or not n.has_method("current_variant") or int(n.get("variant_id")) >= 0:
+		return -1
+	return int(n.call("current_variant"))
+
+# ── 1.7.5 (H) admin bounds + picking ──────────────────────────────────────────
+## Screen-space bounds: {"art": projected box of the 3D model, "foot": projected
+## gameplay footprint (the logic node's click rect, at ground level)}, or {}.
+func admin_entity_screen_rects(id: String) -> Dictionary:
+	if not _ent.has(id) or _cam == null:
+		return {}
+	var e: Dictionary = _ent[id]
+	if not is_instance_valid(e["v"]) or not is_instance_valid(e["n"]):
+		return {}
+	var v := e["v"] as Node3D
+	var n := e["n"] as Node2D
+	var art := _project_box(v.global_transform * _local_aabb(v))
+	var f := Rect2(-12, -12, 24, 24)
+	if n.has_method("admin_footprint_rect"):
+		f = n.call("admin_footprint_rect") as Rect2
+	var gp := n.global_position
+	var y := v.global_position.y
+	var corners: Array = []
+	for c: Vector2 in [f.position, f.position + Vector2(f.size.x, 0),
+			f.position + Vector2(0, f.size.y), f.end]:
+		corners.append(Vector3((gp.x + c.x) * SCALE, y, (gp.y + c.y) * SCALE))
+	var foot := _project_points(corners)
+	if art.size == Vector2.ZERO or foot.size == Vector2.ZERO:
+		return {}
+	return {"art": art, "foot": foot}
+
+## Model-space AABB of a visual (all its meshes), cached on the node.
+func _local_aabb(v: Node3D) -> AABB:
+	if v.has_meta("admin_aabb"):
+		return v.get_meta("admin_aabb") as AABB
+	var box := AABB()
+	var first := true
+	var inv := v.global_transform.affine_inverse()
+	for mi: Node in v.find_children("*", "MeshInstance3D", true, false):
+		var m := mi as MeshInstance3D
+		if m.mesh == null or not m.is_visible_in_tree():
+			continue
+		var b: AABB = (inv * m.global_transform) * m.get_aabb()
+		box = b if first else box.merge(b)
+		first = false
+	if v is MeshInstance3D and (v as MeshInstance3D).mesh != null:
+		var own := (v as MeshInstance3D).get_aabb()
+		box = own if first else box.merge(own)
+		first = false
+	if first:
+		box = AABB(Vector3(-0.4, 0, -0.4), Vector3(0.8, 1.2, 0.8))
+	v.set_meta("admin_aabb", box)
+	return box
+
+func _project_box(b: AABB) -> Rect2:
+	var pts: Array = []
+	for i in range(8):
+		pts.append(b.get_endpoint(i))
+	return _project_points(pts)
+
+func _project_points(pts: Array) -> Rect2:
+	var r := Rect2()
+	var first := true
+	for p: Vector3 in pts:
+		if _cam.is_position_behind(p):
+			return Rect2()
+		var sp := _cam.unproject_position(p)
+		r = Rect2(sp, Vector2.ZERO) if first else r.expand(sp)
+		first = false
+	return r
+
+## Entity under the cursor: of those whose projected model box contains
+## `screen_pos`, the smallest; else the nearest centre within `radius` px.
+func admin_entity_pick(screen_pos: Vector2, world_pos: Vector2, radius: float = 44.0) -> String:
+	var best := ""
+	var best_area := INF
+	var best_d := INF
+	for id_v: Variant in _ent.keys():
+		var id := str(id_v)
+		var e: Dictionary = _ent[id]
+		if not is_instance_valid(e["n"]) or not is_instance_valid(e["v"]):
+			continue
+		if (e["n"] as Node2D).global_position.distance_squared_to(world_pos) > 480.0 * 480.0:
+			continue
+		var r := admin_entity_screen_rects(id)
+		if r.is_empty():
+			continue
+		var art: Rect2 = r["art"]
+		if not art.has_point(screen_pos):
+			continue
+		# Smallest box wins; equal boxes (a wall run) → nearest footprint centre.
+		var d := (r["foot"] as Rect2).get_center().distance_squared_to(screen_pos)
+		var area := art.get_area()
+		if area < best_area - 1.0 or (absf(area - best_area) <= 1.0 and d < best_d):
+			best_area = area
+			best_d = d
+			best = id
+	return best if best != "" else admin_entity_at(world_pos, radius)
 
 ## Admin moved/deleted a pre-existing entity (server confirms with this).
 func _on_entity_edit_applied3d(entity_id: String, deleted: bool, x: float, y: float) -> void:
@@ -1625,7 +1770,7 @@ func _on_entity_edits3d(edits: Array) -> void:
 				_relocate3d(n, Vector2(float(d["x"]), float(d["y"])))
 				_unfile_res(id)
 		var er := float(d.get("rot", 0.0))
-		if er != 0.0:
+		if bool(d.get("has_rot", false)) or er != 0.0:   # 1.7.5: explicit 0 too
 			_apply_ent_rot3d(id, er)
 		if d.get("data") is Dictionary and not (d["data"] as Dictionary).is_empty():
 			_edits_data3d[id] = d["data"]
@@ -1651,12 +1796,123 @@ func _apply_entity_data3d(node: Node, data: Dictionary) -> void:
 		node.set("npc_type", str(data["npc_type"]))
 	if data.has("level") and node.has_method("scale_to_level"):
 		node.call("scale_to_level", int(data["level"]))
+	if AdminEntityData.apply_resource_data(node, data):
+		var eid := str(node.get_meta("ent_id", ""))
+		if eid != "":
+			_rebuild_visual3d(eid)
 
 func _on_entity_data_edited3d(entity_id: String, data: Dictionary) -> void:
 	_edits_data3d[entity_id] = data
 	var n := _node_of(entity_id)
 	if n != null:
 		_apply_entity_data3d(n, data)
+
+## 1.7.5 (S): swap an Interactable's 3D model for a fresh one built from its
+## (edited) logic node — name/colour/shape changes show at once, no relog. Keeps
+## the stored admin yaw.
+func _rebuild_visual3d(id: String) -> void:
+	if not _ent.has(id):
+		return
+	var e: Dictionary = _ent[id]
+	var logic: Variant = e["n"]
+	var old: Variant = e["v"]
+	if not is_instance_valid(logic) or not ("interactable_type_str" in (logic as Node)):
+		return
+	var ln := logic as Node2D
+	var fresh := _interactable_node(str(ln.get("interactable_type_str")), ln.get("color") as Color,
+		str(ln.get("display_name")), ln)
+	if fresh == null:
+		return
+	add_child(fresh)
+	_place(fresh, ln.global_position)
+	e["v"] = fresh
+	_refresh_gate_visual3d(id)
+	if is_instance_valid(old):
+		var ov := old as Node3D
+		if ov.has_meta("admin_rot"):
+			fresh.rotation.y = float(ov.get_meta("admin_rot"))
+			fresh.set_meta("admin_rot", ov.get_meta("admin_rot"))
+		ov.queue_free()
+
+## 1.7.5 gates: the hidden 2D logic node owns collision; the model shows the
+## matching pieces (authored) or hides the stand-in mesh while open (procedural).
+func _on_gate_state3d(entity_id: String, open: bool, locked: bool, lock_wb: String) -> void:
+	var n := _node_of(entity_id)
+	if n != null and n.has_method("apply_gate_state"):
+		n.call("apply_gate_state", open, locked, lock_wb)
+	_refresh_gate_visual3d(entity_id)
+	var info: Variant = _admin_entity_data.get(entity_id)
+	if info is Dictionary and (info as Dictionary).get("data") is Dictionary:
+		var d: Dictionary = (info as Dictionary)["data"]
+		d["gate_open"] = open
+		d["gate_locked"] = locked
+		d["gate_lock_warband"] = lock_wb
+
+func _refresh_gate_visual3d(entity_id: String) -> void:
+	if not _ent.has(entity_id):
+		return
+	var e: Dictionary = _ent[entity_id]
+	if not is_instance_valid(e["v"]) or not is_instance_valid(e["n"]):
+		return
+	var v := e["v"] as Node3D
+	if v.has_method("refresh"):
+		v.call("refresh")
+	elif str((e["n"] as Node).get("interactable_type_str")) == "gate":
+		# flag, not .visible — the per-frame sync below would undo a direct hide
+		v.set_meta("gate_hidden", bool((e["n"] as Node).get("gate_open")))
+		v.visible = (e["n"] as Node2D).visible and not bool(v.get_meta("gate_hidden"))
+
+## 1.7.5 (V): an admin-placed tree's shape was pinned on its first move (2D draws
+## it; 3D tree models have one shape, so only the logic node + caches change).
+func _on_entity_variant_pinned3d(entity_id: String, variant: int) -> void:
+	var n := _node_of(entity_id)
+	if n != null and "variant_id" in n:
+		n.set("variant_id", variant)
+	var info: Variant = _admin_entity_data.get(entity_id)
+	if info is Dictionary and (info as Dictionary).get("data") is Dictionary:
+		((info as Dictionary)["data"] as Dictionary)["variant_id"] = variant
+	if _admin_id_chunk3d.has(entity_id):
+		for ev: Variant in _admin_index3d.get(_admin_id_chunk3d[entity_id], []):
+			if str((ev as Dictionary).get("id", "")) == entity_id and (ev as Dictionary).get("data") is Dictionary:
+				((ev as Dictionary)["data"] as Dictionary)["variant_id"] = variant
+
+## 1.7.5 (S/U): saved admin edits for chunk-streamed wild resources (r:…). They
+## used to be applied only at login, so a deleted/edited wild node came back as
+## generated when its chunk streamed in again.
+var _edit_index3d: Dictionary = {}
+var _edit_index_n3d: int = -1
+
+func _saved_edit3d(id: String) -> Dictionary:
+	var cache: Array = NetworkManager.entity_edits_cache
+	if _edit_index_n3d != cache.size():
+		_edit_index3d.clear()
+		for r: Variant in cache:
+			if r is Dictionary:
+				_edit_index3d[str((r as Dictionary).get("id", ""))] = r
+		_edit_index_n3d = cache.size()
+	var row: Variant = _edit_index3d.get(id)
+	return row as Dictionary if row is Dictionary else {}
+
+## Returns false if the saved edit deletes it (caller skips/frees it).
+func _apply_saved_edit3d(id: String) -> bool:
+	var d := _saved_edit3d(id)
+	if d.is_empty():
+		return true
+	if bool(d.get("deleted", false)):
+		_free_ent(id)
+		return false
+	if d.get("x") != null and d.get("y") != null:
+		var n := _node_of(id)
+		if n != null:
+			_relocate3d(n, Vector2(float(d["x"]), float(d["y"])))
+			_unfile_res(id)
+	if bool(d.get("has_rot", false)) or float(d.get("rot", 0.0)) != 0.0:
+		_apply_ent_rot3d(id, float(d.get("rot", 0.0)))
+	if d.get("data") is Dictionary and not (d["data"] as Dictionary).is_empty():
+		var dn := _node_of(id)
+		if dn != null:
+			_apply_entity_data3d(dn, d["data"] as Dictionary)
+	return true
 
 # ── P6: caravans (paired Caravan node + wagon mesh) ──────────────────────────
 func _on_caravans_updated3d(list: Array) -> void:
@@ -2240,7 +2496,9 @@ func _sync_entity_meshes() -> void:
 			n.global_position = n.global_position.lerp(_mob_target[id] as Vector2, 0.18)
 		var prev: Vector2 = v.get_meta("epx", n.global_position)
 		_place(v, n.global_position)
-		v.visible = n.visible   # server_die / depletion hides the 2D node → hide the mesh
+		# server_die / depletion hides the 2D node → hide the mesh. 1.7.5: an open
+		# procedural (kill-switch) gate's stand-in mesh stays hidden too.
+		v.visible = n.visible and not bool(v.get_meta("gate_hidden", false))
 		# Single-mesh monsters face their movement direction here (models front
 		# toward -Z, so +PI). RIGGED monsters self-face from their own motion.
 		if n.get("monster_type") != null and not v.has_meta("rig"):
@@ -2370,7 +2628,7 @@ func _synth_info_for3d(node: Node, id: String) -> Dictionary:
 		var lv: Variant = node.get("level")
 		return {"id": id, "kind": "monster", "subtype": str(mtype),
 			"data": {"level": int(lv) if lv != null else 1}}
-	return {}
+	return AdminEntityData.resource_info_of(node, id)
 
 ## All loaded editable entities as [{id, name, pos}], name-sorted, for the browser.
 func admin_entity_list() -> Array:
@@ -2442,6 +2700,12 @@ func admin_teleport(world_pos: Vector2) -> void:
 		Events.chat_message.emit("[Admin] Left the interior — open the map again to teleport.")
 		return
 	_player_node.global_position = world_pos
+	# 1.7.5: drop the old walk target too — otherwise the player walks straight
+	# back to wherever it last clicked (the teleport looked like it "didn't take").
+	_player_node.set("_target_pos", world_pos)
+	_player_node.set("_target_interactable", null)
+	_player_node.set("_target_monster", null)
+	_player_node.set("velocity", Vector2.ZERO)
 	Events.chat_message.emit("[Admin] Teleported to (%d, %d)." % [int(world_pos.x), int(world_pos.y)])
 
 ## AdminPanel hook — the 3D client has no 2D passability overlay (no-op stub).

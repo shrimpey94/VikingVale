@@ -674,20 +674,36 @@ func _update_edit_cache(entity_id: String, patch: Dictionary, remove: bool = fal
 		fresh.merge(patch, true)
 		entity_edits_cache.append(fresh)
 
-func send_admin_move(entity_id: String, x: float, y: float, label: String = "") -> void:
+## `req` >= 0 asks the server for an admin_ack (1.7.5 Undo: a step is recorded only
+## once the server accepted it). `variant_id` >= 0 pins a tree's current shape.
+func send_admin_move(entity_id: String, x: float, y: float, label: String = "",
+		req: int = -1, variant_id: int = -1) -> void:
 	if state == NetState.LOGGED_IN:
-		_send({"type": "admin_move", "id": entity_id, "x": x, "y": y, "label": label})
+		var m := {"type": "admin_move", "id": entity_id, "x": x, "y": y, "label": label}
+		if req >= 0: m["req"] = req
+		if variant_id >= 0: m["variant_id"] = variant_id
+		_send(m)
 
-func send_admin_rotate(entity_id: String, rot: float, label: String = "") -> void:
+func send_admin_rotate(entity_id: String, rot: float, label: String = "", req: int = -1) -> void:
 	if state == NetState.LOGGED_IN:
-		_send({"type": "admin_rotate", "id": entity_id, "rot": rot, "label": label})
+		var m := {"type": "admin_rotate", "id": entity_id, "rot": rot, "label": label}
+		if req >= 0: m["req"] = req
+		_send(m)
 
 ## Live property edit of an admin-placed (a:) entity — `patch` carries only the
 ## changed data fields (level, display_name, quest_text, shop_id, …). The server
 ## merges it into the stored data JSON and re-emits the entity so it re-renders.
-func send_admin_edit_entity(entity_id: String, patch: Dictionary) -> void:
+## 1.7.5: open / close / lock / unlock a gate. The server checks reach, land
+## control and the lock, and answers with gate_state (+ a chat line).
+func send_gate_action(entity_id: String, action: String, label: String = "") -> void:
+	if state == NetState.LOGGED_IN and not entity_id.is_empty():
+		_send({"type": "gate_action", "id": entity_id, "action": action, "label": label})
+
+func send_admin_edit_entity(entity_id: String, patch: Dictionary, req: int = -1) -> void:
 	if state == NetState.LOGGED_IN and not entity_id.is_empty() and not patch.is_empty():
-		_send({"type": "admin_edit_entity", "id": entity_id, "patch": patch})
+		var m := {"type": "admin_edit_entity", "id": entity_id, "patch": patch}
+		if req >= 0: m["req"] = req
+		_send(m)
 
 func send_admin_sculpt(tiles: Dictionary) -> void:
 	if state == NetState.LOGGED_IN and not tiles.is_empty():
@@ -1927,6 +1943,20 @@ func _handle(msg: Dictionary) -> void:
 		"structure_destroyed":
 			Events.structure_destroyed.emit(str(msg.get("id", "")))
 
+		"gate_state":
+			# 1.7.5: keep the burst cache current (2D↔3D switch replays it).
+			var gid := str(msg.get("id", ""))
+			var gop := bool(msg.get("open", false))
+			var glk := bool(msg.get("locked", false))
+			var gwb := str(msg.get("lock_warband", ""))
+			for e: Variant in world_entities_cache:
+				if str((e as Dictionary).get("id", "")) == gid and (e as Dictionary).get("data") is Dictionary:
+					var gd: Dictionary = (e as Dictionary)["data"]
+					gd["gate_open"] = gop
+					gd["gate_locked"] = glk
+					gd["gate_lock_warband"] = gwb
+			Events.gate_state_changed.emit(gid, gop, glk, gwb)
+
 		"monster_dead":
 			Events.mob_dead_on_join.emit(str(msg.get("id", "")), float(msg.get("respawn_in", 0.0)))
 
@@ -2026,10 +2056,18 @@ func _handle(msg: Dictionary) -> void:
 			var emid := str(msg.get("id", ""))
 			var emx := float(msg.get("x", 0.0))
 			var emy := float(msg.get("y", 0.0))
+			# 1.7.5: a first move pins a tree's shape (variant_id) — apply it BEFORE
+			# the move so the node never draws the new spot's position-picked shape.
+			var emv: Variant = msg.get("variant_id")
 			for e: Variant in world_entities_cache:
 				if str((e as Dictionary).get("id", "")) == emid:
 					(e as Dictionary)["x"] = emx
 					(e as Dictionary)["y"] = emy
+					var emd: Variant = (e as Dictionary).get("data")
+					if emv != null and emd is Dictionary:
+						(emd as Dictionary)["variant_id"] = int(emv)
+			if emv != null:
+				Events.entity_variant_pinned.emit(emid, int(emv))
 			Events.world_entity_moved.emit(emid, emx, emy)
 
 		"world_entity_rotate":
@@ -2041,9 +2079,8 @@ func _handle(msg: Dictionary) -> void:
 					var ed: Variant = (e as Dictionary).get("data")
 					if ed is Dictionary:
 						(ed as Dictionary)["rot"] = erot
-			for ee: Variant in entity_edits_cache:
-				if str((ee as Dictionary).get("id", "")) == erid:
-					(ee as Dictionary)["rot"] = erot
+			if not erid.begins_with("a:"):   # seeded: rotation lives in entity_edits
+				_update_edit_cache(erid, {"rot": erot, "has_rot": true})
 			Events.world_entity_rotated.emit(erid, erot)
 
 		"toast":
@@ -2243,6 +2280,11 @@ func _handle(msg: Dictionary) -> void:
 		"admin_audit":
 			Events.admin_audit_received.emit(msg.get("recent", []) as Array,
 				msg.get("deleted", []) as Array)
+
+		"admin_ack":
+			# 1.7.5: server verdict on an undoable admin op the editor tagged `req`.
+			Events.admin_op_acked.emit(int(msg.get("req", -1)), bool(msg.get("ok", false)),
+				str(msg.get("op", "")))
 
 		"admin_placed":
 			# Echo of a successful admin_place — carries the new a: id so the

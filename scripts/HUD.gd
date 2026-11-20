@@ -11174,6 +11174,23 @@ func _action_menu_options(node: Node) -> Array:
 			var alive: bool = bool(node.get("structure_alive"))
 			var s_hp: int = int(node.get("structure_hp"))
 			var s_max: int = int(node.get("structure_max_hp"))
+			# 1.7.5 gates: Open/Close and Lock/Unlock. Who may do what (land
+			# control, lock holder, admin) is decided by the server, which replies.
+			if t == "gate" and alive and str(node.get("entity_id")) != "":
+				var gid: String = str(node.get("entity_id"))
+				var gname: String = str(node.get("display_name"))
+				if bool(node.get("gate_open")):
+					opts.append({"label": "Close", "cb": func() -> void:
+						NetworkManager.send_gate_action(gid, "close", gname)})
+				else:
+					opts.append({"label": "Open", "cb": func() -> void:
+						NetworkManager.send_gate_action(gid, "open", gname)})
+				if bool(node.get("gate_locked")):
+					opts.append({"label": "Unlock", "cb": func() -> void:
+						NetworkManager.send_gate_action(gid, "unlock", gname)})
+				else:
+					opts.append({"label": "Lock", "cb": func() -> void:
+						NetworkManager.send_gate_action(gid, "lock", gname)})
 			# Attack fires the left-click damage flow via Events.player_interacted.
 			if alive:
 				opts.append({"label": "Attack", "cb": func() -> void:
