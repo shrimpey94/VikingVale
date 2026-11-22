@@ -1,0 +1,507 @@
+shader_type spatial;
+render_mode cull_disabled;
+
+uniform sampler2D grass_albedo : source_color, filter_linear_mipmap, repeat_enable;
+uniform sampler2D grass_normal : filter_linear_mipmap, repeat_enable;
+uniform sampler2D grass_orm : filter_linear_mipmap, repeat_enable;
+uniform sampler2D forest_albedo : source_color, filter_linear_mipmap, repeat_enable;
+uniform sampler2D forest_normal : filter_linear_mipmap, repeat_enable;
+uniform sampler2D forest_orm : filter_linear_mipmap, repeat_enable;
+uniform sampler2D pine_albedo : source_color, filter_linear_mipmap, repeat_enable;
+uniform sampler2D pine_normal : filter_linear_mipmap, repeat_enable;
+uniform sampler2D pine_orm : filter_linear_mipmap, repeat_enable;
+uniform sampler2D plains_albedo : source_color, filter_linear_mipmap, repeat_enable;
+uniform sampler2D plains_normal : filter_linear_mipmap, repeat_enable;
+uniform sampler2D plains_orm : filter_linear_mipmap, repeat_enable;
+uniform sampler2D snow_albedo : source_color, filter_linear_mipmap, repeat_enable;
+uniform sampler2D snow_normal : filter_linear_mipmap, repeat_enable;
+uniform sampler2D snow_orm : filter_linear_mipmap, repeat_enable;
+uniform sampler2D ash_albedo : source_color, filter_linear_mipmap, repeat_enable;
+uniform sampler2D ash_normal : filter_linear_mipmap, repeat_enable;
+uniform sampler2D ash_orm : filter_linear_mipmap, repeat_enable;
+uniform sampler2D helheim_albedo : source_color, filter_linear_mipmap, repeat_enable;
+uniform sampler2D helheim_normal : filter_linear_mipmap, repeat_enable;
+uniform sampler2D helheim_orm : filter_linear_mipmap, repeat_enable;
+varying vec3 terrain_world_position;
+varying vec3 terrain_world_normal;
+uniform sampler2D rocky_albedo : source_color, filter_linear_mipmap, repeat_enable;
+uniform sampler2D rocky_normal : filter_linear_mipmap, repeat_enable;
+uniform sampler2D rocky_orm : filter_linear_mipmap, repeat_enable;
+uniform sampler2D mountain_albedo : source_color, filter_linear_mipmap, repeat_enable;
+uniform sampler2D mountain_normal : filter_linear_mipmap, repeat_enable;
+uniform sampler2D mountain_orm : filter_linear_mipmap, repeat_enable;
+uniform sampler2D cliff_albedo : source_color, filter_linear_mipmap, repeat_enable;
+uniform sampler2D cliff_normal : filter_linear_mipmap, repeat_enable;
+uniform sampler2D cliff_orm : filter_linear_mipmap, repeat_enable;
+uniform sampler2D swamp_albedo : source_color, filter_linear_mipmap, repeat_enable;
+uniform sampler2D swamp_normal : filter_linear_mipmap, repeat_enable;
+uniform sampler2D swamp_orm : filter_linear_mipmap, repeat_enable;
+uniform sampler2D sand_albedo : source_color, filter_linear_mipmap, repeat_enable;
+uniform sampler2D sand_normal : filter_linear_mipmap, repeat_enable;
+uniform sampler2D sand_orm : filter_linear_mipmap, repeat_enable;
+uniform sampler2D town_albedo : source_color, filter_linear_mipmap, repeat_enable;
+uniform sampler2D town_normal : filter_linear_mipmap, repeat_enable;
+uniform sampler2D town_orm : filter_linear_mipmap, repeat_enable;
+uniform sampler2D road_albedo : source_color, filter_linear_mipmap, repeat_enable;
+uniform sampler2D road_normal : filter_linear_mipmap, repeat_enable;
+uniform sampler2D road_orm : filter_linear_mipmap, repeat_enable;
+uniform sampler2D timber_albedo : source_color, filter_linear_mipmap, repeat_enable;
+uniform sampler2D timber_normal : filter_linear_mipmap, repeat_enable;
+uniform sampler2D timber_orm : filter_linear_mipmap, repeat_enable;
+uniform sampler2D flagstone_albedo : source_color, filter_linear_mipmap, repeat_enable;
+uniform sampler2D flagstone_normal : filter_linear_mipmap, repeat_enable;
+uniform sampler2D flagstone_orm : filter_linear_mipmap, repeat_enable;
+uniform sampler2D weave_albedo : source_color, filter_linear_mipmap, repeat_enable;
+uniform sampler2D weave_normal : filter_linear_mipmap, repeat_enable;
+uniform sampler2D weave_orm : filter_linear_mipmap, repeat_enable;
+uniform sampler2D sample_biomes : filter_nearest, repeat_disable;
+uniform vec2 sample_map_size = vec2(300.0,520.0);
+float sample_id(vec2 t) {return floor(texture(sample_biomes,(clamp(t,vec2(0.0),sample_map_size-1.0)+.5)/sample_map_size).r*255.0+.5);}
+int material_index(float id) {
+ if(id==2.0)return 0;
+ if(id==4.0)return 1;
+ if(id==3.0)return 2;
+ if(id==0.0 || id==1.0)return 3;
+ if(id==10.0)return 4;
+ if(id==12.0)return 5;
+ if(id==11.0)return 6;
+ if(id==37.0)return 7;
+ if(id==7.0)return 8;
+ if(id==6.0)return 9;
+ if(id==15.0)return 10;
+ if(id==5.0)return 11;
+ if(id==22.0)return 12;
+ if(id==38.0)return 13;
+ if(id==39.0)return 14;
+ if(id==41.0)return 15;
+ if(id==26.0)return 16;
+ if(id==27.0)return 17;
+ if(id==28.0)return 18;
+ if(id==33.0)return 19;
+ if(id==51.0)return 20;
+ if(id==36.0)return 21;
+ if(id==78.0)return 22;
+ if(id==79.0)return 23;
+ if(id==13.0)return 24;
+ if(id==14.0)return 25;
+ if(id==16.0)return 26;
+ if(id==17.0)return 27;
+ if(id==18.0)return 28;
+ if(id==19.0)return 29;
+ if(id==20.0)return 30;
+ if(id==21.0)return 31;
+ if(id==23.0)return 32;
+ if(id==48.0)return 33;
+ if(id==49.0)return 34;
+ if(id==84.0)return 35;
+ return -1;
+}
+vec3 rock_color(sampler2D tex,vec3 p,vec3 a){
+ vec3 top=mix(texture(tex,p.xz/4.0).rgb,texture(tex,p.xz/7.3).rgb,.35);
+ vec3 side_x=mix(texture(tex,p.zy/4.0).rgb,texture(tex,p.zy/7.3).rgb,.35);
+ vec3 side_z=mix(texture(tex,p.xy/4.0).rgb,texture(tex,p.xy/7.3).rgb,.35);
+ return top*a.y+side_x*a.x+side_z*a.z;
+}
+vec3 rock_detail(sampler2D tex,vec3 p,vec3 a){
+ vec2 top=texture(tex,p.xz/4.0).xy*2.0-1.0;
+ vec2 side_x=texture(tex,p.zy/4.0).xy*2.0-1.0;
+ vec2 side_z=texture(tex,p.xy/4.0).xy*2.0-1.0;
+ return vec3(top.x,0.0,top.y)*a.y+vec3(0.0,side_x.y,side_x.x)*a.x+vec3(side_z.x,side_z.y,0.0)*a.z;
+}
+float transition_hash(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
+float transition_noise(vec2 p){vec2 i=floor(p);vec2 f=fract(p);f=f*f*(3.0-2.0*f);
+ return mix(mix(transition_hash(i),transition_hash(i+vec2(1,0)),f.x),mix(transition_hash(i+vec2(0,1)),transition_hash(i+vec2(1,1)),f.x),f.y);}
+vec3 distinct_surface(vec3 color,int index,vec2 p){
+ vec2 q=p+vec2(float(index)*7.13,float(index)*3.79);
+ float patch=transition_noise(q*1.27)*.72+transition_noise(q*3.1)*.28;
+ float large=smoothstep(.46,.61,patch);
+ float small=smoothstep(.44,.62,transition_noise(q*3.5)*.8+transition_noise(q*8.1)*.2);
+ vec3 rock=mix(texture(cliff_albedo,p/2.7).rgb,texture(mountain_albedo,p/4.1).rgb,.35);
+ vec3 leaf=texture(forest_albedo,p/2.2).rgb;
+ if(index==1){return color*vec3(.65,.82,.75);}
+ if(index==2){float drift=transition_noise(p*.18);return color*vec3(1.04,1.01,.86)*(.96+.08*drift);}
+ if(index==0){return mix(color*vec3(.78,.91,.70),vec3(dot(leaf,vec3(.2126,.7152,.0722)))*vec3(1.4,1.0,.55),small*.32);}
+ if(index==3){return color*vec3(1.02,1.06,.96);}
+ if(index==7){return mix(color*.88,rock*vec3(.42,.43,.46),large*.76);}
+ if(index==9){return color*vec3(.94,1.02,1.13);}
+ if(index==10){return mix(color*vec3(.86,.86,.83),texture(mountain_albedo,p/2.5).rgb*vec3(.84,.85,.85),.48);}
+ if(index==11){return mix(color*vec3(.66,.76,.56),leaf*vec3(.48,.51,.35),large*.78);}
+ if(index==13){return mix(color*vec3(.85,.85,1.02),rock*vec3(.78,.51,1.0),large*.70);}
+ if(index==14){return mix(color*vec3(.91,.87,.78),rock*vec3(1.12,1.10,1.04),large*.82);}
+ if(index==15){return mix(color*vec3(.57,.50,.40),texture(rocky_albedo,p/1.7).rgb*vec3(.46,.41,.33),small*.45);}
+ if(index==16){return mix(color*vec3(1.04,.96,.80),rock*vec3(1.20,1.02,.75),large*.82);}
+ if(index==17){vec3 under=mix(color*vec3(.83,.94,.76),leaf,small*.25);return mix(under,rock*vec3(.82,.91,.66),large*.80);}
+ if(index==18){return mix(color*vec3(.82,.91,.96),rock*vec3(.64,.73,.86),smoothstep(.55,.70,transition_noise((p+vec2(7.0,13.0))*vec2(.85,1.5)))*.80);}
+ if(index==20){return color*vec3(1.13,1.02,.76);}
+ if(index==21){return mix(color*vec3(1.06,1.13,.86),vec3(dot(leaf,vec3(.2126,.7152,.0722)))*vec3(1.65,1.05,.53),large*.65);}
+ if(index==22){float lum=dot(color,vec3(.2126,.7152,.0722));return mix(color,vec3(lum)*vec3(1.15,1.03,.81),.72)*.86;}
+ return color;
+}
+#include "res://assets/authored/terrain/surface49_batch01/v002/built_elevation.gdshaderinc"
+void surface(vec2 p,out vec3 albedo,out vec3 normal,out vec3 orm,out float eligible,out vec3 world_detail) {
+ world_detail=vec3(0.0);
+ eligible=material_index(sample_id(floor(p)))>=0?1.0:0.0;
+ float weights[36]=float[36](0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0);
+ vec2 warped=p+vec2(sin(p.y*2.1+sin(p.x*.71)),cos(p.x*1.7+sin(p.y*.83)))*.19;
+ vec2 cell=floor(warped);float total=0.0;
+ for(int y=-1;y<=1;y++){for(int x=-1;x<=1;x++){
+  vec2 at=cell+vec2(float(x),float(y));int k=material_index(sample_id(at));
+  float w=exp(-dot(at+.5-warped,at+.5-warped)*2.5);
+  if(k>=0){weights[k]+=w;total+=w;}
+ }}
+ vec2 uv=p/4.0+vec2(sin(p.y*.63+sin(p.x*.31)),cos(p.x*.53+sin(p.y*.39)))*.13;
+ vec2 uv2=vec2(p.x*.8+p.y*.6,-p.x*.6+p.y*.8)/7.3;
+ albedo=vec3(0.0);normal=vec3(0.0);orm=vec3(0.0);
+ if(weights[0]>0.00001){
+  float w=weights[0]/max(total,.0001);
+  albedo+=distinct_surface(mix(texture(grass_albedo,uv).rgb,texture(grass_albedo,uv2).rgb,.35),0,p)*w;
+  normal+=(texture(grass_normal,p/4.0).rgb*2.0-1.0)*w;
+  orm+=texture(grass_orm,p/4.0).rgb*w;
+ }
+ if(weights[1]>0.00001){
+  float w=weights[1]/max(total,.0001);
+  albedo+=distinct_surface(mix(texture(forest_albedo,uv).rgb,texture(forest_albedo,uv2).rgb,.35),1,p)*w;
+  normal+=(texture(forest_normal,p/4.0).rgb*2.0-1.0)*w;
+  orm+=texture(forest_orm,p/4.0).rgb*w;
+ }
+ if(weights[2]>0.00001){
+  float w=weights[2]/max(total,.0001);
+  albedo+=distinct_surface(mix(texture(pine_albedo,uv).rgb,texture(pine_albedo,uv2).rgb,.35),2,p)*w;
+  normal+=(texture(pine_normal,p/4.0).rgb*2.0-1.0)*w;
+  orm+=texture(pine_orm,p/4.0).rgb*w;
+ }
+ if(weights[3]>0.00001){
+  float w=weights[3]/max(total,.0001);
+  albedo+=distinct_surface(mix(texture(plains_albedo,uv).rgb,texture(plains_albedo,uv2).rgb,.35),3,p)*w;
+  normal+=(texture(plains_normal,p/4.0).rgb*2.0-1.0)*w;
+  orm+=texture(plains_orm,p/4.0).rgb*w;
+ }
+ if(weights[4]>0.00001){
+  float w=weights[4]/max(total,.0001);
+  albedo+=mix(texture(snow_albedo,uv).rgb,texture(snow_albedo,uv2).rgb,.35)*w;
+  normal+=(texture(snow_normal,p/4.0).rgb*2.0-1.0)*w;
+  orm+=texture(snow_orm,p/4.0).rgb*w;
+ }
+ if(weights[5]>0.00001){
+  float w=weights[5]/max(total,.0001);
+  vec3 color=mix(texture(ash_albedo,uv).rgb,texture(ash_albedo,uv2).rgb,.35);
+  albedo+=color*w;
+  normal+=(texture(ash_normal,p/4.0).rgb*2.0-1.0)*w;
+  orm+=texture(ash_orm,p/4.0).rgb*w;
+ }
+ if(weights[6]>0.00001){
+  float w=weights[6]/max(total,.0001);
+  vec3 color=mix(texture(helheim_albedo,uv).rgb,texture(helheim_albedo,uv2).rgb,.35);
+  albedo+=color*w;
+  normal+=(texture(helheim_normal,p/4.0).rgb*2.0-1.0)*w;
+  orm+=texture(helheim_orm,p/4.0).rgb*w;
+ }
+ if(weights[7]>0.00001){
+  float w=weights[7]/max(total,.0001);
+  vec3 color=mix(texture(ash_albedo,uv).rgb,texture(ash_albedo,uv2).rgb,.35);
+  vec3 axis=pow(abs(normalize(terrain_world_normal)),vec3(4.0));axis/=max(dot(axis,vec3(1.0)),.0001);
+  vec3 side_x=mix(texture(ash_albedo,terrain_world_position.zy/4.0).rgb,texture(ash_albedo,terrain_world_position.zy/7.3).rgb,.35);
+  vec3 side_z=mix(texture(ash_albedo,terrain_world_position.xy/4.0).rgb,texture(ash_albedo,terrain_world_position.xy/7.3).rgb,.35);
+  color=color*axis.y+side_x*axis.x+side_z*axis.z;
+  color*=.86+.035*sin(p.x*.72+sin(p.y*.49));
+  albedo+=distinct_surface(color,7,p)*w;
+  normal+=(texture(ash_normal,p/4.0).rgb*2.0-1.0)*w;
+  orm+=texture(ash_orm,p/4.0).rgb*w;
+ }
+ if(weights[8]>0.00001){
+ float w=weights[8]/max(total,.0001);
+ vec3 axis=pow(abs(normalize(terrain_world_normal)),vec3(4.0));axis/=max(dot(axis,vec3(1.0)),.0001);
+ vec3 color=rock_color(rocky_albedo,terrain_world_position,axis);
+ vec3 detail=rock_detail(rocky_normal,terrain_world_position,axis);
+ vec3 material=rock_color(rocky_orm,terrain_world_position,axis);
+ float steep=1.0-smoothstep(.45,.8,abs(normalize(terrain_world_normal).y));
+ color=mix(color,rock_color(cliff_albedo,terrain_world_position,axis),steep*.75);
+ detail=mix(detail,rock_detail(cliff_normal,terrain_world_position,axis),steep*.75);
+ material=mix(material,rock_color(cliff_orm,terrain_world_position,axis),steep*.75);
+ albedo+=color*w;world_detail+=detail*w;normal+=vec3(0.0,0.0,1.0)*w;orm+=material*w;
+ }
+ if(weights[9]>0.00001){
+ float w=weights[9]/max(total,.0001);
+ vec3 axis=pow(abs(normalize(terrain_world_normal)),vec3(4.0));axis/=max(dot(axis,vec3(1.0)),.0001);
+ vec3 color=rock_color(mountain_albedo,terrain_world_position,axis);
+ vec3 detail=rock_detail(mountain_normal,terrain_world_position,axis);
+ vec3 material=rock_color(mountain_orm,terrain_world_position,axis);
+ float steep=1.0-smoothstep(.45,.8,abs(normalize(terrain_world_normal).y));
+ color=mix(color,rock_color(cliff_albedo,terrain_world_position,axis),steep*.75);
+ detail=mix(detail,rock_detail(cliff_normal,terrain_world_position,axis),steep*.75);
+ material=mix(material,rock_color(cliff_orm,terrain_world_position,axis),steep*.75);
+ albedo+=distinct_surface(color,9,p)*w;world_detail+=detail*w;normal+=vec3(0.0,0.0,1.0)*w;orm+=material*w;
+ }
+ if(weights[10]>0.00001){
+ float w=weights[10]/max(total,.0001);
+ vec3 axis=pow(abs(normalize(terrain_world_normal)),vec3(4.0));axis/=max(dot(axis,vec3(1.0)),.0001);
+ vec3 color=rock_color(cliff_albedo,terrain_world_position,axis);
+ vec3 detail=rock_detail(mountain_normal,terrain_world_position,axis);
+ vec3 material=rock_color(cliff_orm,terrain_world_position,axis);
+ albedo+=distinct_surface(color,10,p)*w;world_detail+=detail*w;normal+=vec3(0.0,0.0,1.0)*w;orm+=material*w;
+ }
+ if(weights[11]>0.00001){
+ float w=weights[11]/max(total,.0001);
+ albedo+=distinct_surface(mix(texture(swamp_albedo,uv).rgb,texture(swamp_albedo,uv2).rgb,.35),11,p)*w;
+ normal+=(texture(swamp_normal,p/4.0).rgb*2.0-1.0)*w;
+ orm+=texture(swamp_orm,p/4.0).rgb*w;
+ }
+ if(weights[12]>0.00001){
+ float w=weights[12]/max(total,.0001);
+ albedo+=mix(texture(sand_albedo,uv).rgb,texture(sand_albedo,uv2).rgb,.35)*w;
+ normal+=(texture(sand_normal,p/4.0).rgb*2.0-1.0)*w;
+ orm+=texture(sand_orm,p/4.0).rgb*w;
+ }
+ if(weights[13]>0.00001){
+ float w=weights[13]/max(total,.0001);
+ vec3 axis=pow(abs(normalize(terrain_world_normal)),vec3(4.0));axis/=max(dot(axis,vec3(1.0)),.0001);
+ vec3 color=rock_color(helheim_albedo,terrain_world_position*1.0,axis)*0.86;
+ vec3 detail=rock_detail(helheim_normal,terrain_world_position*1.0,axis);
+ vec3 material=rock_color(helheim_orm,terrain_world_position*1.0,axis);
+ albedo+=distinct_surface(color,13,p)*w;world_detail+=detail*w;normal+=vec3(0.0,0.0,1.0)*w;orm+=material*w;
+ }
+ if(weights[14]>0.00001){
+ float w=weights[14]/max(total,.0001);
+ vec3 axis=pow(abs(normalize(terrain_world_normal)),vec3(4.0));axis/=max(dot(axis,vec3(1.0)),.0001);
+ vec3 color=rock_color(rocky_albedo,terrain_world_position*1.0,axis)*0.9;
+ vec3 detail=rock_detail(rocky_normal,terrain_world_position*1.0,axis);
+ vec3 material=rock_color(rocky_orm,terrain_world_position*1.0,axis);
+ float steep=1.0-smoothstep(.45,.8,abs(normalize(terrain_world_normal).y));
+ color=mix(color,rock_color(cliff_albedo,terrain_world_position,axis)*.9,steep*.75);
+ detail=mix(detail,rock_detail(cliff_normal,terrain_world_position,axis),steep*.75);
+ material=mix(material,rock_color(cliff_orm,terrain_world_position,axis),steep*.75);
+ albedo+=distinct_surface(color,14,p)*w;world_detail+=detail*w;normal+=vec3(0.0,0.0,1.0)*w;orm+=material*w;
+ }
+ if(weights[15]>0.00001){
+ float w=weights[15]/max(total,.0001);
+ vec3 axis=pow(abs(normalize(terrain_world_normal)),vec3(4.0));axis/=max(dot(axis,vec3(1.0)),.0001);
+ vec3 color=rock_color(rocky_albedo,terrain_world_position*1.6,axis)*0.96;
+ vec3 detail=rock_detail(rocky_normal,terrain_world_position*1.6,axis);
+ vec3 material=rock_color(rocky_orm,terrain_world_position*1.6,axis);
+ color=mix(color,rock_color(cliff_albedo,terrain_world_position,axis),.2);
+ detail=mix(detail,rock_detail(cliff_normal,terrain_world_position,axis),.2);
+ material=mix(material,rock_color(cliff_orm,terrain_world_position,axis),.2);
+ albedo+=distinct_surface(color,15,p)*w;world_detail+=detail*w;normal+=vec3(0.0,0.0,1.0)*w;orm+=material*w;
+ }
+ if(weights[16]>0.00001){
+ float w=weights[16]/max(total,.0001);
+ vec3 axis=pow(abs(normalize(terrain_world_normal)),vec3(4.0));axis/=max(dot(axis,vec3(1.0)),.0001);
+ vec3 color=rock_color(plains_albedo,terrain_world_position*1.0,axis)*0.96;
+ vec3 detail=rock_detail(plains_normal,terrain_world_position*1.0,axis);
+ vec3 material=rock_color(plains_orm,terrain_world_position*1.0,axis);
+ float steep=1.0-smoothstep(.45,.8,abs(normalize(terrain_world_normal).y));
+ color=mix(color,rock_color(cliff_albedo,terrain_world_position,axis),steep*.65);
+ detail=mix(detail,rock_detail(cliff_normal,terrain_world_position,axis),steep*.65);
+ material=mix(material,rock_color(cliff_orm,terrain_world_position,axis),steep*.65);
+ albedo+=distinct_surface(color,16,p)*w;world_detail+=detail*w;normal+=vec3(0.0,0.0,1.0)*w;orm+=material*w;
+ }
+ if(weights[17]>0.00001){
+ float w=weights[17]/max(total,.0001);
+ vec3 axis=pow(abs(normalize(terrain_world_normal)),vec3(4.0));axis/=max(dot(axis,vec3(1.0)),.0001);
+ vec3 color=rock_color(grass_albedo,terrain_world_position*1.0,axis)*1.02;
+ vec3 detail=rock_detail(grass_normal,terrain_world_position*1.0,axis);
+ vec3 material=rock_color(grass_orm,terrain_world_position*1.0,axis);
+ float steep=1.0-smoothstep(.45,.8,abs(normalize(terrain_world_normal).y));
+ color=mix(color,rock_color(cliff_albedo,terrain_world_position,axis),steep*.65);
+ detail=mix(detail,rock_detail(cliff_normal,terrain_world_position,axis),steep*.65);
+ material=mix(material,rock_color(cliff_orm,terrain_world_position,axis),steep*.65);
+ albedo+=distinct_surface(color,17,p)*w;world_detail+=detail*w;normal+=vec3(0.0,0.0,1.0)*w;orm+=material*w;
+ }
+ if(weights[18]>0.00001){
+ float w=weights[18]/max(total,.0001);
+ vec3 axis=pow(abs(normalize(terrain_world_normal)),vec3(4.0));axis/=max(dot(axis,vec3(1.0)),.0001);
+ vec3 color=rock_color(pine_albedo,terrain_world_position*1.0,axis)*0.94;
+ vec3 detail=rock_detail(pine_normal,terrain_world_position*1.0,axis);
+ vec3 material=rock_color(pine_orm,terrain_world_position*1.0,axis);
+ float steep=1.0-smoothstep(.45,.8,abs(normalize(terrain_world_normal).y));
+ color=mix(color,rock_color(cliff_albedo,terrain_world_position,axis),steep*.65);
+ detail=mix(detail,rock_detail(cliff_normal,terrain_world_position,axis),steep*.65);
+ material=mix(material,rock_color(cliff_orm,terrain_world_position,axis),steep*.65);
+ albedo+=distinct_surface(color,18,p)*w;world_detail+=detail*w;normal+=vec3(0.0,0.0,1.0)*w;orm+=material*w;
+ }
+ if(weights[19]>0.00001){
+ float w=weights[19]/max(total,.0001);
+ float patch=transition_noise(p*.73)*.7+transition_noise(p*2.31)*.3;
+ float factor=.25+smoothstep(.32,.68,patch)*.58;
+ vec3 axis=pow(abs(normalize(terrain_world_normal)),vec3(4.0));axis/=max(dot(axis,vec3(1.0)),.0001);
+ vec3 color=mix(rock_color(plains_albedo,terrain_world_position,axis)*vec3(0.88,0.97,0.94),rock_color(snow_albedo,terrain_world_position,axis),factor);
+ vec3 detail=mix(rock_detail(plains_normal,terrain_world_position,axis),rock_detail(snow_normal,terrain_world_position,axis),factor);
+ vec3 material=mix(rock_color(plains_orm,terrain_world_position,axis),rock_color(snow_orm,terrain_world_position,axis),factor);
+ float steep=(1.0-smoothstep(.45,.8,abs(normalize(terrain_world_normal).y)))*.65;
+ color=mix(color,rock_color(cliff_albedo,terrain_world_position,axis),steep);
+ detail=mix(detail,rock_detail(cliff_normal,terrain_world_position,axis),steep);
+ material=mix(material,rock_color(cliff_orm,terrain_world_position,axis),steep);
+ albedo+=color*w;world_detail+=detail*w;normal+=vec3(0.0,0.0,1.0)*w;orm+=material*w;
+ }
+ if(weights[20]>0.00001){
+ float w=weights[20]/max(total,.0001);
+ float patch=transition_noise(p*.73)*.7+transition_noise(p*2.31)*.3;
+ float factor=.10+smoothstep(.40,.72,patch)*.22;
+ vec3 axis=pow(abs(normalize(terrain_world_normal)),vec3(4.0));axis/=max(dot(axis,vec3(1.0)),.0001);
+ vec3 color=mix(rock_color(plains_albedo,terrain_world_position,axis)*vec3(1.18,1.0,0.68),rock_color(sand_albedo,terrain_world_position,axis),factor);
+ vec3 detail=mix(rock_detail(plains_normal,terrain_world_position,axis),rock_detail(sand_normal,terrain_world_position,axis),factor);
+ vec3 material=mix(rock_color(plains_orm,terrain_world_position,axis),rock_color(sand_orm,terrain_world_position,axis),factor);
+ float steep=(1.0-smoothstep(.45,.8,abs(normalize(terrain_world_normal).y)))*.65;
+ color=mix(color,rock_color(cliff_albedo,terrain_world_position,axis),steep);
+ detail=mix(detail,rock_detail(cliff_normal,terrain_world_position,axis),steep);
+ material=mix(material,rock_color(cliff_orm,terrain_world_position,axis),steep);
+ albedo+=distinct_surface(color,20,p)*w;world_detail+=detail*w;normal+=vec3(0.0,0.0,1.0)*w;orm+=material*w;
+ }
+ if(weights[21]>0.00001){
+ float w=weights[21]/max(total,.0001);
+ float patch=transition_noise(p*.73)*.7+transition_noise(p*2.31)*.3;
+ float factor=.08+smoothstep(.45,.75,patch)*.24;
+ vec3 axis=pow(abs(normalize(terrain_world_normal)),vec3(4.0));axis/=max(dot(axis,vec3(1.0)),.0001);
+ vec3 color=mix(rock_color(grass_albedo,terrain_world_position,axis)*vec3(1.04,1.03,0.92),rock_color(forest_albedo,terrain_world_position,axis),factor);
+ vec3 detail=mix(rock_detail(grass_normal,terrain_world_position,axis),rock_detail(forest_normal,terrain_world_position,axis),factor);
+ vec3 material=mix(rock_color(grass_orm,terrain_world_position,axis),rock_color(forest_orm,terrain_world_position,axis),factor);
+ float steep=(1.0-smoothstep(.45,.8,abs(normalize(terrain_world_normal).y)))*.65;
+ color=mix(color,rock_color(cliff_albedo,terrain_world_position,axis),steep);
+ detail=mix(detail,rock_detail(cliff_normal,terrain_world_position,axis),steep);
+ material=mix(material,rock_color(cliff_orm,terrain_world_position,axis),steep);
+ albedo+=distinct_surface(color,21,p)*w;world_detail+=detail*w;normal+=vec3(0.0,0.0,1.0)*w;orm+=material*w;
+ }
+ if(weights[22]>0.00001){
+ float w=weights[22]/max(total,.0001);
+ float patch=transition_noise(p*.73)*.7+transition_noise(p*2.31)*.3;
+ float factor=.15+smoothstep(.35,.72,patch)*.28;
+ vec3 axis=pow(abs(normalize(terrain_world_normal)),vec3(4.0));axis/=max(dot(axis,vec3(1.0)),.0001);
+ vec3 color=mix(rock_color(plains_albedo,terrain_world_position,axis)*vec3(1.12,0.88,0.51),rock_color(sand_albedo,terrain_world_position,axis),factor);
+ vec3 detail=mix(rock_detail(plains_normal,terrain_world_position,axis),rock_detail(sand_normal,terrain_world_position,axis),factor);
+ vec3 material=mix(rock_color(plains_orm,terrain_world_position,axis),rock_color(sand_orm,terrain_world_position,axis),factor);
+ float steep=(1.0-smoothstep(.45,.8,abs(normalize(terrain_world_normal).y)))*.65;
+ color=mix(color,rock_color(cliff_albedo,terrain_world_position,axis),steep);
+ detail=mix(detail,rock_detail(cliff_normal,terrain_world_position,axis),steep);
+ material=mix(material,rock_color(cliff_orm,terrain_world_position,axis),steep);
+ albedo+=distinct_surface(color,22,p)*w;world_detail+=detail*w;normal+=vec3(0.0,0.0,1.0)*w;orm+=material*w;
+ }
+ if(weights[23]>0.00001){
+ float w=weights[23]/max(total,.0001);
+ float patch=transition_noise(p*.73)*.7+transition_noise(p*2.31)*.3;
+ float factor=.28+smoothstep(.30,.70,patch)*.38;
+ vec3 axis=pow(abs(normalize(terrain_world_normal)),vec3(4.0));axis/=max(dot(axis,vec3(1.0)),.0001);
+ vec3 color=mix(rock_color(plains_albedo,terrain_world_position,axis)*vec3(0.38,0.3,0.22),rock_color(ash_albedo,terrain_world_position,axis),factor);
+ vec3 detail=mix(rock_detail(plains_normal,terrain_world_position,axis),rock_detail(ash_normal,terrain_world_position,axis),factor);
+ vec3 material=mix(rock_color(plains_orm,terrain_world_position,axis),rock_color(ash_orm,terrain_world_position,axis),factor);
+ float steep=(1.0-smoothstep(.45,.8,abs(normalize(terrain_world_normal).y)))*.65;
+ color=mix(color,rock_color(cliff_albedo,terrain_world_position,axis),steep);
+ detail=mix(detail,rock_detail(cliff_normal,terrain_world_position,axis),steep);
+ material=mix(material,rock_color(cliff_orm,terrain_world_position,axis),steep);
+ albedo+=color*w;world_detail+=detail*w;normal+=vec3(0.0,0.0,1.0)*w;orm+=material*w;
+ }
+ if(weights[24]>0.00001){
+ float w=weights[24]/max(total,.0001);
+ vec2 paving_uv=p/4.0;
+ vec3 color=texture(town_albedo,paving_uv).rgb;
+ color*=.96+.08*transition_noise(p*.31);
+ albedo+=color*w;
+ normal+=(texture(town_normal,paving_uv).rgb*2.0-1.0)*w;
+ orm+=texture(town_orm,paving_uv).rgb*w;
+ }
+ if(weights[25]>0.00001){
+ float w=weights[25]/max(total,.0001);
+ vec2 paving_uv=p/4.0;
+ vec3 color=texture(road_albedo,paving_uv).rgb;
+ color*=.96+.08*transition_noise(p*.31);
+ albedo+=color*w;
+ normal+=(texture(road_normal,paving_uv).rgb*2.0-1.0)*w;
+ orm+=texture(road_orm,paving_uv).rgb*w;
+ }
+ if(weights[26]>.00001){
+ float w=weights[26]/max(total,.0001);vec2 kit_uv=p/2.0;
+ vec3 color=texture(timber_albedo,kit_uv).rgb*vec3(1,1,1);
+
+ albedo+=color*w;vec3 kit_normal=texture(timber_normal,kit_uv).rgb*2.0-1.0;
+
+ normal+=kit_normal*w;orm+=texture(timber_orm,kit_uv).rgb*w;
+ }
+ if(weights[27]>.00001){
+ float w=weights[27]/max(total,.0001);vec2 kit_uv=p/2.0;
+ vec3 color=texture(flagstone_albedo,kit_uv).rgb*vec3(1,1,1);
+
+ albedo+=color*w;vec3 kit_normal=texture(flagstone_normal,kit_uv).rgb*2.0-1.0;
+
+ normal+=kit_normal*w;orm+=texture(flagstone_orm,kit_uv).rgb*w;
+ }
+ if(weights[28]>.00001){
+ float w=weights[28]/max(total,.0001);vec2 kit_uv=p/2.0;
+ vec3 color=texture(weave_albedo,kit_uv).rgb*vec3(0.85,0.29,0.27);
+ float gold=step(.40,abs(fract(p.x/2.0)-.5));color=mix(color,texture(weave_albedo,kit_uv).rgb*vec3(.83,.72,.42),gold*.65);
+ albedo+=color*w;vec3 kit_normal=texture(weave_normal,kit_uv).rgb*2.0-1.0;
+
+ normal+=kit_normal*w;orm+=texture(weave_orm,kit_uv).rgb*w;
+ }
+ if(weights[29]>.00001){
+ float w=weights[29]/max(total,.0001);vec2 kit_uv=p/2.0;
+ vec3 color=texture(flagstone_albedo,kit_uv).rgb*vec3(0.6,0.58,0.54);
+ float soot=smoothstep(.28,.72,transition_noise(p*.71)*.7+transition_noise(p*1.83)*.3);color*=1.0-soot*.32;
+ albedo+=color*w;vec3 kit_normal=texture(flagstone_normal,kit_uv).rgb*2.0-1.0;
+
+ normal+=kit_normal*w;orm+=texture(flagstone_orm,kit_uv).rgb*w;
+ }
+ if(weights[30]>.00001){
+ float w=weights[30]/max(total,.0001);vec2 kit_uv=p/2.0;
+ vec3 color=texture(timber_albedo,kit_uv).rgb*vec3(0.69,0.65,0.57);
+ float post=step(.43,abs(fract(p.x*1.5)-.5));color*=1.0-post*.22;
+ albedo+=color*w;vec3 kit_normal=texture(timber_normal,kit_uv).rgb*2.0-1.0;
+
+ normal+=kit_normal*w;orm+=texture(timber_orm,kit_uv).rgb*w;
+ }
+ if(weights[31]>.00001){
+ float w=weights[31]/max(total,.0001);vec2 kit_uv=p/vec2(2.0,1.0);
+ vec3 color=texture(flagstone_albedo,kit_uv).rgb*vec3(0.76,0.8,0.85);
+
+ albedo+=color*w;vec3 kit_normal=texture(flagstone_normal,kit_uv).rgb*2.0-1.0;
+
+ normal+=kit_normal*w;orm+=texture(flagstone_orm,kit_uv).rgb*w;
+ }
+ if(weights[32]>.00001){
+ float w=weights[32]/max(total,.0001);vec2 kit_uv=p/3.0;
+ vec3 color=texture(road_albedo,kit_uv).rgb*vec3(1.09,1.02,0.88);
+ color=mix(color,texture(sand_albedo,p/2.0).rgb,.18);
+ albedo+=color*w;vec3 kit_normal=texture(road_normal,kit_uv).rgb*2.0-1.0;
+
+ normal+=kit_normal*w;orm+=texture(road_orm,kit_uv).rgb*w;
+ }
+ if(weights[33]>.00001){
+ float w=weights[33]/max(total,.0001);vec2 kit_uv=p.yx/2.0;
+ vec3 color=texture(timber_albedo,kit_uv).rgb*vec3(0.85,0.83,0.75);
+ float nail=1.0-smoothstep(.025,.055,length(fract(p*vec2(4.0,2.0))-.15));color*=1.0-nail*.35;
+ albedo+=color*w;vec3 kit_normal=texture(timber_normal,kit_uv).rgb*2.0-1.0;
+ kit_normal.xy=kit_normal.yx;
+ normal+=kit_normal*w;orm+=texture(timber_orm,kit_uv).rgb*w;
+ }
+ if(weights[34]>.00001){
+ float w=weights[34]/max(total,.0001);vec2 kit_uv=p/vec2(1.4,2.0);
+ vec3 color=texture(flagstone_albedo,kit_uv).rgb*vec3(1.1,1.08,1.03);
+ float curb=step(.36,abs(fract(p.y)-.5));color=mix(color,color*1.18,curb*.45);
+ albedo+=color*w;vec3 kit_normal=texture(flagstone_normal,kit_uv).rgb*2.0-1.0;
+
+ normal+=kit_normal*w;orm+=texture(flagstone_orm,kit_uv).rgb*w;
+ }
+ if(weights[35]>.00001){
+ float w=weights[35]/max(total,.0001);vec2 kit_uv=p.yx/2.0;
+ vec3 color=texture(timber_albedo,kit_uv).rgb*vec3(0.88,0.76,0.66);
+ float runner=1.0-smoothstep(.12,.23,abs(fract(p.x/3.0)-.5));color=mix(color,texture(weave_albedo,p/2.0).rgb*vec3(.40,.44,.50),runner*.65);
+ albedo+=color*w;vec3 kit_normal=texture(timber_normal,kit_uv).rgb*2.0-1.0;
+ kit_normal.xy=kit_normal.yx;
+ normal+=kit_normal*w;orm+=texture(timber_orm,kit_uv).rgb*w;
+ }
+ normal=normalize(normal+vec3(0.0,0.0,.00001));
+}
+
+uniform sampler2D sample_tints : filter_nearest, repeat_disable;
+varying vec2 ground_metres;
+void vertex() { terrain_world_position=(MODEL_MATRIX*vec4(VERTEX,1.0)).xyz;terrain_world_normal=MODEL_NORMAL_MATRIX*NORMAL;ground_metres=terrain_world_position.xz; }
+void fragment() {
+ vec3 art;vec3 n;vec3 orm;float coverage;vec3 world_detail;
+ surface(ground_metres,art,n,orm,coverage,world_detail);
+ art=elevation_colour(art,ground_metres);
+ vec2 tint=texture(sample_tints,(floor(ground_metres)+.5)/sample_map_size).rg;
+ float warm=(tint.r-.5)*.4;float bright=(tint.g-.5)*.4;
+ art*=vec3(1.0+warm*.3,1.0+warm*.05,1.0-warm*.3)*(1.0+bright);
+ ALBEDO=mix(COLOR.rgb,art,coverage);
+ ROUGHNESS=mix(1.0,material_index(sample_id(floor(ground_metres)))==10?max(.94,orm.g):orm.g,coverage);AO=mix(1.0,orm.r,coverage);
+ world_detail-=normalize(terrain_world_normal)*dot(world_detail,normalize(terrain_world_normal));
+ NORMAL=normalize(NORMAL+(VIEW_MATRIX*vec4(world_detail,0.0)).xyz*.22*coverage+(VIEW_MATRIX*vec4(n.x,0.0,n.y,0.0)).xyz*.22*coverage);
+}

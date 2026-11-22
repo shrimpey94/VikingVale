@@ -1956,6 +1956,12 @@ func _handle(msg: Dictionary) -> void:
 					gd["gate_locked"] = glk
 					gd["gate_lock_warband"] = gwb
 			Events.gate_state_changed.emit(gid, gop, glk, gwb)
+			if msg.has("town"):   # 1.7.6 servers; older ones omit it (Lock stays shown)
+				var gtown := bool(msg.get("town", false))
+				for e: Variant in world_entities_cache:
+					if str((e as Dictionary).get("id", "")) == gid and (e as Dictionary).get("data") is Dictionary:
+						((e as Dictionary)["data"] as Dictionary)["gate_town"] = gtown
+				Events.gate_town_changed.emit(gid, gtown)
 
 		"monster_dead":
 			Events.mob_dead_on_join.emit(str(msg.get("id", "")), float(msg.get("respawn_in", 0.0)))

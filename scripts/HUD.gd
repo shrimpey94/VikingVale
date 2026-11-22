@@ -11188,7 +11188,9 @@ func _action_menu_options(node: Node) -> Array:
 				if bool(node.get("gate_locked")):
 					opts.append({"label": "Unlock", "cb": func() -> void:
 						NetworkManager.send_gate_action(gid, "unlock", gname)})
-				else:
+				elif not bool(node.get("gate_town")):
+					# 1.7.6: town gates are never player-lockable, so no Lock
+					# option there (admins lock from the Admin panel).
 					opts.append({"label": "Lock", "cb": func() -> void:
 						NetworkManager.send_gate_action(gid, "lock", gname)})
 			# Attack fires the left-click damage flow via Events.player_interacted.

@@ -45,6 +45,7 @@ var admin_rot: float  = 0.0
 var gate_open: bool = false
 var gate_locked: bool = false
 var gate_lock_warband: String = ""
+var gate_town: bool = false   # 1.7.6: inside a town → never player-lockable (no Lock option)
 # Structure HP mirror — set by Events.structure_hp_changed for the 18
 # buildable subtypes. Drives the HP bar draw + attack/repair gating.
 var structure_hp: int     = -1  # -1 = unknown / not a structure
@@ -110,6 +111,7 @@ func _ready() -> void:
 		Events.structure_destroyed.connect(_on_structure_destroyed)
 	if interactable_type_str == "gate":
 		Events.gate_state_changed.connect(_on_gate_state_changed)
+		Events.gate_town_changed.connect(_on_gate_town_changed)
 		_sync_gate_body()
 
 # ── Per-type stats ───────────────────────────────────────────────────────────
@@ -358,6 +360,10 @@ func _on_gate_state_changed(eid: String, open: bool, locked: bool, lock_wb: Stri
 	if eid != entity_id or eid == "":
 		return
 	apply_gate_state(open, locked, lock_wb)
+
+func _on_gate_town_changed(eid: String, town: bool) -> void:
+	if eid == entity_id and eid != "":
+		gate_town = town
 
 func apply_gate_state(open: bool, locked: bool, lock_wb: String) -> void:
 	gate_open = open

@@ -19,6 +19,9 @@ const StonePickupArt = preload("res://scripts/art/StonePickupArt.gd")
 const ForestArt = preload("res://scripts/art/ForestArt.gd")
 const ResourceArt = preload("res://scripts/art/ResourceArt.gd")
 const TownArt = preload("res://scripts/art/TownArt.gd")
+const TerrainHeights = preload("res://scripts/terrain/TerrainHeights.gd")
+const TerrainArt = preload("res://scripts/terrain/TerrainArt.gd")
+const BridgeDeck3D = preload("res://scripts/terrain/BridgeDeck3D.gd")
 const AdminEntityData = preload("res://scripts/admin/AdminEntityData.gd")
 # Real 2D LOGIC nodes (gather/combat/collision) live off-screen paired to each 3D
 # mesh visual; picking routes to them so the whole 2D interaction pipeline reuses.
@@ -44,7 +47,11 @@ const GROUND_LIFT := 0.15           # keep mesh feet a hair above the terrain (a
 var _tile_col: PackedColorArray
 var _tile_h: PackedFloat32Array
 var _corner: PackedFloat32Array
-var _terrain_mat: StandardMaterial3D
+var _terrain_mat: Material
+# 1.7.6 authored terrain (off with --procedural-terrain): shared corner-height
+# texture for height colour + connected bridge decks.
+var _height_tex: ImageTexture = null
+var _bridges: Node3D = null
 var _chunks: Dictionary = {}   # "cx,cy" → MeshInstance3D (reused on rebuild)
 var _env: Environment          # for fog (raised to isolate the overworld in interiors)
 var _water: MeshInstance3D
@@ -546,14 +553,7 @@ func _load_map_export() -> Dictionary:
 	return out
 
 func _biome_height(nm: String) -> float:
-	if "mountain" in nm or "cliff" in nm or "granite" in nm or "alpine" in nm or "scree" in nm: return 13.0
-	# Hills ARE mountains (owner call 2026-09-25) — same height as a peak, so a painted
-	# hill region (e.g. the whole Ashlands) reads as real elevation in the 3D client.
-	if "_hills" in nm or "mound" in nm or "dune" in nm: return 13.0
-	if "rocky" in nm or "basalt" in nm or "obsidian" in nm: return 6.0
-	if "ocean" in nm: return -5.0
-	if "coast" in nm or "shallow" in nm or "reef" in nm or "tidepool" in nm or "kelp" in nm or "wet_sand" in nm or "lily" in nm: return -2.0
-	return 0.0
+	return TerrainHeights.biome_height(nm)   # shared with the 2D height field (1.7.6)
 
 func _biome_color(nm: String) -> Color:
 	if "ocean" in nm: return Color(0.13, 0.30, 0.52)
@@ -567,7 +567,7 @@ func _biome_color(nm: String) -> Color:
 	if "oak" in nm or "forest" in nm or "birch" in nm or "bamboo" in nm or "clearing" in nm or "meadow" in nm: return Color(0.24, 0.44, 0.24)
 	if "swamp" in nm or "reeds" in nm or "lily" in nm or "mud" in nm: return Color(0.30, 0.36, 0.24)
 	if "town" in nm or "floor" in nm or "carpet" in nm or "hearth" in nm or "wall" in nm or "longhouse" in nm or "fur_rug" in nm or "fire_pit" in nm: return Color(0.62, 0.50, 0.36)
-	if "road" in nm or "path" in nm or "dirt" in nm or "bridge" in nm: return Color(0.50, 0.42, 0.30)
+	if "road" in nm or "path" in nm or "dirt" in nm or "bridge" in nm or "dock" in nm: return Color(0.50, 0.42, 0.30)
 	if "farm" in nm or "wheat" in nm or "tilled" in nm or "pasture" in nm or "vineyard" in nm or "orchard" in nm or "crops" in nm: return Color(0.60, 0.55, 0.25)
 	if "rubble" in nm or "broken" in nm or "cracked" in nm or "ruins" in nm or "cemetery" in nm or "grave" in nm or "rune" in nm: return Color(0.45, 0.43, 0.40)
 	return Color(0.30, 0.52, 0.26)
@@ -576,50 +576,35 @@ func _biome_color(nm: String) -> Color:
 func _precompute_corners() -> void:
 	# Blur the tile heights first so biome height steps become rounded slopes
 	# instead of cliffs/spikes; corners are the average of the 4 surrounding
-	# SMOOTHED tiles (no more sine ripple — that was the corduroy bumpiness).
-	var sm := _smoothed_heights(4)
-	_corner = PackedFloat32Array(); _corner.resize(N1 * N1)
-	for cy in range(N1):
-		for cx in range(N1):
-			var sum := 0.0
-			var cnt := 0
-			for oy: int in [-1, 0]:
-				for ox: int in [-1, 0]:
-					var tx := cx + ox
-					var ty := cy + oy
-					if tx >= 0 and tx < MAP_N and ty >= 0 and ty < MAP_N:
-						sum += sm[ty * MAP_N + tx]
-					cnt += 1
-			_corner[cy * N1 + cx] = sum / float(cnt)
+	# SMOOTHED tiles. 1.7.6: the maths lives in TerrainHeights so the 2D view
+	# builds the identical field for height colour.
+	_corner = TerrainHeights.corners(_tile_h, _h_delta)
+	_terrain_heights_changed()
 
 ## Box-blur the tile height field `iters` times (self + 4 neighbours) so hard
 ## biome height jumps round out. Colours are untouched — this is height only.
 func _smoothed_heights(iters: int) -> PackedFloat32Array:
-	var h := _tile_h.duplicate()
-	# Admin height sculpt (P5) — per-tile deltas layered on the biome base BEFORE
-	# blurring, so raised/lowered ground rounds naturally into its surroundings.
-	for idx: Variant in _h_delta.keys():
-		var i := int(idx)
-		if i >= 0 and i < h.size():
-			h[i] += float(_h_delta[idx])
-	for _p in range(iters):
-		var out := h.duplicate()
-		for ty in range(MAP_N):
-			for tx in range(MAP_N):
-				var i := ty * MAP_N + tx
-				var s := h[i]
-				var c := 1.0
-				if tx > 0:
-					s += h[i - 1]; c += 1.0
-				if tx < MAP_N - 1:
-					s += h[i + 1]; c += 1.0
-				if ty > 0:
-					s += h[i - MAP_N]; c += 1.0
-				if ty < MAP_N - 1:
-					s += h[i + MAP_N]; c += 1.0
-				out[i] = s / c
-		h = out
-	return h
+	return TerrainHeights.smoothed_heights(_tile_h, _h_delta, iters)
+
+## 1.7.6: the corner field changed (login, paint, sculpt) → refresh the shared
+## height texture the authored terrain colours by, and re-lay the bridge decks.
+func _terrain_heights_changed() -> void:
+	if not TerrainArt.enabled():
+		return
+	_height_tex = TerrainHeights.corner_texture(_corner, _height_tex)
+	_rebuild_bridges()
+
+func _rebuild_bridges() -> void:
+	if _ground_node == null:
+		return
+	var img := _ground_node.get("_biome_lookup_img") as Image
+	if img == null:
+		return
+	if _bridges == null:
+		_bridges = BridgeDeck3D.new()
+		_bridges.set("sea_level", SEA_LEVEL)
+		add_child(_bridges)
+	_bridges.call("rebuild", img.get_data(), img.get_width(), img.get_height(), MAP_N, _corner_h)
 
 func _corner_h(cx: int, cy: int) -> float:
 	return _corner[cy * N1 + cx]
@@ -634,16 +619,37 @@ func _height_at_world(wx: float, wz: float) -> float:
 	var y1 := mini(y0 + 1, MAP_N)
 	var tx := clampf(fx - float(x0), 0.0, 1.0)
 	var ty := clampf(fy - float(y0), 0.0, 1.0)
+	# 1.7.6: on a connected bridge, stand on the deck, not the ground under it.
+	if _bridges != null and x0 < MAP_N and y0 < MAP_N:
+		var deck := float(_bridges.call("deck_height", x0, y0, MAP_N))
+		if not is_nan(deck):
+			return deck
 	var a := lerpf(_corner_h(x0, y0), _corner_h(x1, y0), tx)
 	var b := lerpf(_corner_h(x0, y1), _corner_h(x1, y1), tx)
 	return lerpf(a, b, ty)
 
 func _build_all_chunks() -> void:
-	_terrain_mat = StandardMaterial3D.new()
-	_terrain_mat.vertex_color_use_as_albedo = true
-	_terrain_mat.roughness = 1.0
-	_terrain_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	_terrain_mat = _authored_terrain_material()
+	if _terrain_mat == null:   # --procedural-terrain (or no ground): the old material
+		var std := StandardMaterial3D.new()
+		std.vertex_color_use_as_albedo = true
+		std.roughness = 1.0
+		std.cull_mode = BaseMaterial3D.CULL_DISABLED
+		_terrain_mat = std
 	_rebuild_all_chunks()
+
+## 1.7.6 authored ground: the vertex colours stay the base, the authored surface
+## (families 48/49) mixes on top, coloured by the shared corner heights.
+func _authored_terrain_material() -> Material:
+	if not TerrainArt.enabled() or _ground_node == null:
+		return null
+	var lookup := _ground_node.get("_biome_lookup_tex") as Texture2D
+	var tints := _ground_node.get("_tint_lookup_tex") as Texture2D
+	if lookup == null or tints == null:
+		return null
+	if _height_tex == null:
+		_height_tex = TerrainHeights.corner_texture(_corner)
+	return TerrainArt.material_3d(lookup, tints, _height_tex)
 
 func _rebuild_all_chunks() -> void:
 	var nchunks := int(ceil(float(MAP_N) / float(CHUNK)))
@@ -1454,6 +1460,9 @@ func _spawn_admin_ent3d(entity: Dictionary) -> void:
 	if data.has("gate_open"):   # 1.7.5: gate state from the burst / re-add
 		_on_gate_state3d(id, bool(data["gate_open"]), bool(data.get("gate_locked", false)),
 			str(data.get("gate_lock_warband", "")))
+		var gn := _node_of(id)
+		if gn != null and "gate_town" in gn:
+			gn.set("gate_town", bool(data.get("gate_town", false)))
 	if _ent.has(id):
 		_admin_entity_data[id] = entity.duplicate(true)   # seed the Inspect editor
 
@@ -2135,6 +2144,7 @@ func _set_overworld_visible(v: bool, include_entities := true) -> void:
 		var c := _chunks[key] as MeshInstance3D
 		if is_instance_valid(c): c.visible = v
 	if _water != null: _water.visible = v
+	if _bridges != null: _bridges.visible = v   # 1.7.6 connected bridge decks
 	if not include_entities:
 		return
 	for id: Variant in _ent.keys():
@@ -2729,7 +2739,16 @@ func _on_tile_overrides_bulk3d(entries: Array) -> void:
 	for e: Variant in entries:
 		if e is Dictionary:
 			var d: Dictionary = e
-			_apply_tile(int(d.get("tx", -1)), int(d.get("ty", -1)), str(d.get("biome", "")))
+			var tx := int(d.get("tx", -1))
+			var ty := int(d.get("ty", -1))
+			var b: Variant = d.get("biome", null)
+			# A null/empty biome is a CLEAR (erase brush, Group/Move): back to the
+			# procedural base, like _on_tile_override_cleared. str(null) would
+			# stamp "<null>" (flat green, height 0) and diverge from 2D.
+			if (b == null or str(b) == "") and _ground_node != null:
+				_apply_tile(tx, ty, str(_ground_node.call("_biome_at", tx, ty)))
+			else:
+				_apply_tile(tx, ty, str(b))
 
 ## Stamp one tile's height+colour and flag the terrain dirty (rebuilt, throttled,
 ## in _process so a paint-drag doesn't rebuild 90k quads per tile).

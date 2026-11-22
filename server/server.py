@@ -4259,6 +4259,7 @@ def _activate_admin_entity(eid: str, kind: str, subtype: str, x: float, y: float
                 "open": bool(data.pop("gate_open", False)),
                 "locked": bool(data.pop("gate_locked", False)),
                 "lock_warband": str(data.pop("gate_lock_warband", "") or "")})
+            data.pop("gate_town", None)   # derived on send, never stored
             _overlay_gate_state(eid, data)
             _gate_state_changed(eid, broadcast=False)
         _mark_structure_dirty(eid)
@@ -12190,6 +12191,16 @@ def _gate_lock_control(conn, x: float, y: float) -> tuple:
     return _land_controller(conn, x, y)
 
 
+def _gate_in_town(st: dict) -> bool:
+    """1.7.6: a gate inside a town (same test as _gate_lock_control) — players can
+    never lock it, so clients hide the Lock option. Recomputed on every send, so
+    it follows towns growing to enclose new walls."""
+    try:
+        return bool(_town_at_world(float(st.get("x", 0.0)), float(st.get("y", 0.0)), margin=1))
+    except (TypeError, ValueError):
+        return False
+
+
 def _overlay_gate_state(eid: str, data: dict) -> None:
     st = structures_state.get(eid)
     if st is None or st.get("subtype") != "gate":
@@ -12197,13 +12208,15 @@ def _overlay_gate_state(eid: str, data: dict) -> None:
     data["gate_open"] = bool(st.get("open", False))
     data["gate_locked"] = bool(st.get("locked", False))
     data["gate_lock_warband"] = str(st.get("lock_warband", ""))
+    data["gate_town"] = _gate_in_town(st)
 
 
 def _gate_msg(eid: str) -> dict:
     st = structures_state.get(eid, {})
     return {"type": "gate_state", "id": eid, "open": bool(st.get("open", False)),
             "locked": bool(st.get("locked", False)),
-            "lock_warband": str(st.get("lock_warband", ""))}
+            "lock_warband": str(st.get("lock_warband", "")),
+            "town": _gate_in_town(st)}
 
 
 def _gate_state_changed(eid: str, broadcast: bool = True) -> None:

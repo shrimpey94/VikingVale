@@ -1080,6 +1080,7 @@ func _spawn_admin_entity(entity: Dictionary) -> void:
 				node.set("gate_open", bool(data["gate_open"]))
 				node.set("gate_locked", bool(data.get("gate_locked", false)))
 				node.set("gate_lock_warband", str(data.get("gate_lock_warband", "")))
+				node.set("gate_town", bool(data.get("gate_town", false)))
 			# Seed structure HP mirror from the login-burst / add payload so
 			# the HP bar draws correctly for damaged structures on first
 			# frame (server overlays these fields from structures_state at

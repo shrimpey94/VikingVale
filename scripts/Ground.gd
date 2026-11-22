@@ -57,7 +57,7 @@ var _impassable_tiles:  Dictionary = {}    # idx → true   (only stored when bl
 # startup via SubViewport, then handed to the terrain_blend shader as a uniform.
 var _biome_atlas_img: Image       = null
 var _biome_atlas_tex: ImageTexture = null
-const BIOME_COUNT := 94
+const BIOME_COUNT := 95
 
 # ── Crisp / Smooth terrain mode ──────────────────────────────────────────────
 # "Smooth" bakes the atlas at a higher per-cell resolution and swaps in
@@ -76,6 +76,20 @@ var _atlas_cell_px:  int  = TILE
 # this node. Before that, _draw() falls back to the CPU per-tile dispatch so the
 # world isn't blank for the ~2 frames the SubViewport bake takes.
 var _atlas_ready: bool = false
+
+# ── 1.7.6 authored terrain (2D view only; off with --procedural-terrain) ─────
+# The authored layer colours by height, so the 2D view keeps the SAME corner
+# height field the 3D view builds (TerrainHeights): biome base heights + the
+# server's sculpt deltas, smoothed identically. Visual only.
+const TerrainHeights = preload("res://scripts/terrain/TerrainHeights.gd")
+const TerrainArt = preload("res://scripts/terrain/TerrainArt.gd")
+const BridgeLayer2D = preload("res://scripts/terrain/BridgeLayer2D.gd")
+var _authored_2d: bool = false
+var _th_tile_h: PackedFloat32Array = PackedFloat32Array()
+var _th_delta: Dictionary = {}
+var _th_tex: ImageTexture = null
+var _th_dirty: bool = false
+var _bridge_layer: Node2D = null
 
 # Biome ID constants
 const B_PLAINS      := 0
@@ -201,6 +215,9 @@ const B_MOUNTAIN_ALPINE    := 90
 const B_MOUNTAIN_GRANITE   := 91
 const B_SNOW_PRISTINE      := 92
 const B_SNOW_TRACKS        := 93
+# ── Docks (94, 1.7.6): plank pier surface. Walkable like a bridge but NOT a
+# bridge: no rails, never joins a connected bridge. Edge posts face water.
+const B_WOOD_DOCK          := 94
 
 const _BIOME_NAMES := [
 	"plains", "plains", "oak_forest", "pine_forest", "dark_forest",
@@ -241,6 +258,8 @@ const _BIOME_NAMES := [
 	"pine_snow_dust", "pine_needle_bed", "swamp_bubbling",
 	"mountain_alpine", "mountain_granite",
 	"snow_pristine", "snow_tracks",
+	# Docks (94).
+	"wood_dock",
 ]
 
 ## Login flash fix — Ground draws the procedural biome map on frame 0, but
@@ -582,11 +601,67 @@ func _activate_terrain_shader() -> void:
 	# log an unknown-parameter warning.
 	if _terrain_smooth:
 		mat.set_shader_parameter("atlas_cell_px", float(_atlas_cell_px))
+	if _use_authored_2d():
+		mat = TerrainArt.material_2d(mat, _terrain_smooth, _biome_lookup_tex, _authored_heights_tex())
+		_authored_2d = true
+		if _bridge_layer == null:
+			_bridge_layer = BridgeLayer2D.new()
+			add_child(_bridge_layer)
+			_bridge_layer.call("setup", self)
 	self.material = mat
 	_atlas_ready = true
 	set_process(false)
 	queue_redraw()
 	atlas_ready.emit()
+
+## 1.7.6: authored ground only in the 2D world. The hidden Ground inside the 3D
+## world only supplies collision/biome data there (World3D owns the 3D ground).
+func _use_authored_2d() -> bool:
+	if not TerrainArt.enabled():
+		return false
+	var p := get_parent()
+	return p == null or not p.has_method("_build_chunk")
+
+## Build (once) the 2D copy of the shared corner-height field and start
+## following paints and sculpts.
+func _authored_heights_tex() -> ImageTexture:
+	if _th_tex != null:
+		return _th_tex
+	_th_delta = TerrainHeights.deltas_from_server(NetworkManager.terrain_heights_cache)
+	_th_tile_h = TerrainHeights.base_heights(self)
+	_th_tex = TerrainHeights.corner_texture(TerrainHeights.corners(_th_tile_h, _th_delta))
+	tile_changed.connect(_on_tile_changed_heights)
+	Events.terrain_heights_received.connect(func(tiles: Dictionary) -> void:
+		_th_delta = TerrainHeights.deltas_from_server(tiles)
+		_mark_heights_dirty())
+	Events.terrain_height_set.connect(func(tiles: Dictionary) -> void:
+		for k: Variant in tiles.keys():
+			var d := float(tiles[k])
+			if absf(d) < 0.0001:
+				_th_delta.erase(int(str(k)))
+			else:
+				_th_delta[int(str(k))] = d
+		_mark_heights_dirty())
+	return _th_tex
+
+## A paint changes that tile's base height (bulk = -1: re-read everything).
+func _on_tile_changed_heights(tx: int, ty: int, _bid: int) -> void:
+	if tx < 0:
+		_th_tile_h = TerrainHeights.base_heights(self)
+	elif tx < TerrainHeights.MAP_N and ty < TerrainHeights.MAP_N:
+		_th_tile_h[ty * TerrainHeights.MAP_N + tx] = TerrainHeights.biome_height(_biome_at(tx, ty))
+	else:
+		return
+	_mark_heights_dirty()
+
+## Throttled (like the 3D dirty-chunk flush): one re-smooth per 0.1 s of edits.
+func _mark_heights_dirty() -> void:
+	if _th_dirty or _th_tex == null:
+		return
+	_th_dirty = true
+	get_tree().create_timer(0.1).timeout.connect(func() -> void:
+		_th_dirty = false
+		TerrainHeights.corner_texture(TerrainHeights.corners(_th_tile_h, _th_delta), _th_tex))
 
 ## ── Terrain-quality preference (Crisp / Smooth) ─────────────────────────────
 ## Persisted in user://graphics.cfg, mirroring AudioManager's ConfigFile
@@ -678,6 +753,7 @@ func _draw_biome_cell(ci: CanvasItem, bid: int, x: int, y: int) -> void:
 		"driftwood_shore": _draw_driftwood_shore(ci, hv, x, y, cx, cy)
 		"wood_bridge":     _draw_wood_bridge(ci, hv, x, y, cx, cy)
 		"stone_bridge":    _draw_stone_bridge(ci, hv, x, y, cx, cy)
+		"wood_dock":       _draw_wood_dock(ci, hv, x, y, cx, cy)
 		"plains_wildflower":  _draw_plains_wildflower(ci, hv, x, y, cx, cy)
 		"plains_dry":         _draw_plains_dry(ci, hv, x, y, cx, cy)
 		"oak_dense":          _draw_oak_dense(ci, hv, x, y, cx, cy)
@@ -1109,6 +1185,7 @@ func _biome_base_color(biome: String) -> Color:
 		"driftwood_shore": return Color(0.78, 0.70, 0.52)
 		"wood_bridge":     return Color(0.55, 0.38, 0.20)
 		"stone_bridge":    return Color(0.62, 0.60, 0.56)
+		"wood_dock":       return Color(0.50, 0.36, 0.22)
 		"plains_wildflower":  return Color(0.38, 0.60, 0.24)
 		"plains_dry":         return Color(0.60, 0.62, 0.34)
 		"oak_dense":          return Color(0.16, 0.34, 0.10)
@@ -1210,6 +1287,7 @@ func _draw_tile(biome: String, hv: int, tx: int, ty: int, x: int, y: int) -> voi
 		"driftwood_shore": _draw_driftwood_shore(self, hv, x, y, cx, cy)
 		"wood_bridge":     _draw_wood_bridge(self, hv, x, y, cx, cy)
 		"stone_bridge":    _draw_stone_bridge(self, hv, x, y, cx, cy)
+		"wood_dock":       _draw_wood_dock(self, hv, x, y, cx, cy)
 		"plains_wildflower":  _draw_plains_wildflower(self, hv, x, y, cx, cy)
 		"plains_dry":         _draw_plains_dry(self, hv, x, y, cx, cy)
 		"oak_dense":          _draw_oak_dense(self, hv, x, y, cx, cy)
@@ -2357,6 +2435,23 @@ func _draw_wood_bridge(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy
 	ci.draw_rect(Rect2(x + TILE - 4, deck_top + 5, 1, 1), nail)
 	ci.draw_rect(Rect2(x + 3, deck_top + deck_h - 6, 1, 1), nail)
 	ci.draw_rect(Rect2(x + TILE - 4, deck_top + deck_h - 6, 1, 1), nail)
+
+
+## Dock / pier (1.7.6): a full-tile plank surface, NO rails and no water bands.
+## Planks run east-west with world-aligned butt joints so a pier of any shape
+## reads as one floor. Edge posts toward open water are drawn by the connected
+## bridge layer (they depend on neighbours); this per-biome cell can't see them.
+func _draw_wood_dock(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:
+	var base := Color(0.50, 0.36, 0.22)
+	ci.draw_rect(Rect2(x, y, TILE, TILE), base)
+	var seam := base.darkened(0.30)
+	for r in range(0, TILE, 6):
+		ci.draw_line(Vector2(float(x), float(y + r)), Vector2(float(x + TILE), float(y + r)), seam, 1.0)
+		# Butt joints, staggered per plank row.
+		var off: int = (r * 7) % 16
+		ci.draw_line(Vector2(float(x + off), float(y + r)), Vector2(float(x + off), float(y + r + 6)), seam, 1.0)
+		ci.draw_line(Vector2(float(x + off + 16), float(y + r)), Vector2(float(x + off + 16), float(y + r + 6)), seam, 1.0)
+	ci.draw_rect(Rect2(x, y + 1, TILE, 1), base.lightened(0.10))
 
 
 func _draw_stone_bridge(ci: CanvasItem, _hv: int, x: int, y: int, _cx: float, _cy: float) -> void:

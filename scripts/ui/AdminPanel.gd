@@ -63,6 +63,7 @@ const PAINT_BIOMES: Array = [
 	"pine_snow_dust", "pine_needle_bed", "swamp_bubbling",
 	"mountain_alpine", "mountain_granite",
 	"snow_pristine", "snow_tracks",
+	"wood_dock",
 	"(erase)",
 ]
 
@@ -100,10 +101,29 @@ const _TILE_CATEGORIES: Array = [
 					 "cemetery", "ancient_ruins"]],
 	["Norse",       ["rune_stone_ground", "grave_mound", "longhouse_floor",
 					 "fire_pit_indoor"]],
-	["Bridges",     ["wood_bridge", "stone_bridge"]],
+	["Bridges",     ["wood_bridge", "stone_bridge", "wood_dock"]],
 	["Interior",    ["wood_floor", "stone_floor", "red_carpet", "hearth_stone",
 					 "wall_wood", "wall_stone", "fur_rug"]],
 ]
+
+## Deprecated / parked biomes (owner call 2026-11-22): hidden from the Tiles
+## palette only. Their IDs, any saved tiles and their look are unchanged, so
+## nothing on the map moves. bamboo_stand is deprecated; the rest are zero-tile
+## sub-variants parked until Part B revisits them as shade variants. (ID 1, the
+## duplicate "plains", was never reachable by name and stays as-is.)
+const _PALETTE_HIDDEN: Array = [
+	"bamboo_stand",
+	"forest_edge", "swamp_edge", "shore_grass", "meadow", "tundra",
+	"sand_hills", "moss_rock", "driftwood_shore",
+	"plains_wildflower", "oak_dense", "oak_autumn",
+	"dark_root_tangle", "dark_mushroom_ring", "swamp_deep_mud",
+	"pine_snow_dust", "pine_needle_bed", "swamp_bubbling",
+	"mountain_alpine", "mountain_granite", "snow_pristine", "snow_tracks",
+]
+
+## A Tiles-palette category's biomes minus the hidden ones.
+static func _palette_biomes(cat: Array) -> Array:
+	return (cat[1] as Array).filter(func(b: Variant) -> bool: return not (str(b) in _PALETTE_HIDDEN))
 
 enum Mode { OFF, PLACE, DELETE, MOVE, ROTATE, TILE, FLOOD, TINT, PASSABILITY, STRUCTURE, SCULPT_RAISE, SCULPT_LOWER,
 	ROAD_ADD, ROAD_MOVE, ROAD_LINK, ROAD_DELETE, INSPECT }
@@ -719,7 +739,9 @@ func _build_tiles_section() -> VBoxContainer:
 	var ground := get_tree().get_first_node_in_group("ground")
 	for cat: Array in _TILE_CATEGORIES:
 		var cat_name: String = str(cat[0])
-		var biomes: Array = cat[1] as Array
+		var biomes: Array = _palette_biomes(cat)
+		if biomes.is_empty():
+			continue
 		var is_expanded: bool = bool(_tile_categories_expanded.get(cat_name, false))
 		# Category header — clickable toggle. Arrow glyph reflects state.
 		var header := Button.new()
@@ -899,7 +921,7 @@ func _toggle_tile_category(cat_name: String) -> void:
 		var count: int = 0
 		for cat: Array in _TILE_CATEGORIES:
 			if str(cat[0]) == cat_name:
-				count = (cat[1] as Array).size()
+				count = _palette_biomes(cat).size()
 				break
 		(header as Button).text = "%s  %s  (%d)" % [
 			("▾" if is_expanded else "▸"), cat_name, count]

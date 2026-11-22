@@ -209,6 +209,8 @@ extends Node
 @warning_ignore("unused_signal") signal structure_destroyed(entity_id: String)
 ## 1.7.5: server-authoritative gate state (open/closed, lock + holding warband).
 @warning_ignore("unused_signal") signal gate_state_changed(entity_id: String, open: bool, locked: bool, lock_warband: String)
+## 1.7.6: whether a gate stands inside a town (never player-lockable → no Lock option).
+@warning_ignore("unused_signal") signal gate_town_changed(entity_id: String, town: bool)
 @warning_ignore("unused_signal") signal mob_dead_on_join(entity_id: String, respawn_in: float)
 @warning_ignore("unused_signal") signal mob_full(entity_id: String)
 @warning_ignore("unused_signal") signal mob_states_received(nodes: Array)
