@@ -1,4 +1,5 @@
 extends Area2D
+const Shadows = preload("res://scripts/render/Shadows.gd")
 
 const VillageArt = preload("res://scripts/art/VillagePrototypeArt.gd")
 
@@ -554,6 +555,8 @@ func _draw() -> void:
 ## Soft ground shadow under the feet (no bob). Shared by the procedural drawing
 ## and authored art (KarlArt) so every villager stays grounded the same way.
 func _draw_ground_shadow() -> void:
+	if not Shadows.ground_enabled():
+		return
 	draw_circle(Vector2(2.0, 15.0), 7.0, Color(0.02, 0.02, 0.04, 0.25))
 
 func _draw_combat_overlays() -> void:

@@ -498,7 +498,7 @@ void vertex() { terrain_world_position=(MODEL_MATRIX*vec4(VERTEX,1.0)).xyz;terra
 void fragment() {
  vec3 art;vec3 n;vec3 orm;float coverage;vec3 world_detail;
  surface(ground_metres,art,n,orm,coverage,world_detail);
- {float bridge_id=sample_id(floor(ground_metres));if(bridge_id==48.0||bridge_id==49.0)coverage=0.0;}  // bridge decks are separate meshes
+ {float bridge_id=sample_id(floor(ground_metres));if(bridge_id==48.0||bridge_id==49.0)discard;}  // the bridge kit deck replaces this ground face
  art=elevation_colour(art,ground_metres);
  vec2 tint=texture(sample_tints,(floor(ground_metres)+.5)/sample_map_size).rg;
  float warm=(tint.r-.5)*.4;float bright=(tint.g-.5)*.4;

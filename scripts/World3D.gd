@@ -1,4 +1,5 @@
 extends Node3D
+const Shadows = preload("res://scripts/render/Shadows.gd")
 
 ## v1.6 3D MIGRATION — P1 skeleton (networked). A PARALLEL 3D client that reuses
 ## every autoload (NetworkManager/GameManager/Events/…) + the server UNCHANGED.
@@ -716,6 +717,7 @@ func _build_environment() -> void:
 	var sun := DirectionalLight3D.new()
 	sun.rotation = Vector3(deg_to_rad(-52), deg_to_rad(-40), 0)
 	sun.light_energy = 1.15
+	sun.shadow_enabled = Shadows.sun_enabled()   # off until the day/night cycle
 	add_child(sun)
 	var we := WorldEnvironment.new()
 	var env := Environment.new()

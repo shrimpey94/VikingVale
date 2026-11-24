@@ -1,35 +1,56 @@
 extends Node2D
-## 2D connected bridges (1.7.6): draws one piece per bridge tile, chosen by
-## BridgeLayout from its neighbours, over the ground. Child of Ground (so it
-## draws right above the terrain, under everything else) and only used when the
-## authored terrain is on; --procedural-terrain keeps the old per-tile bridges.
+## 2D connected bridges (1.7.6): the approved bridge kit (v001), one assembly per
+## bridge tile chosen by BridgeLayout from its neighbours (see BridgeKit for the
+## rules). Child of Ground and only used when the authored terrain is on;
+## --procedural-terrain keeps the old per-tile bridges.
 ##
-## PLACEHOLDER PIECES: plain planks/flagstones, rails and posts drawn with
-## rectangles until the connected bridge kit is approved. Swap _draw_piece for
-## the kit's sprites; the layout (pieces, axis, rails, ends) stays the same.
+## Two layers so actors sort correctly:
+##   * deck bases + supports draw here, right above the terrain and under every
+##     actor (in the kit's reference order: screen y, then x, base before
+##     support), and their opaque backing hides the old bridge tile under them;
+##   * rail / corner overlays are Sprite2Ds in a y-sorted sibling layer of the
+##     world, each sorted at the rail's own ground line, so a rail on the near
+##     (south) side hides an actor standing behind it.
+## No shadows (owner rule: none until the day/night cycle).
 ##
 ## Visual only — tile ids, passability and collision are untouched. Rebuilds on
 ## Ground.tile_changed (admin paint / clear / bulk / login burst), so a bridge
 ## tile and its neighbours update live on every client.
 
 const BridgeLayout = preload("res://scripts/terrain/BridgeLayout.gd")
+const BridgeKit = preload("res://scripts/terrain/BridgeKit.gd")
 const TILE := 32.0
-const BAND := 4.0          # water left visible outside a rail (the old bridge look)
-const RAIL := 3.0
-const POST := 4.0
-const POST_STEP := 8.0     # world px between rail posts (world-aligned → continuous)
 
 var _ground: Node = null
 var _tiles: Dictionary = {}
 var _docks: Dictionary = {}
+var _draw_list: Array = []        # [{key, centre, layer}] bases + supports, in draw order
 var _dirty := false
+var _atlas: Texture2D = null
+var _rails: Node2D = null
+var _frame_tex: Dictionary = {}   # frame key -> AtlasTexture (shared by sprites)
 
 func setup(ground: Node) -> void:
 	_ground = ground
 	name = "ConnectedBridges"
+	_atlas = load(BridgeKit.ATLAS) as Texture2D
+	texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
+	_rails = Node2D.new()
+	_rails.name = "BridgeRails"
+	_rails.y_sort_enabled = true
+	_rails.texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
+	var world := ground.get_parent()
+	if world != null:
+		world.add_child.call_deferred(_rails)
+	else:
+		add_child(_rails)
 	if ground.has_signal("tile_changed"):
 		ground.connect("tile_changed", func(_tx: int, _ty: int, _id: int) -> void: _mark_dirty())
 	rebuild()
+
+func _exit_tree() -> void:
+	if _rails != null and is_instance_valid(_rails) and _rails.get_parent() != self:
+		_rails.queue_free()
 
 func _mark_dirty() -> void:
 	if _dirty:
@@ -46,15 +67,86 @@ func rebuild() -> void:
 		return
 	_tiles = BridgeLayout.classify(img.get_data(), img.get_width(), img.get_height())["tiles"]
 	_docks = BridgeLayout.docks(img.get_data(), img.get_width(), img.get_height())
+	_build_kit()
 	queue_redraw()
 
 ## Layout info for tests/editor: {idx: info} (see BridgeLayout.classify).
 func layout() -> Dictionary:
 	return _tiles
 
-func _draw() -> void:
+## Rail sprites currently placed (tests).
+func rail_sprites() -> Array:
+	return _rails.get_children() if _rails != null else []
+
+## Base/support frame keys in draw order (tests).
+func draw_keys() -> Array:
+	return _draw_list.map(func(d: Dictionary) -> String: return str(d["key"]))
+
+func _build_kit() -> void:
+	_draw_list.clear()
+	if _rails != null:
+		for c: Node in _rails.get_children():
+			_rails.remove_child(c)
+			c.queue_free()
 	for info: Dictionary in _tiles.values():
-		_draw_piece(info)
+		var centre := (Vector2(float(info["tx"]), float(info["ty"])) + Vector2(0.5, 0.5)) * TILE
+		var p := BridgeKit.parts(info)
+		var prefix := BridgeKit.style(info) + "_"
+		var suffix := "_%d" % BridgeKit.angle(info)
+		_draw_list.append({"key": prefix + str(p["base"]) + suffix, "centre": centre, "layer": 0})
+		if bool(p["support"]):
+			_draw_list.append({"key": prefix + "support" + suffix, "centre": centre, "layer": 1})
+		var sd := BridgeKit.sides(info)
+		for role: String in p["overlays"]:
+			var side := int(sd["left"] if role.ends_with("left") else sd["right"])
+			_add_rail(prefix + role + suffix, centre, side)
+	_draw_list.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		var pa: Vector2 = a["centre"]
+		var pb: Vector2 = b["centre"]
+		if pa.y != pb.y: return pa.y < pb.y
+		if pa.x != pb.x: return pa.x < pb.x
+		return int(a["layer"]) < int(b["layer"]))
+
+## One rail/corner overlay. The sprite sits at the rail's ground line (the
+## tile's edge on `side`) so y-sorting puts it in front of actors north of that
+## line; its texture offset keeps the art pivot on the tile centre.
+func _add_rail(key: String, centre: Vector2, side: int) -> void:
+	if _rails == null or not BridgeKit.FRAMES.has(key):
+		return
+	var sort := centre
+	match side:
+		BridgeLayout.N: sort.y -= TILE * 0.5
+		BridgeLayout.S: sort.y += TILE * 0.5
+	var f: Array = BridgeKit.FRAMES[key]
+	var s := Sprite2D.new()
+	s.texture = _frame(key)
+	s.centered = false
+	s.scale = Vector2.ONE * BridgeKit.SPRITE_SCALE
+	s.position = sort
+	s.offset = -Vector2(float(f[4]), float(f[5])) + (centre - sort) / BridgeKit.SPRITE_SCALE
+	s.name = key
+	_rails.add_child(s)
+
+func _frame(key: String) -> AtlasTexture:
+	if not _frame_tex.has(key):
+		var f: Array = BridgeKit.FRAMES[key]
+		var t := AtlasTexture.new()
+		t.atlas = _atlas
+		t.region = Rect2(float(f[0]), float(f[1]), float(f[2]), float(f[3]))
+		t.filter_clip = true
+		_frame_tex[key] = t
+	return _frame_tex[key]
+
+func _draw() -> void:
+	for d: Dictionary in _draw_list:
+		var key := str(d["key"])
+		if not BridgeKit.FRAMES.has(key):
+			continue
+		var f: Array = BridgeKit.FRAMES[key]
+		var src := Rect2(float(f[0]), float(f[1]), float(f[2]), float(f[3]))
+		var centre: Vector2 = d["centre"]
+		var dst := Rect2(centre - Vector2(float(f[4]), float(f[5])) * BridgeKit.SPRITE_SCALE, src.size * BridgeKit.SPRITE_SCALE)
+		draw_texture_rect_region(_atlas, dst, src)
 	for d: Dictionary in _docks.values():
 		_draw_dock_posts(d)
 
@@ -77,57 +169,3 @@ func _draw_dock_posts(d: Dictionary) -> void:
 	for pt: Vector2 in pts:
 		draw_circle(pt, 2.5, post)
 		draw_circle(pt + Vector2(-0.5, -0.5), 1.2, cap)
-
-func _draw_piece(info: Dictionary) -> void:
-	var o := Vector2(float(info["tx"]), float(info["ty"])) * TILE
-	var stone := int(info["id"]) == BridgeLayout.STONE
-	var deck := Color(0.58, 0.57, 0.53) if stone else Color(0.55, 0.38, 0.22)
-	var seam := deck.darkened(0.22)
-	var rail := Color(0.40, 0.40, 0.38) if stone else Color(0.33, 0.21, 0.11)
-	var landing_col := deck.lightened(0.12)
-	var rails := int(info["rails"])
-	var horizontal := int(info["axis"]) == BridgeLayout.AXIS_H
-	# Deck: the whole tile, minus the water band outside each outer rail.
-	var r := Rect2(o, Vector2(TILE, TILE))
-	if rails & BridgeLayout.N: r = r.grow_side(SIDE_TOP, -BAND)
-	if rails & BridgeLayout.S: r = r.grow_side(SIDE_BOTTOM, -BAND)
-	if rails & BridgeLayout.W: r = r.grow_side(SIDE_LEFT, -BAND)
-	if rails & BridgeLayout.E: r = r.grow_side(SIDE_RIGHT, -BAND)
-	draw_rect(r, deck)
-	# Seams across the run, world-aligned so neighbouring tiles line up.
-	var step := 8.0 if stone else 4.0
-	if horizontal:
-		var x := ceilf(r.position.x / step) * step
-		while x < r.end.x:
-			draw_line(Vector2(x, r.position.y), Vector2(x, r.end.y), seam, 1.0)
-			x += step
-	else:
-		var y := ceilf(r.position.y / step) * step
-		while y < r.end.y:
-			draw_line(Vector2(r.position.x, y), Vector2(r.end.x, y), seam, 1.0)
-			y += step
-	# Landings: a lighter threshold where the bridge meets land.
-	var landing := int(info["landing"])
-	if landing & BridgeLayout.N: draw_rect(Rect2(r.position, Vector2(r.size.x, 3.0)), landing_col)
-	if landing & BridgeLayout.S: draw_rect(Rect2(Vector2(r.position.x, r.end.y - 3.0), Vector2(r.size.x, 3.0)), landing_col)
-	if landing & BridgeLayout.W: draw_rect(Rect2(r.position, Vector2(3.0, r.size.y)), landing_col)
-	if landing & BridgeLayout.E: draw_rect(Rect2(Vector2(r.end.x - 3.0, r.position.y), Vector2(3.0, r.size.y)), landing_col)
-	# Rails + posts on the outer edges only.
-	if rails & BridgeLayout.N: _rail_h(r.position.x, r.end.x, r.position.y, rail)
-	if rails & BridgeLayout.S: _rail_h(r.position.x, r.end.x, r.end.y - RAIL, rail)
-	if rails & BridgeLayout.W: _rail_v(r.position.y, r.end.y, r.position.x, rail)
-	if rails & BridgeLayout.E: _rail_v(r.position.y, r.end.y, r.end.x - RAIL, rail)
-
-func _rail_h(x0: float, x1: float, y: float, col: Color) -> void:
-	draw_rect(Rect2(Vector2(x0, y), Vector2(x1 - x0, RAIL)), col)
-	var x := ceilf(x0 / POST_STEP) * POST_STEP
-	while x < x1 - 0.5:
-		draw_rect(Rect2(Vector2(x, y - 0.5), Vector2(POST * 0.5, RAIL + 1.0)), col.darkened(0.25))
-		x += POST_STEP
-
-func _rail_v(y0: float, y1: float, x: float, col: Color) -> void:
-	draw_rect(Rect2(Vector2(x, y0), Vector2(RAIL, y1 - y0)), col)
-	var y := ceilf(y0 / POST_STEP) * POST_STEP
-	while y < y1 - 0.5:
-		draw_rect(Rect2(Vector2(x - 0.5, y), Vector2(RAIL + 1.0, POST * 0.5)), col.darkened(0.25))
-		y += POST_STEP

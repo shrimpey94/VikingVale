@@ -658,7 +658,7 @@ void fragment() {
  vec3 art;vec3 sn;vec3 orm;float coverage;
  surface(world_pos/32.0,art,sn,orm,coverage);
  float bridge_id=sample_id(floor(world_pos/32.0));
- if(bridge_id==48.0||bridge_id==49.0){coverage=0.0;}  // placeholder bridges draw on top
+ if(bridge_id==48.0||bridge_id==49.0){coverage=0.0;}  // the bridge kit draws on top
  art=elevation_colour(art,world_pos/32.0);
  art*=.92+.08*max(dot(sn,normalize(vec3(-.45,-.6,1.0))),0.0);
  art*=vec3(1.0+warm*.30,1.0+warm*.05,1.0-warm*.30)*(1.0+bright);

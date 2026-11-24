@@ -1,5 +1,6 @@
 class_name Appearance
 extends RefCounted
+const Shadows = preload("res://scripts/render/Shadows.gd")
 
 ## Single source of truth for character appearance: palettes, the default/sanitize
 ## helpers, and one programmatic draw routine shared by Player and OtherPlayer.
@@ -180,8 +181,9 @@ static func draw_character(ci: CanvasItem, appr: Variant, p: Dictionary) -> void
 		var ph := float(Time.get_ticks_msec()) * 0.0015 + float(ci.get_instance_id() % 100) * 0.06
 		leg_a = sin(ph) * 0.03
 
-	# Ground shadow
-	ci.draw_circle(Vector2(0.0, 20.0), 11.0, Color(0.02, 0.02, 0.04, 0.28))
+	# Ground shadow (off until the day/night sun, see Shadows.gd)
+	if Shadows.ground_enabled():
+		ci.draw_circle(Vector2(0.0, 20.0), 11.0, Color(0.02, 0.02, 0.04, 0.28))
 
 	# Dark silhouette outline
 	var dark := Color(0.04, 0.04, 0.06, 0.80)

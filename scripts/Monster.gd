@@ -1,4 +1,5 @@
 extends Area2D
+const Shadows = preload("res://scripts/render/Shadows.gd")
 
 const LootDropScript := preload("res://scripts/LootDrop.gd")
 
@@ -710,7 +711,7 @@ func _draw() -> void:
 const _NO_SHADOW_TYPES := ["lava_crawler"]
 
 func _draw_shadow() -> void:
-	if monster_type in _NO_SHADOW_TYPES:
+	if not Shadows.ground_enabled() or monster_type in _NO_SHADOW_TYPES:
 		return
 	var fp := _shadow_footprint()
 	var r := _radius()

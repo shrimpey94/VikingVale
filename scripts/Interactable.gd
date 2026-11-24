@@ -1,4 +1,5 @@
 extends Area2D
+const Shadows = preload("res://scripts/render/Shadows.gd")
 
 @export var display_name: String          = "Resource Node"
 @export var required_skill: String        = "woodcutting"
@@ -1157,7 +1158,7 @@ func _draw_body() -> void:
 	# stands on its own without any post-pass help.
 	var depleted := _state == State.DEPLETED
 	if not depleted:
-		if _has_ground_stain():
+		if _has_ground_stain() and Shadows.ground_enabled():
 			_draw_organic_stain()
 		var glow := _magic_glow_color()
 		if glow.a > 0.0:
@@ -2348,9 +2349,10 @@ func _draw_berry_bush(ratio: float) -> void:
 	var leaf_lt := Color(0.40, 0.65, 0.25)
 	var red    := Color(0.85, 0.18, 0.22)
 	var purple := Color(0.55, 0.18, 0.65)
-	# Soft ground stain (wider than tall).
-	draw_circle(Vector2(0.0, 8.0), 13.0, Color(0.04, 0.04, 0.03, 0.30))
-	draw_circle(Vector2(-3.0, 10.0), 8.0, Color(0.04, 0.04, 0.03, 0.22))
+	# Soft ground stain (wider than tall); off with the other blob shadows.
+	if Shadows.ground_enabled():
+		draw_circle(Vector2(0.0, 8.0), 13.0, Color(0.04, 0.04, 0.03, 0.30))
+		draw_circle(Vector2(-3.0, 10.0), 8.0, Color(0.04, 0.04, 0.03, 0.22))
 	# Bush body — three large dark clusters forming a wide footprint.
 	draw_circle(Vector2(-8.0, -1.0), 9.5, leaf_dk)
 	draw_circle(Vector2( 8.0, -1.0), 9.5, leaf_dk)
@@ -2388,9 +2390,10 @@ func _draw_ancient_root(_ratio: float) -> void:
 	var root_lt := Color(0.45, 0.30, 0.14)
 	var rune := Color(1.00, 0.65, 0.18)
 	var pulse := 0.65 + sin(_time_elapsed * 2.4) * 0.30
-	# Dark ground stain with radiating root lines (six of them).
-	draw_circle(Vector2(0.0, 6.0), 16.0, Color(0.05, 0.03, 0.02, 0.45))
-	draw_circle(Vector2(2.0, 8.0), 11.0, Color(0.05, 0.03, 0.02, 0.40))
+	# Dark ground stain (off with the other blob shadows) + radiating root lines.
+	if Shadows.ground_enabled():
+		draw_circle(Vector2(0.0, 6.0), 16.0, Color(0.05, 0.03, 0.02, 0.45))
+		draw_circle(Vector2(2.0, 8.0), 11.0, Color(0.05, 0.03, 0.02, 0.40))
 	for ri in range(6):
 		var ra := float(ri) * TAU / 6.0
 		draw_line(

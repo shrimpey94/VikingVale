@@ -1,21 +1,20 @@
 extends Node3D
-## 3D connected bridges (1.7.6): one continuous raised deck per bridge (a
-## BridgeLayout group), with rails on the outer edges and pilings at intervals,
-## instead of per-tile ground sheets. Child of World3D; only used when the
-## authored terrain is on (--procedural-terrain keeps the old 3D bridges).
+## 3D connected bridges (1.7.6): the approved bridge kit (v001). Each bridge (a
+## BridgeLayout group) is one level deck: every tile gets the kit's base piece +
+## rail overlays (BridgeKit.parts), rotated as a whole about +Y for north-south
+## bridges, with the kit's deck top (local 0) on the bridge's deck height. Kit
+## materials reuse the authored timber/flagstone textures (no new textures).
+## Child of World3D; only used when the authored terrain is on
+## (--procedural-terrain keeps the old 3D bridges). No shadows.
 ##
-## PLACEHOLDER GEOMETRY: plain boxes in wood/stone colours until the connected
-## bridge kit is approved; the kit's pieces replace _add_* calls, the layout
-## stays. Visual only: tile ids, passability and collision are untouched. The
-## 3D view uses deck_height() so people walk ON the deck, not through it.
+## Visual only: tile ids, passability and collision are untouched. The 3D view
+## uses deck_height() so people walk ON the deck, not through it.
 
 const BridgeLayout = preload("res://scripts/terrain/BridgeLayout.gd")
-const DECK_T := 0.14          # deck thickness (m)
-const RAIL_H := 0.38
-const RAIL_W := 0.07
-const RAIL_IN := 0.06         # rail inset from the outer edge
-const PILE_W := 0.16
-const PILE_STEP := 3          # a piling pair every N tiles along the run (+ ends)
+const BridgeKit = preload("res://scripts/terrain/BridgeKit.gd")
+const TerrainArt = preload("res://scripts/terrain/TerrainArt.gd")
+const DECK_T := 0.14          # dock deck thickness (m)
+const PILE_W := 0.16          # dock post width
 const MIN_ABOVE_SEA := 0.55   # deck clearance over the water plane
 
 var sea_level := -1.0
@@ -23,6 +22,10 @@ var _deck_h: Dictionary = {}      # tile idx (300-wide) -> deck top height
 var _layout: Dictionary = {}
 var _meshes: Array = []
 var _mat: StandardMaterial3D
+## Kit piece scenes (style_role -> PackedScene) and materials (GLB material
+## name -> StandardMaterial3D), loaded once and shared by every bridge.
+static var _scenes: Dictionary = {}
+static var _kit_mats: Dictionary = {}
 
 func _init() -> void:
 	name = "ConnectedBridges3D"
@@ -43,6 +46,7 @@ func layout() -> Dictionary:
 func rebuild(ids: PackedByteArray, cols: int, rows: int, map_n: int, corner_h: Callable) -> void:
 	for m: Node in _meshes:
 		if is_instance_valid(m):
+			remove_child(m)   # detach now so the new BridgeN / Docks names don't collide
 			m.queue_free()
 	_meshes.clear()
 	_deck_h.clear()
@@ -54,19 +58,14 @@ func rebuild(ids: PackedByteArray, cols: int, rows: int, map_n: int, corner_h: C
 		if members.is_empty():
 			continue
 		var top := _deck_top(members, tiles, corner_h)
-		var st := SurfaceTool.new()
-		st.begin(Mesh.PRIMITIVE_TRIANGLES)
+		var group := Node3D.new()
+		group.name = "Bridge%d" % int(g["id"])
 		for c: int in members:
 			var info: Dictionary = tiles[c]
-			_add_tile(st, info, top)
+			_add_tile(group, info, top)
 			_deck_h[int(info["ty"]) * map_n + int(info["tx"])] = top
-		st.generate_normals()
-		var mi := MeshInstance3D.new()
-		mi.mesh = st.commit()
-		mi.material_override = _mat
-		mi.name = "Bridge%d" % int(g["id"])
-		add_child(mi)
-		_meshes.append(mi)
+		add_child(group)
+		_meshes.append(group)
 	_add_docks(ids, cols, rows, map_n, corner_h)
 
 ## Docks (id 94): a flat plank deck per dock (4-connected group), NO rails,
@@ -159,43 +158,73 @@ func _deck_top(members: Array, tiles: Dictionary, corner_h: Callable) -> float:
 				lowest = minf(lowest, 0.5 * (float(corner_h.call(a.x, a.y)) + float(corner_h.call(b.x, b.y))))
 	return maxf(floor_h, lowest if lowest != INF else floor_h) + 0.03
 
-func _add_tile(st: SurfaceTool, info: Dictionary, top: float) -> void:
-	var stone := int(info["id"]) == BridgeLayout.STONE
-	var deck := Color(0.58, 0.57, 0.53) if stone else Color(0.52, 0.36, 0.21)
-	var rail := Color(0.42, 0.42, 0.40) if stone else Color(0.32, 0.21, 0.11)
-	var pile := Color(0.36, 0.36, 0.35) if stone else Color(0.26, 0.18, 0.10)
-	var x0 := float(info["tx"])
-	var z0 := float(info["ty"])
-	var rails := int(info["rails"])
-	var ends := int(info["ends"])
-	# Deck slab: the whole tile, so joined tiles form one continuous surface.
-	_box(st, Vector3(x0, top - DECK_T, z0), Vector3(x0 + 1.0, top, z0 + 1.0), deck)
-	# Rails on outer edges only.
-	if rails & BridgeLayout.N: _box(st, Vector3(x0, top, z0 + RAIL_IN), Vector3(x0 + 1.0, top + RAIL_H, z0 + RAIL_IN + RAIL_W), rail)
-	if rails & BridgeLayout.S: _box(st, Vector3(x0, top, z0 + 1.0 - RAIL_IN - RAIL_W), Vector3(x0 + 1.0, top + RAIL_H, z0 + 1.0 - RAIL_IN), rail)
-	if rails & BridgeLayout.W: _box(st, Vector3(x0 + RAIL_IN, top, z0), Vector3(x0 + RAIL_IN + RAIL_W, top + RAIL_H, z0 + 1.0), rail)
-	if rails & BridgeLayout.E: _box(st, Vector3(x0 + 1.0 - RAIL_IN - RAIL_W, top, z0), Vector3(x0 + 1.0 - RAIL_IN, top + RAIL_H, z0 + 1.0), rail)
-	# Pilings: at the outer corners of every PILE_STEP-th tile along the run, and
-	# at each open end, down into the water.
-	if int(info["along"]) % PILE_STEP != 0 and ends == 0:
-		return
-	var bottom := sea_level - 0.9
-	for corner: Vector2 in _pile_corners(rails, ends, int(info["axis"])):
-		var cx := x0 + corner.x
-		var cz := z0 + corner.y
-		_box(st, Vector3(cx - PILE_W * 0.5, bottom, cz - PILE_W * 0.5), Vector3(cx + PILE_W * 0.5, top - DECK_T, cz + PILE_W * 0.5), pile)
+## One tile: its base piece, an optional support and its rail overlays, all at
+## the tile centre with the kit deck top on `top`; +90 degrees about +Y for a
+## north-south bridge (the kit's travel axis is +X).
+func _add_tile(group: Node3D, info: Dictionary, top: float) -> void:
+	var p := BridgeKit.parts(info)
+	var roles: Array = [p["base"]]
+	if bool(p["support"]):
+		roles.append("support")
+	roles.append_array(p["overlays"])
+	var pos := Vector3(float(info["tx"]) + 0.5, top, float(info["ty"]) + 0.5)
+	var yaw := deg_to_rad(float(BridgeKit.angle(info)))
+	for role: String in roles:
+		var node := _piece(BridgeKit.style(info) + "_" + str(role))
+		if node == null:
+			continue
+		node.position = pos
+		node.rotation.y = yaw
+		group.add_child(node)
 
-## Piling positions (tile-local, 0..1) on the outer rail sides.
-func _pile_corners(rails: int, _ends: int, axis: int) -> Array:
-	var out: Array = []
-	var m := 0.12
-	if axis == BridgeLayout.AXIS_H:
-		if rails & BridgeLayout.N: out.append(Vector2(m, m))
-		if rails & BridgeLayout.S: out.append(Vector2(m, 1.0 - m))
+func _piece(key: String) -> Node3D:
+	if not _scenes.has(key):
+		_scenes[key] = load(BridgeKit.DIR + key + ".glb") as PackedScene
+	var ps := _scenes[key] as PackedScene
+	if ps == null:
+		return null
+	var node := ps.instantiate() as Node3D
+	_bind(node)
+	return node
+
+## Swap each GLB surface material (by name) for the shared kit material.
+static func _bind(node: Node) -> void:
+	var mi := node as MeshInstance3D
+	if mi != null and mi.mesh != null:
+		for i in range(mi.mesh.get_surface_count()):
+			var old := mi.mesh.surface_get_material(i)
+			if old != null:
+				var m := _kit_material(old.resource_name)
+				if m != null:
+					mi.set_surface_override_material(i, m)
+	for c: Node in node.get_children():
+		_bind(c)
+
+## Kit material: the approved review binding (albedo/normal/roughness from the
+## authored timber or flagstone set, times the kit colour; iron is untextured).
+static func _kit_material(mat_name: String) -> StandardMaterial3D:
+	if _kit_mats.has(mat_name):
+		return _kit_mats[mat_name]
+	if not BridgeKit.MATERIALS.has(mat_name):
+		return null
+	var spec: Array = BridgeKit.MATERIALS[mat_name]
+	var m := StandardMaterial3D.new()
+	m.resource_name = mat_name
+	m.albedo_color = spec[1]
+	m.roughness = 0.84
+	var set_name := str(spec[0])
+	if set_name != "":
+		var maps := TerrainArt._texture_params()
+		m.albedo_texture = maps[set_name + "_albedo"]
+		m.normal_enabled = true
+		m.normal_texture = maps[set_name + "_normal"]
+		m.normal_scale = 0.45
+		m.roughness_texture = maps[set_name + "_orm"]
+		m.roughness_texture_channel = BaseMaterial3D.TEXTURE_CHANNEL_GREEN
 	else:
-		if rails & BridgeLayout.W: out.append(Vector2(m, m))
-		if rails & BridgeLayout.E: out.append(Vector2(1.0 - m, m))
-	return out
+		m.metallic = 0.45
+	_kit_mats[mat_name] = m
+	return m
 
 ## Axis-aligned box (6 faces) between corners a (min) and b (max).
 func _box(st: SurfaceTool, a: Vector3, b: Vector3, col: Color) -> void:
