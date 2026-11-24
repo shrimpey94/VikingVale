@@ -2561,8 +2561,8 @@ func _draw_building_shell(w: float, wall_h: float, roof_h: float,
 	var wall_top := -wall_h * 0.5
 	var ridge_y := wall_top - roof_h  # roof peak
 	var eave := hw + 6.0              # roof overhangs the wall
-	# Ground drop-shadow, skewed to the lower-right.
-	draw_colored_polygon(PackedVector2Array([
+	# Ground drop-shadow, skewed to the lower-right (off until the day/night sun).
+	if Shadows.ground_enabled(): draw_colored_polygon(PackedVector2Array([
 		Vector2(-hw + 8, base - 2), Vector2(hw + 6, base - 2),
 		Vector2(hw + 16, base + 9), Vector2(-hw + 16, base + 9)]),
 		Color(0, 0, 0, 0.22))
@@ -3081,8 +3081,8 @@ func _draw_wall_segment(c: Color, _cd: Color, fortified: bool) -> void:
 	var cap := top - 6.0
 	var stone := c
 	var stone_d := c.darkened(0.32)
-	# Ground shadow (lower-right).
-	draw_colored_polygon(PackedVector2Array([
+	# Ground shadow (lower-right; off until the day/night sun).
+	if Shadows.ground_enabled(): draw_colored_polygon(PackedVector2Array([
 		Vector2(-hw + 4, base), Vector2(hw + 4, base),
 		Vector2(hw + 9, base + 6), Vector2(-hw + 9, base + 6)]), Color(0, 0, 0, 0.20))
 	# Right side depth face.
@@ -3127,8 +3127,8 @@ func _draw_faux_tower(hw: float, stone: Color, big: bool) -> void:
 	var base := 14.0
 	var top := -18.0
 	var stone_d := stone.darkened(0.34)
-	# Ground shadow.
-	draw_colored_polygon(PackedVector2Array([
+	# Ground shadow (off until the day/night sun).
+	if Shadows.ground_enabled(): draw_colored_polygon(PackedVector2Array([
 		Vector2(-hw + 2, base), Vector2(hw + 2, base),
 		Vector2(hw + 6, base + 5), Vector2(-hw + 6, base + 5)]), Color(0, 0, 0, 0.20))
 	# Right side depth face.

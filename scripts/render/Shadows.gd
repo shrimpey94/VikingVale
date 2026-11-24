@@ -8,10 +8,10 @@ extends RefCounted
 ## takes `Shadows.sun_enabled()`. Not built yet: `sun_offset()` is where the
 ## day/night cycle will feed the shared direction.
 
-## 1.7.6 scope: the round blob shadows under players, NPCs, monsters/animals and
-## resource nodes (trees, rocks, herbs, crystals, fish spots, runestones). The
-## building/wall/tower drop shadows and the boat water shadow are not switched yet.
-const GROUND_SHADOWS := false   # 2D blob shadows under actors and resource nodes
+## Covers every 2D fake shadow: the blobs under players, NPCs, monsters/animals
+## and resource nodes, the building/wall/tower drop shadows and the boat's water
+## shadow.
+const GROUND_SHADOWS := false   # all 2D ground/drop/water shadows
 const SUN_SHADOWS := false      # 3D DirectionalLight3D shadows
 
 static func ground_enabled() -> bool:

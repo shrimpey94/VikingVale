@@ -1,4 +1,5 @@
 extends RefCounted
+const Shadows = preload("res://scripts/render/Shadows.gd")
 
 ## Boat definitions + programmatic boat sprite. Accessed via
 ## `const Boats = preload("res://scripts/Boat.gd")` (static methods) so it resolves
@@ -63,8 +64,8 @@ static func draw_boat(ci: CanvasItem, boat_id: String, facing: float) -> void:
 	var hl := 24.0 + tier * 3.5     # half length
 	var hd := 10.0 + tier * 1.2     # hull depth
 
-	# Water shadow
-	ci.draw_circle(Vector2(0, 16), hl * 0.9, Color(0.02, 0.06, 0.18, 0.30))
+	# Water shadow (off until the day/night sun, see Shadows.gd)
+	if Shadows.ground_enabled(): ci.draw_circle(Vector2(0, 16), hl * 0.9, Color(0.02, 0.06, 0.18, 0.30))
 
 	# Hull: a boat-shaped polygon (pointed bow on the facing side)
 	var bow := hl * fdir
