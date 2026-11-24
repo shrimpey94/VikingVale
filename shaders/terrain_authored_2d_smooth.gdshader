@@ -507,6 +507,12 @@ float vnoise(vec2 p) {
 	return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
+// Family 50 water (approved art, unchanged includes).
+#include "res://assets/authored/terrain/shallow_water/v001/shallow_water.gdshaderinc"
+#include "res://assets/authored/terrain/water50_batch01/v001/water_bottom.gdshaderinc"
+#include "res://assets/authored/terrain/water50_batch02/v001/ocean_surface.gdshaderinc"
+#include "res://assets/authored/terrain/water_caustics/v001/caustics.gdshaderinc"
+
 void vertex() {
 	world_pos = VERTEX;
 }
@@ -656,5 +662,10 @@ void fragment() {
  art=elevation_colour(art,world_pos/32.0);
  art*=.92+.08*max(dot(sn,normalize(vec3(-.45,-.6,1.0))),0.0);
  art*=vec3(1.0+warm*.30,1.0+warm*.05,1.0-warm*.30)*(1.0+bright);
- COLOR=vec4(mix(col.rgb,art,coverage),col.a);
+ vec4 ground=vec4(mix(col.rgb,art,coverage),col.a);
+ ground=shallow_surface(world_pos,ground);
+ ground=bottom_colour_2d(world_pos/32.0,ground);
+ ground=ocean_colour_2d(world_pos/32.0,ground);
+ ground.rgb+=vec3(0.67,0.91,1.0)*water_glints(world_pos/32.0);
+ COLOR=ground;
 }

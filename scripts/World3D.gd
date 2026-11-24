@@ -22,6 +22,7 @@ const TownArt = preload("res://scripts/art/TownArt.gd")
 const TerrainHeights = preload("res://scripts/terrain/TerrainHeights.gd")
 const TerrainArt = preload("res://scripts/terrain/TerrainArt.gd")
 const BridgeDeck3D = preload("res://scripts/terrain/BridgeDeck3D.gd")
+const WaterClock = preload("res://scripts/terrain/WaterClock.gd")
 const AdminEntityData = preload("res://scripts/admin/AdminEntityData.gd")
 # Real 2D LOGIC nodes (gather/combat/collision) live off-screen paired to each 3D
 # mesh visual; picking routes to them so the whole 2D interaction pipeline reuses.
@@ -741,6 +742,16 @@ func _build_water() -> void:
 	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	mat.roughness = 0.12
 	mi.material_override = mat
+	# 1.7.6 family 50: kelp/deep ocean + caustics on the same plane (same base
+	# colour/alpha/roughness). --procedural-terrain keeps the material above.
+	var lookup: Texture2D = null
+	if TerrainArt.enabled() and _ground_node != null:
+		lookup = _ground_node.get("_biome_lookup_tex") as Texture2D
+	if lookup != null:
+		mi.material_override = TerrainArt.water_material_3d(lookup)
+		var clock := WaterClock.new()
+		clock.set("target", mi)
+		mi.add_child(clock)
 	add_child(mi)
 	_water = mi
 

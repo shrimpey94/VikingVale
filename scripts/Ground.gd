@@ -84,6 +84,8 @@ var _atlas_ready: bool = false
 const TerrainHeights = preload("res://scripts/terrain/TerrainHeights.gd")
 const TerrainArt = preload("res://scripts/terrain/TerrainArt.gd")
 const BridgeLayer2D = preload("res://scripts/terrain/BridgeLayer2D.gd")
+const WaterClock = preload("res://scripts/terrain/WaterClock.gd")
+var _water_clock: Node = null
 var _authored_2d: bool = false
 var _th_tile_h: PackedFloat32Array = PackedFloat32Array()
 var _th_delta: Dictionary = {}
@@ -608,6 +610,10 @@ func _activate_terrain_shader() -> void:
 			_bridge_layer = BridgeLayer2D.new()
 			add_child(_bridge_layer)
 			_bridge_layer.call("setup", self)
+		if _water_clock == null:   # family 50 water loop (caustics + kelp)
+			_water_clock = WaterClock.new()
+			_water_clock.set("target", self)
+			add_child(_water_clock)
 	self.material = mat
 	_atlas_ready = true
 	set_process(false)

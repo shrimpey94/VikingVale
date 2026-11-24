@@ -490,6 +490,8 @@ void surface(vec2 p,out vec3 albedo,out vec3 normal,out vec3 orm,out float eligi
  normal=normalize(normal+vec3(0.0,0.0,.00001));
 }
 
+// Family 50 reef/tidepool seabed (approved art, unchanged include).
+#include "res://assets/authored/terrain/water50_batch01/v001/water_bottom.gdshaderinc"
 uniform sampler2D sample_tints : filter_nearest, repeat_disable;
 varying vec2 ground_metres;
 void vertex() { terrain_world_position=(MODEL_MATRIX*vec4(VERTEX,1.0)).xyz;terrain_world_normal=MODEL_NORMAL_MATRIX*NORMAL;ground_metres=terrain_world_position.xz; }
@@ -501,8 +503,9 @@ void fragment() {
  vec2 tint=texture(sample_tints,(floor(ground_metres)+.5)/sample_map_size).rg;
  float warm=(tint.r-.5)*.4;float bright=(tint.g-.5)*.4;
  art*=vec3(1.0+warm*.3,1.0+warm*.05,1.0-warm*.3)*(1.0+bright);
- ALBEDO=mix(COLOR.rgb,art,coverage);
- ROUGHNESS=mix(1.0,material_index(sample_id(floor(ground_metres)))==10?max(.94,orm.g):orm.g,coverage);AO=mix(1.0,orm.r,coverage);
+ vec3 bc;vec3 bn;vec3 bp;float bw;bottom_material(ground_metres,bc,bn,bp,bw);
+ ALBEDO=mix(mix(COLOR.rgb,art,coverage),bc,bw);
+ ROUGHNESS=mix(mix(1.0,material_index(sample_id(floor(ground_metres)))==10?max(.94,orm.g):orm.g,coverage),bp.r,bw);AO=mix(1.0,orm.r,coverage);
  world_detail-=normalize(terrain_world_normal)*dot(world_detail,normalize(terrain_world_normal));
- NORMAL=normalize(NORMAL+(VIEW_MATRIX*vec4(world_detail,0.0)).xyz*.22*coverage+(VIEW_MATRIX*vec4(n.x,0.0,n.y,0.0)).xyz*.22*coverage);
+ NORMAL=normalize(NORMAL+(VIEW_MATRIX*vec4(world_detail,0.0)).xyz*.22*coverage+(VIEW_MATRIX*vec4(n.x,0.0,n.y,0.0)).xyz*.22*coverage+(VIEW_MATRIX*vec4(bn.x,0.0,bn.y,0.0)).xyz*.3*bw);
 }

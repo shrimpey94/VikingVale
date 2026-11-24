@@ -17,6 +17,15 @@ The ONLY changes made to the art-side shaders:
      placeholder bridge pieces (scripts/terrain/Bridge*.gd).
   2. The smooth variant splices the art-side authored block + final mix onto the
      game's smooth base instead of the crisp base.
+  3. Family 50 water (approved: shallow water v001, caustics v001, reef/tidepool
+     water50_batch01 v001, kelp/deep water50_batch02 v001) is spliced in unchanged
+     via #include: in 2D after the authored mix, in the order shallow -> reef/
+     tidepool bottom -> kelp/deep ocean -> additive caustic glints; in 3D the
+     reef/tidepool bottom goes on the seabed (this chunk material) while kelp/deep
+     and caustics live on the water plane (shaders/water_plane_3d.gdshader, bound by
+     scripts/terrain/TerrainArt.gd). Every water effect defaults OFF in the
+     shader and is switched on only by TerrainArt, so --procedural-terrain never
+     loads or binds it.
 The script asserts the art-side crisp base is still byte-identical to the game's
 terrain_blend.gdshader, so a stale art-side copy can't silently revert game fixes.
 
@@ -40,6 +49,48 @@ NO_BRIDGE_2D = " if(bridge_id==48.0||bridge_id==49.0){coverage=0.0;}  // placeho
 SURFACE_3D = " surface(ground_metres,art,n,orm,coverage,world_detail);\n"
 NO_BRIDGE_3D = (SURFACE_3D + " {float bridge_id=sample_id(floor(ground_metres));"
                 "if(bridge_id==48.0||bridge_id==49.0)coverage=0.0;}  // bridge decks are separate meshes\n")
+
+
+_W = "res://assets/authored/terrain/"
+WATER_INCLUDES_2D = ("// Family 50 water (approved art, unchanged includes).\n"
+    f'#include "{_W}shallow_water/v001/shallow_water.gdshaderinc"\n'
+    f'#include "{_W}water50_batch01/v001/water_bottom.gdshaderinc"\n'
+    f'#include "{_W}water50_batch02/v001/ocean_surface.gdshaderinc"\n'
+    f'#include "{_W}water_caustics/v001/caustics.gdshaderinc"\n\n')
+VERTEX_2D = "\nvoid vertex() {\n"
+FINAL_2D = " COLOR=vec4(mix(col.rgb,art,coverage),col.a);\n"
+WATER_FINAL_2D = (" vec4 ground=vec4(mix(col.rgb,art,coverage),col.a);\n"
+    " ground=shallow_surface(world_pos,ground);\n"
+    " ground=bottom_colour_2d(world_pos/32.0,ground);\n"
+    " ground=ocean_colour_2d(world_pos/32.0,ground);\n"
+    " ground.rgb+=vec3(0.67,0.91,1.0)*water_glints(world_pos/32.0);\n"
+    " COLOR=ground;\n")
+TINTS_3D = "uniform sampler2D sample_tints : filter_nearest, repeat_disable;\n"
+WATER_INCLUDE_3D = ("// Family 50 reef/tidepool seabed (approved art, unchanged include).\n"
+    f'#include "{_W}water50_batch01/v001/water_bottom.gdshaderinc"\n')
+ALBEDO_3D = " ALBEDO=mix(COLOR.rgb,art,coverage);\n"
+WATER_ALBEDO_3D = (" vec3 bc;vec3 bn;vec3 bp;float bw;bottom_material(ground_metres,bc,bn,bp,bw);\n"
+    " ALBEDO=mix(mix(COLOR.rgb,art,coverage),bc,bw);\n")
+ROUGH_3D = ("ROUGHNESS=mix(1.0,material_index(sample_id(floor(ground_metres)))==10?max(.94,orm.g):orm.g,coverage);"
+            "AO=mix(1.0,orm.r,coverage);")
+WATER_ROUGH_3D = ("ROUGHNESS=mix(mix(1.0,material_index(sample_id(floor(ground_metres)))==10?max(.94,orm.g):orm.g,coverage),bp.r,bw);"
+                  "AO=mix(1.0,orm.r,coverage);")
+NORMAL_3D = "(VIEW_MATRIX*vec4(n.x,0.0,n.y,0.0)).xyz*.22*coverage);\n"
+WATER_NORMAL_3D = ("(VIEW_MATRIX*vec4(n.x,0.0,n.y,0.0)).xyz*.22*coverage"
+                   "+(VIEW_MATRIX*vec4(bn.x,0.0,bn.y,0.0)).xyz*.3*bw);\n")
+
+
+def splice(text: str, pairs: tuple, name: str) -> str:
+    for old, new in pairs:
+        if text.count(old) != 1:
+            sys.exit(f"{name}: expected exactly one {old.strip()[:40]!r}")
+        text = text.replace(old, new)
+    return text
+
+
+def add_water_2d(text: str, name: str) -> str:
+    return splice(text, ((VERTEX_2D, "\n" + WATER_INCLUDES_2D + VERTEX_2D.lstrip("\n")),
+                         (FINAL_2D, WATER_FINAL_2D)), name)
 
 
 def read(p: Path) -> str:
@@ -90,6 +141,10 @@ def build() -> dict:
         sys.exit("3D surface() call not found")
     out_3d = HEADER.format(src="surface49_batch02_3d.gdshader") + drop_bridges(
         a3d.replace(SURFACE_3D, NO_BRIDGE_3D), "3d")
+    out_crisp = add_water_2d(out_crisp, "2d water")
+    out_smooth = add_water_2d(out_smooth, "2d smooth water")
+    out_3d = splice(out_3d, ((TINTS_3D, WATER_INCLUDE_3D + TINTS_3D), (ALBEDO_3D, WATER_ALBEDO_3D),
+                             (ROUGH_3D, WATER_ROUGH_3D), (NORMAL_3D, WATER_NORMAL_3D)), "3d water")
     return {"terrain_authored_2d.gdshader": out_crisp,
             "terrain_authored_2d_smooth.gdshader": out_smooth,
             "terrain_authored_3d.gdshader": out_3d}
