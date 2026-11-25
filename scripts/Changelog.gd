@@ -10,6 +10,20 @@ class_name Changelog
 
 const ENTRIES: Array = [
 	{
+		"version": "1.7.6",
+		"date": "2026-11",
+		"title": "Land and Water",
+		"notes": [
+			"The ground has been repainted across the whole world, in both 2D and 3D view: grassland, forests, plains, snowfields, the ashlands and Helheim, rocky ground, mountains and cliffs, swamps and beaches, plus town streets, roads, timber floors and flagstones. High ground now looks high: hills and mountains change colour with height, the same way in both views.",
+			"New water: sandy shallows fade into deeper water along every coast and riverbank, and sunlight ripples across rivers, lakes and the sea.",
+			"Bridges are real bridges now. Neighbouring bridge tiles join into one bridge with railings along its sides and ramps where it meets land, in both 2D and 3D view, and in 3D you walk on the deck instead of through it.",
+			"The dark blobs under players, villagers, animals, trees, rocks and herbs are gone. They pointed every which way and looked wrong; proper shadows will come with the day and night cycle.",
+			"The painted shadows under buildings, walls, towers and boats are gone too, for the same reason.",
+			"Town gates no longer show a Lock option on right-click, since they can't be locked.",
+			"Fixed: in 3D view, ground changed by staff could show at the wrong height until you logged in again.",
+		],
+	},
+	{
 		"version": "1.7.5",
 		"date": "2026-11",
 		"title": "Gates and Great Halls",

@@ -17,7 +17,7 @@ const RS_GREEN  := Color(0.35, 0.88, 0.40)
 
 # Shown only if version.txt can't be read — keep it at the current release so a
 # missing file degrades gracefully instead of showing something ancient.
-const VERSION_FALLBACK := "v1.4.2"
+const VERSION_FALLBACK := "v1.7.6"
 ## Cloudflare Tunnel (TLS) — the primary route since 1.7.1.
 const DEFAULT_SERVER := "wss://play.busterrdust.com"
 ## The old Playit tunnel. Tried automatically, once, when the default can't be
